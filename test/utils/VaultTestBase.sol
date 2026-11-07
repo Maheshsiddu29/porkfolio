@@ -52,6 +52,7 @@ abstract contract VaultTestBase is Test {
     address internal curator = makeAddr("curator");
     address internal trader = makeAddr("trader");
     address internal attacker = makeAddr("attacker");
+    address internal lp0 = makeAddr("lp0"); // seed LP that initializes the vault in setUp
 
     uint256 internal nextNonce;
 
@@ -67,7 +68,7 @@ abstract contract VaultTestBase is Test {
         c0 = Currency.wrap(address(token0));
         c1 = Currency.wrap(address(token1));
 
-        vault = new SharedCommitmentVault(manager, owner);
+        vault = new SharedCommitmentVault(manager, owner, c0, c1);
         batchRouter = new BatchSwapRouter(manager, address(vault));
 
         hookA = HookA_DynamicFee(_deployHook("HookA_DynamicFee.sol:HookA_DynamicFee", 0xA11CE));
@@ -115,15 +116,36 @@ abstract contract VaultTestBase is Test {
         deployCodeTo(artifact, abi.encode(manager, vault, hookOwner), hook);
     }
 
+    /// @dev Seed LP initializes the vault: sqrt(amount0 * amount1) shares, MIN_SHARES of them locked.
     function _fundVault(uint256 amount0, uint256 amount1) internal {
-        token0.mint(owner, amount0);
-        token1.mint(owner, amount1);
-        vm.startPrank(owner);
-        token0.approve(address(vault), amount0);
-        token1.approve(address(vault), amount1);
-        vault.deposit(c0, amount0);
-        vault.deposit(c1, amount1);
+        _fundLp(lp0, amount0, amount1);
+        vm.prank(lp0);
+        vault.initialDeposit(amount0, amount1, lp0);
+    }
+
+    function _fundLp(address lp, uint256 amount0, uint256 amount1) internal {
+        token0.mint(lp, amount0);
+        token1.mint(lp, amount1);
+        vm.startPrank(lp);
+        token0.approve(address(vault), type(uint256).max);
+        token1.approve(address(vault), type(uint256).max);
         vm.stopPrank();
+    }
+
+    /// @dev Mint `shares` to `lp` at the current basket price, funding the LP with exactly what is needed.
+    function _depositShares(address lp, uint256 shares) internal returns (uint256 amount0, uint256 amount1) {
+        (amount0, amount1) = vault.previewDeposit(shares);
+        _fundLp(lp, amount0, amount1);
+        vm.prank(lp);
+        vault.deposit(shares, amount0, amount1, lp);
+    }
+
+    function _redeem(address lp, uint256 shares, bool queueRemainder)
+        internal
+        returns (uint256 instantShares, uint256 amount0, uint256 amount1, uint256 requestId)
+    {
+        vm.prank(lp);
+        return vault.redeem(shares, 0, 0, lp, queueRemainder);
     }
 
     function _request(PoolKey memory key, Currency out, uint128 maxOut)
@@ -200,6 +222,9 @@ abstract contract VaultTestBase is Test {
             Currency c = cs[i];
             assertEq(vault.backing(c), _claims(address(vault), c), "backing != vault ERC-6909 balance");
             assertLe(vault.reserved(c), vault.backing(c), "reserved > backing");
+            assertLe(
+                vault.reserved(c) + vault.claimableAssets(c), vault.backing(c), "commitments + claimables > backing"
+            );
             assertEq(_claims(address(hookA), c), 0, "hookA holds residual claims");
             assertEq(_claims(address(hookB), c), 0, "hookB holds residual claims");
             assertGe(

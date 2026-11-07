@@ -357,8 +357,9 @@ contract VaultSecurityTest is VaultTestBase {
         vm.expectRevert(ISharedCommitmentVault.Paused.selector);
         vault.allocate(req);
 
-        vm.prank(owner);
-        vault.withdraw(c0, 1 ether, owner);
+        // Phase 1A: the owner has no asset path; LP redemption stays available while paused.
+        (uint256 instant,,,) = _redeem(lp0, 1 ether, false);
+        assertEq(instant, 1 ether);
     }
 
     // ==================================================================
