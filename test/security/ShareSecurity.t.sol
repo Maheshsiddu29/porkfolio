@@ -117,6 +117,21 @@ contract ShareSecurityTest is VaultTestBase {
         assertLe(g1, p1);
     }
 
+    /// @notice Slither arbitrary-send-erc20 triage: the payer passed through unlockCallback is always the
+    ///         deposit's msg.sender. An LP's standing approval cannot be spent by anyone else.
+    function test_depositAlwaysPullsFromCaller() public {
+        _fundLp(lpA, 1_000_000 ether, 1_000_000 ether); // lpA has approved the vault for max
+        (uint256 p0, uint256 p1) = vault.previewDeposit(1000 ether);
+        vm.prank(attacker); // attacker holds no tokens and names lpA's funds nowhere
+        vm.expectRevert(bytes("TRANSFER_FROM_FAILED"));
+        vault.deposit(1000 ether, p0, p1, attacker);
+        assertEq(token0.balanceOf(lpA), 1_000_000 ether);
+
+        vm.prank(attacker);
+        vm.expectRevert(ISharedCommitmentVault.NotPoolManager.selector);
+        vault.unlockCallback(abi.encode(uint8(0), lpA, p0, p1));
+    }
+
     // ==================================================================
     // Double redemption / double claim / authority
     // ==================================================================
