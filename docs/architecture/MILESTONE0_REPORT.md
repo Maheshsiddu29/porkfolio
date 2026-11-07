@@ -78,7 +78,9 @@ The source was then restored byte-for-byte (`cmp` verified).
 
 Settings: via-IR, 44,444,444 optimizer runs, `--isolate` (each top-level call is its own transaction, so cold/warm
 access is realistic). The numbers below are **execution gas of the router call frame** from `-vvvv` traces. They
-exclude the 21,000 intrinsic cost and **before** SSTORE refunds. They include the test router's own overhead. Use
+exclude the 21,000 intrinsic cost and **before** SSTORE refunds. *(Erratum, Phase 1A: under `--isolate` the top-level router
+frame is reported **net** of SSTORE refunds; the inner `PoolManager.swap`, `beforeSwap` and `exchange` frames are
+gross. The figures are unchanged. See `PHASE1A_REPORT.md` §5.1.)* They include the test router's own overhead. Use
 them only to compare against each other.
 
 | Path (exact-in 1000e18, test router `PoolSwapTest`) | Router frame | `PoolManager.swap` | `beforeSwap` | `vault.exchange` |

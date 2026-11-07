@@ -47,3 +47,17 @@ forge test --match-contract GasBaseline -vv --isolate
 Layout: `src/` (vault, hooks), `test/{integration,security,unit,invariant,gas,utils}`, `docs/architecture/`
 (`ACCOUNTING_FLOW.md` — verified v4 behaviour, settlement mechanism, solvency model, blueprint corrections;
 `MILESTONE0_REPORT.md` — validation evidence). `script/`, `simulations/`, `sdk/`, `frontend/` are reserved placeholders.
+
+## Phase 1A — multi-LP shares and two-tier redemption
+
+```bash
+forge test -vvv                                                   # full suite (M0 regression + Phase 1A)
+forge test --match-test test_demo_threeLps -vv                    # executable multi-LP demonstration
+forge test --match-contract "LpGas|AuthorizationComparison|GasBaseline" --isolate -vvvv   # gas traces
+FOUNDRY_PROFILE=ci forge test --match-test testFuzz               # 10,000-run fuzzing
+```
+
+The vault is a two-asset, in-kind, proportional-share reserve. It is not an ERC-4626 vault.
+
+- **Model and derivations:** `docs/architecture/SHARE_ACCOUNTING.md`.
+- **Validation, gas, decisions and Phase 1B proposal:** `docs/architecture/PHASE1A_REPORT.md`.

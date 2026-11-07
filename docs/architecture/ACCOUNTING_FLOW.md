@@ -171,6 +171,17 @@ When the hook consumes the full specified amount (`amountToSwap == 0`):
 
 ## 6. Solvency and liability model
 
+> **Phase 1A update.** This section describes the Milestone-0 single-funder model.
+>
+> - **Superseded:** the multi-LP share model, two-tier redemption, and the protection of pending and claimable
+>   redemptions from new allocations. These are specified in `SHARE_ACCOUNTING.md`.
+> - **What changed:**
+>   - `F_a` is now `B_a − W_a − Q_a`.
+>   - The owner withdrawal path no longer exists.
+>   - `R_a` is an admission floor only (approved decision 5).
+>   - The open question at the end of §6.4 is resolved: queued liabilities are protected by `D_a` in the admission
+>     rule.
+
 ### 6.1 Terms (per currency `a`)
 
 | Symbol | Meaning | On-chain |
