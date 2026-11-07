@@ -1,0 +1,46 @@
+# Foundry configuration — UHI11 Shared Liquidity Backplane
+# Compiler settings mirror pinned v4-core (solc 0.8.26, cancun, via-IR) so that the
+# PoolManager under test is compiled the same way upstream compiles it.
+
+[profile.default]
+src = "src"
+test = "test"
+script = "script"
+out = "out"
+cache_path = "cache"
+libs = ["lib"]
+solc_version = "0.8.26"
+evm_version = "cancun"        # transient storage (EIP-1153) is required by PoolManager
+via_ir = true
+optimizer = true
+optimizer_runs = 44444444
+bytecode_hash = "none"
+ffi = false
+fs_permissions = []
+gas_reports = ["SharedCommitmentVault", "HookA_DynamicFee", "HookB_BoundedImpact", "PoolManager"]
+
+[profile.default.fuzz]
+runs = 1000
+seed = "0x5eed"               # deterministic fuzzing
+
+[profile.default.invariant]
+runs = 64
+depth = 64
+fail_on_revert = false
+
+[profile.ci.fuzz]
+runs = 10000
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = false
+int_types = "long"
+quote_style = "double"
+number_underscore = "thousands"
+sort_imports = false
+
+[lint]
+# Lint production code only. Test files intentionally use bounded casts and test-only routers.
+# The remaining src/ `block-timestamp` notes are intentional (expiry/deadline semantics) and stay visible.
+ignore = ["test/**/*.sol"]

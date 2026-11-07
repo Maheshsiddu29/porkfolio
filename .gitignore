@@ -1,1 +1,16 @@
 .DS_Store
+
+# Foundry build output
+out/
+cache/
+broadcast/
+
+# Secrets — never commit
+.env
+.env.*
+*.key
+keystore/
+
+# Python
+__pycache__/
+.venv/
