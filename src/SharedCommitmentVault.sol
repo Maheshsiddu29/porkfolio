@@ -533,11 +533,14 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
 
     /// @notice Shares whose basket free inventory can deliver right now (ignores queue priority).
     function deliverableShares() external view returns (uint256) {
-        return _deliverableShares(totalShares);
+        uint256 supply = totalShares;
+        return supply == 0 ? 0 : _deliverableShares(supply);
     }
 
     function previewDeposit(uint256 shares) external view returns (uint256 amount0, uint256 amount1) {
-        return _previewDeposit(shares, totalShares);
+        uint256 supply = totalShares;
+        if (supply == 0) revert NotInitialized();
+        return _previewDeposit(shares, supply);
     }
 
     /// @notice In-kind basket floor(shares * N_a / S) at the current state.

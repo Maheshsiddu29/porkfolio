@@ -10,6 +10,7 @@ import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
@@ -236,5 +237,56 @@ abstract contract VaultTestBase is Test {
         }
         assertFalse(manager.isOperator(address(vault), address(hookA)), "hookA is vault operator");
         assertFalse(manager.isOperator(address(vault), address(hookB)), "hookB is vault operator");
+    }
+
+    /// @dev Phase 1A-H Task D. Recompute every derived quantity from RAW sources (PoolManager ERC-6909 balances,
+    ///      request storage, allocation storage) and compare with the vault's accounting and views:
+    ///        B_a = PM balance,  W_a = Σ claimable,  P = Σ pending,  Q_a = Σ unreleased (maxOut - consumed),
+    ///        N_a = B_a - W_a,  F_a = N_a - Q_a,  D_a = ceil(P * N_a / S),  admissible = max(0, N_a - Q_a - R_a - D_a).
+    ///      Assumes no ERC-6909 donations to the vault in the calling test.
+    function _assertEquations() internal view {
+        _assertEquationsWith(0, 0);
+    }
+
+    /// @dev As `_assertEquations`, with B_a = PM balance - donated_a.
+    function _assertEquationsWith(uint256 don0, uint256 don1) internal view {
+        uint256[2] memory don = [don0, don1];
+        uint256 S = vault.totalShares();
+        uint256 P;
+        uint256[2] memory W;
+        for (uint256 id = 1; id < vault.nextRequestId(); ++id) {
+            ISharedCommitmentVault.WithdrawalRequest memory r = vault.getRequest(id);
+            P += r.sharesPending;
+            W[0] += r.claimable0;
+            W[1] += r.claimable1;
+        }
+        uint256[2] memory Q;
+        for (uint256 id = 1; id < vault.nextAllocationId(); ++id) {
+            ISharedCommitmentVault.Allocation memory a = vault.getAllocation(id);
+            if (a.released) continue;
+            Q[a.currencyOut == c0 ? 0 : 1] += a.maxOut - a.consumed;
+        }
+        assertEq(vault.pendingShares(), P, "P != sum pending");
+
+        Currency[2] memory cs = [c0, c1];
+        uint256 nSum;
+        for (uint256 i; i < 2; ++i) {
+            Currency c = cs[i];
+            uint256 B = _claims(address(vault), c) - don[i];
+            assertEq(vault.backing(c), B, "B != PM balance - donations");
+            assertEq(vault.claimableAssets(c), W[i], "W != sum claimable");
+            assertEq(vault.reserved(c), Q[i], "Q != sum allocations");
+            assertLe(Q[i] + W[i], B, "Q + W > B");
+            uint256 N = B - W[i];
+            nSum += N;
+            assertEq(vault.netAssets(c), N, "N != B - W");
+            assertEq(vault.freeInventory(c), N - Q[i], "F != N - Q");
+            uint256 D = P == 0 ? 0 : FullMath.mulDivRoundingUp(P, N, S);
+            assertEq(vault.pendingDemand(c), D, "D != ceil(P*N/S)");
+            assertLe(D, N, "D > N");
+            uint256 need = Q[i] + vault.bufferFloor(c) + D;
+            assertEq(vault.admissibleCapacity(c), N > need ? N - need : 0, "admission != N - Q - R - D");
+        }
+        if (S != 0) assertGt(nSum, 0, "shares outstanding with no assets");
     }
 }
