@@ -5,6 +5,8 @@ import {Test} from "forge-std/Test.sol";
 import {console2} from "forge-std/console2.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -16,16 +18,34 @@ import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
+import {AuthModeHook} from "../utils/AuthModeHook.sol";
+import {ClaimDonor} from "../utils/ClaimDonor.sol";
 
-/// @notice Random action sequences against the real PoolManager: curator allocations, swaps through both
-///         hooks, time, releases, multi-LP deposits, instant/queued redemptions, queue processing,
-///         cancellations and claims. Each action may revert; the invariants must hold after every step.
+/// @notice Random action sequences against the real PoolManager: curator allocations, swaps through three hooks
+///         (HookA, HookB, a 1:1 test hook that can drain an asset to zero), time, releases, ERC-6909 donations,
+///         multi-LP deposits, instant/queued redemptions (with inline queue processing), queue processing,
+///         cancellations and claims. Each action may revert; the invariants must hold after every step, and each
+///         successful action is checked against the ACTUAL balance movements it caused.
 contract VaultHandler is Test {
+    struct Snap {
+        uint256 b0;
+        uint256 b1;
+        uint256 pm0;
+        uint256 pm1;
+        uint256 w0;
+        uint256 w1;
+        uint256 n0;
+        uint256 n1;
+        uint256 s;
+    }
+
     SharedCommitmentVault internal vault;
     IPoolManager internal manager;
     PoolSwapTest internal router;
+    ClaimDonor internal donor;
     PoolKey internal keyA;
     PoolKey internal keyB;
+    PoolKey internal keyE;
     Currency internal c0;
     Currency internal c1;
     address internal curator;
@@ -38,12 +58,18 @@ contract VaultHandler is Test {
 
     /// Ghost ledger: backing implied by deposits - payouts + swap inputs received - swap outputs paid.
     mapping(Currency => uint256) public ghostBacking;
+    /// ERC-6909 claims sent straight to the vault (never part of B_a).
+    mapping(Currency => uint256) public ghostDonated;
     /// Per request: assets ever finalized and assets ever paid by claim (double-claim detection).
     mapping(uint256 => uint256[2]) internal ghostFinalized;
     mapping(uint256 => uint256[2]) internal ghostClaimed;
     mapping(uint256 => uint256) public ghostFinalizedShares;
-    /// Set if a non-trade operation ever lowered N_a / S for the remaining shares.
-    bool public perShareDecreased;
+
+    /// Violation flags, asserted by the invariant contract.
+    bool public perShareDecreased; // a non-trade op lowered N_a / S
+    bool public balanceMismatch; // an ERC-20 or ERC-6909 movement differed from the accounting change
+    bool public claimableTouched; // W_a changed in an action that is not finalization or claim
+    bool public admissionViolated; // an allocation larger than the admissible capacity succeeded
 
     uint256 public swapsOk;
     uint256 public allocationsOk;
@@ -54,13 +80,15 @@ contract VaultHandler is Test {
     uint256 public finalizedOk;
     uint256 public claimsOk;
     uint256 public cancelsOk;
+    uint256 public donationsOk;
+    uint256 public drainsOk;
+    uint256 public zeroAssetStatesSeen;
 
     constructor(
         SharedCommitmentVault vault_,
         IPoolManager manager_,
         PoolSwapTest router_,
-        PoolKey memory keyA_,
-        PoolKey memory keyB_,
+        PoolKey[3] memory keys,
         address owner_,
         address curator_,
         address trader_,
@@ -69,10 +97,12 @@ contract VaultHandler is Test {
         vault = vault_;
         manager = manager_;
         router = router_;
-        keyA = keyA_;
-        keyB = keyB_;
-        c0 = keyA_.currency0;
-        c1 = keyA_.currency1;
+        donor = new ClaimDonor(manager_);
+        keyA = keys[0];
+        keyB = keys[1];
+        keyE = keys[2];
+        c0 = keys[0].currency0;
+        c1 = keys[0].currency1;
         owner = owner_;
         curator = curator_;
         trader = trader_;
@@ -85,6 +115,8 @@ contract VaultHandler is Test {
             MockERC20(Currency.unwrap(c1)).approve(address(vault_), type(uint256).max);
             vm.stopPrank();
         }
+        MockERC20(Currency.unwrap(c0)).approve(address(donor), type(uint256).max);
+        MockERC20(Currency.unwrap(c1)).approve(address(donor), type(uint256).max);
     }
 
     function allocationCount() external view returns (uint256) {
@@ -104,41 +136,209 @@ contract VaultHandler is Test {
     }
 
     // ------------------------------------------------------------------
-    // Curator / trader actions
+    // Curator / trader / third-party actions
     // ------------------------------------------------------------------
 
     function allocate(uint256 seed, uint256 maxOut, uint256 lifetime) external {
         PoolKey memory key = seed % 2 == 0 ? keyA : keyB;
         Currency out = (seed >> 1) % 2 == 0 ? c0 : c1;
-        maxOut = bound(maxOut, 1 ether, 1_500_000 ether);
-        lifetime = bound(lifetime, 1, 30 days);
-        ISharedCommitmentVault.AllocationRequest memory req = ISharedCommitmentVault.AllocationRequest({
-            consumer: address(key.hooks),
-            key: key,
-            currencyOut: out,
-            // forge-lint: disable-next-line(unsafe-typecast)
-            maxOut: uint128(maxOut),
-            minInPerOutX96: uint160(FixedPoint96.Q96 * 98 / 100),
-            expiry: uint64(block.timestamp + lifetime),
-            nonce: nonce++,
-            deadline: uint64(block.timestamp)
-        });
-        vm.prank(curator);
-        try vault.allocate(req) returns (uint256 id) {
-            allocationIds.push(id);
-            allocationsOk++;
-        } catch {}
+        _allocate(key, out, bound(maxOut, 1 ether, 1_500_000 ether), bound(lifetime, 1, 30 days));
     }
 
     function swap(uint256 idSeed, uint256 amountIn) external {
         if (allocationIds.length == 0) return;
         uint256 id = allocationIds[idSeed % allocationIds.length];
         ISharedCommitmentVault.Allocation memory a = vault.getAllocation(id);
-        PoolKey memory key = a.consumer == address(keyA.hooks) ? keyA : keyB;
-        bool zeroForOne = a.currencyOut == c1;
-        amountIn = bound(amountIn, 1e9, 150_000 ether);
+        PoolKey memory key = a.consumer == address(keyA.hooks) ? keyA : a.consumer == address(keyB.hooks) ? keyB : keyE;
+        _swap(key, a.currencyOut == c1, bound(amountIn, 1e9, 150_000 ether), id);
+    }
 
+    /// @notice Sell every admissible unit of one asset through the 1:1 hook: reaches N_a == 0 whenever nothing
+    ///         is reserved, buffered or pending in that asset.
+    function drain(uint256 seed) external {
+        Currency out = seed % 2 == 0 ? c0 : c1;
+        uint256 q = vault.admissibleCapacity(out);
+        if (q == 0) return;
+        uint256 id = _allocate(keyE, out, q, 1 days);
+        if (id == 0) return;
+        if (_swap(keyE, out == c1, q, id)) drainsOk++;
+        if (vault.netAssets(c0) == 0 || vault.netAssets(c1) == 0) zeroAssetStatesSeen++;
+    }
+
+    function donate(bool zero, uint256 amount) external {
+        Currency c = zero ? c0 : c1;
+        amount = bound(amount, 1, 10_000 ether);
+        MockERC20(Currency.unwrap(c)).mint(address(this), amount);
+        Snap memory p = _take();
+        donor.donate(c, amount, address(vault));
+        ghostDonated[c] += amount;
+        donationsOk++;
+        // Backing must not move; the real balance moves by exactly the donation.
+        Snap memory q = _take();
+        if (q.b0 != p.b0 || q.b1 != p.b1) balanceMismatch = true;
+        if (q.pm0 - p.pm0 != (zero ? amount : 0) || q.pm1 - p.pm1 != (zero ? 0 : amount)) balanceMismatch = true;
+        _checkWUnchanged(p);
+    }
+
+    function warp(uint256 dt) external {
+        vm.warp(block.timestamp + bound(dt, 1, 3 days));
+    }
+
+    function release(uint256 idSeed, bool asOwner) external {
+        if (allocationIds.length == 0) return;
+        uint256 id = allocationIds[idSeed % allocationIds.length];
+        Snap memory p = _take();
+        vm.prank(asOwner ? owner : address(0xBEEF));
+        try vault.release(id) {
+            releasesOk++;
+            _checkBalancesFollowBacking(p);
+            _checkWUnchanged(p);
+            if (vault.backing(c0) != p.b0 || vault.backing(c1) != p.b1) balanceMismatch = true;
+        } catch {}
+    }
+
+    // ------------------------------------------------------------------
+    // LP actions
+    // ------------------------------------------------------------------
+
+    function deposit(uint256 lpSeed, uint256 shares) external {
+        address lp = lps[lpSeed % lps.length];
+        shares = bound(shares, 1, 200_000 ether);
+        (uint256 a0, uint256 a1) = vault.previewDeposit(shares);
+        MockERC20(Currency.unwrap(c0)).mint(lp, a0);
+        MockERC20(Currency.unwrap(c1)).mint(lp, a1);
+        uint256 e0 = _erc20(c0, lp);
+        uint256 e1 = _erc20(c1, lp);
+        Snap memory p = _take();
+        vm.prank(lp);
+        try vault.deposit(shares, a0, a1, lp) returns (uint256 x0, uint256 x1) {
+            ghostBacking[c0] += x0;
+            ghostBacking[c1] += x1;
+            depositsOk++;
+            if (e0 - _erc20(c0, lp) != x0 || e1 - _erc20(c1, lp) != x1) balanceMismatch = true;
+            if (vault.backing(c0) - p.b0 != x0 || vault.backing(c1) - p.b1 != x1) balanceMismatch = true;
+            _checkBalancesFollowBacking(p);
+            _checkWUnchanged(p);
+            _checkMonotonic(p);
+        } catch {}
+    }
+
+    function redeem(uint256 lpSeed, uint256 shares, bool queueRemainder) external {
+        address lp = lps[lpSeed % lps.length];
+        uint256 bal = vault.sharesOf(lp);
+        if (bal == 0) return;
+        // Mostly material redemptions (>= 10% of the LP's balance), occasionally dust-sized ones.
+        shares = shares % 8 == 0 ? bound(shares, 1, bal) : bound(shares, bal / 10 + 1, bal);
+        (uint256 head, uint256 end, uint256[] memory pend, uint256[2][] memory cl) = _queueSnapshot();
+        uint256 e0 = _erc20(c0, lp);
+        uint256 e1 = _erc20(c1, lp);
+        Snap memory p = _take();
+        vm.prank(lp);
+        try vault.redeem(shares, 0, 0, lp, queueRemainder) returns (
+            uint256 instant, uint256 a0, uint256 a1, uint256 requestId
+        ) {
+            ghostBacking[c0] -= a0;
+            ghostBacking[c1] -= a1;
+            if (instant != 0) instantOk++;
+            if (requestId != 0) queuedOk++;
+            // Inline queue processing may have finalized earlier requests: record them.
+            _recordFinalizations(head, end, pend, cl);
+            if (_erc20(c0, lp) - e0 != a0 || _erc20(c1, lp) - e1 != a1) balanceMismatch = true;
+            if (p.b0 - vault.backing(c0) != a0 || p.b1 - vault.backing(c1) != a1) balanceMismatch = true;
+            _checkBalancesFollowBacking(p);
+            _checkMonotonic(p);
+        } catch {}
+    }
+
+    function process(uint256 steps) external {
+        steps = bound(steps, 1, 5);
+        (uint256 head, uint256 end, uint256[] memory pend, uint256[2][] memory cl) = _queueSnapshot();
+        Snap memory p = _take();
+        uint256 done = vault.processQueue(steps);
+        _recordFinalizations(head, end, pend, cl);
+        if (done != 0) finalizedOk++;
+        if (vault.backing(c0) != p.b0 || vault.backing(c1) != p.b1) balanceMismatch = true;
+        _checkBalancesFollowBacking(p);
+        _checkMonotonic(p);
+    }
+
+    function cancel(uint256 idSeed) external {
+        uint256 end = vault.nextRequestId();
+        if (end == 1) return;
+        uint256 id = 1 + idSeed % (end - 1);
+        address lp = vault.getRequest(id).lp;
+        Snap memory p = _take();
+        vm.prank(lp);
+        try vault.cancelRequest(id) {
+            cancelsOk++;
+            if (vault.backing(c0) != p.b0 || vault.backing(c1) != p.b1) balanceMismatch = true;
+            _checkWUnchanged(p);
+            _checkMonotonic(p);
+        } catch {}
+    }
+
+    function claim(uint256 idSeed) external {
+        uint256 end = vault.nextRequestId();
+        if (end == 1) return;
+        uint256 id = 1 + idSeed % (end - 1);
+        ISharedCommitmentVault.WithdrawalRequest memory r = vault.getRequest(id);
+        uint256 e0 = _erc20(c0, r.receiver);
+        uint256 e1 = _erc20(c1, r.receiver);
+        Snap memory p = _take();
+        vm.prank(r.lp);
+        try vault.claim(id) returns (uint256 a0, uint256 a1) {
+            ghostClaimed[id][0] += a0;
+            ghostClaimed[id][1] += a1;
+            ghostBacking[c0] -= a0;
+            ghostBacking[c1] -= a1;
+            claimsOk++;
+            if (_erc20(c0, r.receiver) - e0 != a0 || _erc20(c1, r.receiver) - e1 != a1) balanceMismatch = true;
+            if (p.b0 - vault.backing(c0) != a0 || p.b1 - vault.backing(c1) != a1) balanceMismatch = true;
+            if (p.w0 - vault.claimableAssets(c0) != a0 || p.w1 - vault.claimableAssets(c1) != a1) {
+                balanceMismatch = true;
+            }
+            _checkBalancesFollowBacking(p);
+            _checkMonotonic(p);
+        } catch {}
+    }
+
+    // ------------------------------------------------------------------
+    // Internals
+    // ------------------------------------------------------------------
+
+    function _allocate(PoolKey memory key, Currency out, uint256 maxOut, uint256 lifetime)
+        internal
+        returns (uint256 id)
+    {
+        ISharedCommitmentVault.AllocationRequest memory req =
+            ISharedCommitmentVault.AllocationRequest({
+                consumer: address(key.hooks),
+                key: key,
+                currencyOut: out,
+                // forge-lint: disable-next-line(unsafe-typecast)
+                maxOut: uint128(maxOut),
+                minInPerOutX96: uint160(FixedPoint96.Q96 * 98 / 100),
+                expiry: uint64(block.timestamp + lifetime),
+                nonce: nonce++,
+                deadline: uint64(block.timestamp)
+            });
+        uint256 admissible = vault.admissibleCapacity(out);
+        Snap memory p = _take();
+        vm.prank(curator);
+        try vault.allocate(req) returns (uint256 newId) {
+            id = newId;
+            allocationIds.push(id);
+            allocationsOk++;
+            if (maxOut > admissible) admissionViolated = true;
+            if (vault.backing(c0) != p.b0 || vault.backing(c1) != p.b1) balanceMismatch = true;
+            _checkWUnchanged(p);
+        } catch {}
+    }
+
+    function _swap(PoolKey memory key, bool zeroForOne, uint256 amountIn, uint256 id) internal returns (bool ok) {
         MockERC20(Currency.unwrap(zeroForOne ? c0 : c1)).mint(trader, amountIn);
+        Currency cout = zeroForOne ? c1 : c0;
+        Snap memory p = _take();
         vm.prank(trader);
         try router.swap(
             key,
@@ -155,107 +355,13 @@ contract VaultHandler is Test {
             int128 outDelta = zeroForOne ? d.amount1() : d.amount0();
             ghostBacking[zeroForOne ? c0 : c1] += amountIn;
             // forge-lint: disable-next-line(unsafe-typecast)
-            ghostBacking[a.currencyOut] -= uint256(int256(outDelta));
+            ghostBacking[cout] -= uint256(int256(outDelta));
             swapsOk++;
+            ok = true;
+            _checkBalancesFollowBacking(p);
+            _checkWUnchanged(p);
         } catch {}
     }
-
-    function warp(uint256 dt) external {
-        vm.warp(block.timestamp + bound(dt, 1, 3 days));
-    }
-
-    function release(uint256 idSeed, bool asOwner) external {
-        if (allocationIds.length == 0) return;
-        uint256 id = allocationIds[idSeed % allocationIds.length];
-        vm.prank(asOwner ? owner : address(0xBEEF));
-        try vault.release(id) {
-            releasesOk++;
-        } catch {}
-    }
-
-    // ------------------------------------------------------------------
-    // LP actions (each checked for per-share monotonicity)
-    // ------------------------------------------------------------------
-
-    function deposit(uint256 lpSeed, uint256 shares) external {
-        address lp = lps[lpSeed % lps.length];
-        shares = bound(shares, 1, 200_000 ether);
-        (uint256 a0, uint256 a1) = vault.previewDeposit(shares);
-        MockERC20(Currency.unwrap(c0)).mint(lp, a0);
-        MockERC20(Currency.unwrap(c1)).mint(lp, a1);
-        (uint256 n0, uint256 n1, uint256 s) = _snapshot();
-        vm.prank(lp);
-        try vault.deposit(shares, a0, a1, lp) {
-            ghostBacking[c0] += a0;
-            ghostBacking[c1] += a1;
-            depositsOk++;
-            _checkMonotonic(n0, n1, s);
-        } catch {}
-    }
-
-    function redeem(uint256 lpSeed, uint256 shares, bool queueRemainder) external {
-        address lp = lps[lpSeed % lps.length];
-        uint256 bal = vault.sharesOf(lp);
-        if (bal == 0) return;
-        // Mostly material redemptions (>= 10% of the LP's balance), occasionally dust-sized ones.
-        shares = shares % 8 == 0 ? bound(shares, 1, bal) : bound(shares, bal / 10 + 1, bal);
-        (uint256 head, uint256 end, uint256[] memory pend, uint256[2][] memory cl) = _queueSnapshot();
-        (uint256 n0, uint256 n1, uint256 s) = _snapshot();
-        vm.prank(lp);
-        try vault.redeem(shares, 0, 0, lp, queueRemainder) returns (
-            uint256 instant, uint256 a0, uint256 a1, uint256 requestId
-        ) {
-            ghostBacking[c0] -= a0;
-            ghostBacking[c1] -= a1;
-            if (instant != 0) instantOk++;
-            if (requestId != 0) queuedOk++;
-            // redeem processes up to INLINE_QUEUE_STEPS of the queue first: record those finalizations too.
-            _recordFinalizations(head, end, pend, cl);
-            _checkMonotonic(n0, n1, s);
-        } catch {}
-    }
-
-    function process(uint256 steps) external {
-        steps = bound(steps, 1, 5);
-        (uint256 head, uint256 end, uint256[] memory pend, uint256[2][] memory cl) = _queueSnapshot();
-        (uint256 n0, uint256 n1, uint256 s) = _snapshot();
-        uint256 done = vault.processQueue(steps);
-        _recordFinalizations(head, end, pend, cl);
-        if (done != 0) finalizedOk++;
-        _checkMonotonic(n0, n1, s);
-    }
-
-    function cancel(uint256 idSeed) external {
-        uint256 end = vault.nextRequestId();
-        if (end == 1) return;
-        uint256 id = 1 + idSeed % (end - 1);
-        address lp = vault.getRequest(id).lp;
-        (uint256 n0, uint256 n1, uint256 s) = _snapshot();
-        vm.prank(lp);
-        try vault.cancelRequest(id) {
-            cancelsOk++;
-            _checkMonotonic(n0, n1, s);
-        } catch {}
-    }
-
-    function claim(uint256 idSeed) external {
-        uint256 end = vault.nextRequestId();
-        if (end == 1) return;
-        uint256 id = 1 + idSeed % (end - 1);
-        address lp = vault.getRequest(id).lp;
-        (uint256 n0, uint256 n1, uint256 s) = _snapshot();
-        vm.prank(lp);
-        try vault.claim(id) returns (uint256 a0, uint256 a1) {
-            ghostClaimed[id][0] += a0;
-            ghostClaimed[id][1] += a1;
-            ghostBacking[c0] -= a0;
-            ghostBacking[c1] -= a1;
-            claimsOk++;
-            _checkMonotonic(n0, n1, s);
-        } catch {}
-    }
-
-    // ------------------------------------------------------------------
 
     function _queueSnapshot()
         internal
@@ -273,9 +379,9 @@ contract VaultHandler is Test {
         }
     }
 
-    /// @dev Only called around redeem/processQueue, which never cancel: any pending decrease is a finalization.
     function _recordFinalizations(uint256 head, uint256 end, uint256[] memory pend, uint256[2][] memory cl) internal {
         for (uint256 id = head; id < end; ++id) {
+            // Only called around redeem/processQueue, which never cancel: any pending decrease is a finalization.
             ISharedCommitmentVault.WithdrawalRequest memory r = vault.getRequest(id);
             ghostFinalizedShares[id] += pend[id - head] - r.sharesPending;
             ghostFinalized[id][0] += r.claimable0 - cl[id - head][0];
@@ -283,22 +389,54 @@ contract VaultHandler is Test {
         }
     }
 
-    function _snapshot() internal view returns (uint256, uint256, uint256) {
-        return (vault.netAssets(c0), vault.netAssets(c1), vault.totalShares());
+    function _take() internal view returns (Snap memory p) {
+        p.b0 = vault.backing(c0);
+        p.b1 = vault.backing(c1);
+        p.pm0 = manager.balanceOf(address(vault), c0.toId());
+        p.pm1 = manager.balanceOf(address(vault), c1.toId());
+        p.w0 = vault.claimableAssets(c0);
+        p.w1 = vault.claimableAssets(c1);
+        p.n0 = vault.netAssets(c0);
+        p.n1 = vault.netAssets(c1);
+        p.s = vault.totalShares();
+    }
+
+    function _erc20(Currency c, address who) internal view returns (uint256) {
+        return MockERC20(Currency.unwrap(c)).balanceOf(who);
+    }
+
+    /// The vault's real ERC-6909 balance changes by exactly the change in B_a.
+    function _checkBalancesFollowBacking(Snap memory p) internal {
+        if (
+            int256(manager.balanceOf(address(vault), c0.toId())) - int256(p.pm0)
+                    != int256(vault.backing(c0)) - int256(p.b0)
+                || int256(manager.balanceOf(address(vault), c1.toId())) - int256(p.pm1)
+                    != int256(vault.backing(c1)) - int256(p.b1)
+        ) balanceMismatch = true;
+    }
+
+    function _checkWUnchanged(Snap memory p) internal {
+        if (vault.claimableAssets(c0) != p.w0 || vault.claimableAssets(c1) != p.w1) claimableTouched = true;
     }
 
     /// N'_a / S' >= N_a / S  <=>  N'_a * S >= N_a * S'  (products < 2^254, no overflow).
-    function _checkMonotonic(uint256 n0, uint256 n1, uint256 s) internal {
+    function _checkMonotonic(Snap memory p) internal {
         uint256 s2 = vault.totalShares();
-        if (vault.netAssets(c0) * s < n0 * s2 || vault.netAssets(c1) * s < n1 * s2) perShareDecreased = true;
+        if (vault.netAssets(c0) * p.s < p.n0 * s2 || vault.netAssets(c1) * p.s < p.n1 * s2) perShareDecreased = true;
     }
 }
 
 contract VaultInvariantsTest is VaultTestBase {
     VaultHandler internal handler;
+    PoolKey internal keyE;
 
     function setUp() public override {
         super.setUp();
+        address e = address(uint160(0x0E1 << 140) | Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG);
+        deployCodeTo("AuthModeHook.sol:AuthModeHook", abi.encode(manager, vault, AuthModeHook.Mode.Operator), e);
+        keyE = PoolKey(c0, c1, 3000, 60, IHooks(e));
+        manager.initialize(keyE, SQRT_PRICE_1_1);
+
         address[] memory lps = new address[](4);
         lps[0] = lp0;
         lps[1] = makeAddr("lpA");
@@ -308,14 +446,15 @@ contract VaultInvariantsTest is VaultTestBase {
         for (uint256 i = 1; i < 4; ++i) {
             _depositShares(lps[i], 300_000 ether);
         }
-        handler = new VaultHandler(vault, manager, swapRouter, keyA, keyB, owner, curator, trader, lps);
+        handler = new VaultHandler(vault, manager, swapRouter, [keyA, keyB, keyE], owner, curator, trader, lps);
         vm.startPrank(owner);
-        vault.setBufferFloor(c0, 50_000 ether);
+        vault.setConsumer(e, true);
+        vault.setBufferFloor(c0, 50_000 ether); // token0 can never be fully drained; token1 can
         vault.setCuratorCeiling(curator, c0, type(uint256).max);
         vault.setCuratorCeiling(curator, c1, type(uint256).max);
         vm.stopPrank();
 
-        bytes4[] memory selectors = new bytes4[](10);
+        bytes4[] memory selectors = new bytes4[](12);
         selectors[0] = VaultHandler.allocate.selector;
         selectors[1] = VaultHandler.swap.selector;
         selectors[2] = VaultHandler.warp.selector;
@@ -326,14 +465,16 @@ contract VaultInvariantsTest is VaultTestBase {
         selectors[7] = VaultHandler.cancel.selector;
         selectors[8] = VaultHandler.claim.selector;
         selectors[9] = VaultHandler.redeem.selector; // redemption weighted x2
+        selectors[10] = VaultHandler.donate.selector;
+        selectors[11] = VaultHandler.drain.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
 
-    /// B_a == vault's actual ERC-6909 balance (no phantom or missing claims; no donations in this campaign).
+    /// Real ERC-6909 balance == B_a + donations (no phantom or missing claims; donations never counted).
     function invariant_backingEqualsRealClaims() public view {
-        assertEq(vault.backing(c0), _claims(address(vault), c0));
-        assertEq(vault.backing(c1), _claims(address(vault), c1));
+        assertEq(vault.backing(c0) + handler.ghostDonated(c0), _claims(address(vault), c0));
+        assertEq(vault.backing(c1) + handler.ghostDonated(c1), _claims(address(vault), c1));
     }
 
     /// B_a matches an independent ledger of deposits, payouts, inputs received and outputs paid.
@@ -364,7 +505,7 @@ contract VaultInvariantsTest is VaultTestBase {
 
     /// Hooks never retain claims; no operator rights over the vault; PoolManager holds the ERC-20 behind them.
     function invariant_custodyAndSolvency() public view {
-        _assertAccountingConsistent();
+        _assertAccountingConsistentWith(handler.ghostDonated(c0), handler.ghostDonated(c1));
     }
 
     /// S == Σ sharesOf + P (nothing minted or burned out of thin air), P == Σ pending, W == Σ claimable.
@@ -425,15 +566,32 @@ contract VaultInvariantsTest is VaultTestBase {
         assertFalse(handler.perShareDecreased(), "per-share basket decreased");
     }
 
+    /// Task D: N = B - W, F = N - Q, D = ceil(P N / S), admission = N - Q - R - D, all recomputed from raw
+    /// PoolManager balances, request storage and allocation storage; and N0 + N1 > 0 while shares exist.
+    function invariant_equationsFromRawSources() public view {
+        _assertEquationsWith(handler.ghostDonated(c0), handler.ghostDonated(c1));
+    }
+
+    /// Task D: every successful action moved real ERC-20 / ERC-6909 balances by exactly its accounting change;
+    /// W_a changed only through finalization or claims; no allocation exceeded the admissible capacity.
+    function invariant_actualBalanceMovementsMatchAccounting() public view {
+        assertFalse(handler.balanceMismatch(), "balance movement != accounting change");
+        assertFalse(handler.claimableTouched(), "claimable assets changed outside finalize/claim");
+        assertFalse(handler.admissionViolated(), "allocation exceeded admissible capacity");
+    }
+
     /// @dev Logged (not asserted) per run; only the final run's log is printed by forge.
     function afterInvariant() public view {
         console2.log("alloc/swap/release:", handler.allocationsOk(), handler.swapsOk(), handler.releasesOk());
         console2.log("deposit/instant/queued:", handler.depositsOk(), handler.instantOk(), handler.queuedOk());
         console2.log("finalize/claim/cancel:", handler.finalizedOk(), handler.claimsOk(), handler.cancelsOk());
+        console2.log(
+            "donate/drain/zeroAssetStates:", handler.donationsOk(), handler.drainsOk(), handler.zeroAssetStatesSeen()
+        );
     }
 
-    /// @notice Guards against a vacuous campaign: a fixed handler sequence must actually exercise every LP
-    ///         path (deposit, instant, queued, finalize, claim, cancel) and both hooks through the real PoolManager.
+    /// @notice Guards against a vacuous campaign: a fixed handler sequence must actually exercise every path,
+    ///         including a zero-asset state and a donation, through the real PoolManager.
     function test_handler_makesProgress() public {
         handler.allocate(0, 10_000 ether, 1 days); // hookA, out token0
         handler.allocate(3, 10_000 ether, 1 days); // hookB, out token1
@@ -445,6 +603,8 @@ contract VaultInvariantsTest is VaultTestBase {
         assertEq(handler.depositsOk(), 1);
         handler.redeem(1, 7, false);
         assertEq(handler.instantOk(), 1);
+        handler.donate(true, 5 ether);
+        assertEq(handler.donationsOk(), 1);
 
         // Reserve most token1 so that large redemptions must queue.
         handler.allocate(3, 1_500_000 ether, 1 days);
@@ -463,6 +623,12 @@ contract VaultInvariantsTest is VaultTestBase {
         handler.claim(0); // request 1
         assertEq(handler.claimsOk(), 1);
 
+        handler.drain(1); // sell all admissible token1 at 1:1
+        assertEq(handler.drainsOk(), 1);
+        assertEq(vault.netAssets(c1), 0, "zero-asset state reached");
+        handler.deposit(3, 1000 ether); // deposits into a depleted asset
+        handler.redeem(3, 1000 ether, true);
+
         invariant_backingEqualsRealClaims();
         invariant_ghostLedgerConservation();
         invariant_reservedIsExactAndBacked();
@@ -471,5 +637,7 @@ contract VaultInvariantsTest is VaultTestBase {
         invariant_noDoubleClaim();
         invariant_fifoOrdering();
         invariant_noDilutionByLpOperations();
+        invariant_equationsFromRawSources();
+        invariant_actualBalanceMovementsMatchAccounting();
     }
 }

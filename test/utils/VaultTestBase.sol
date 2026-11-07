@@ -219,10 +219,16 @@ abstract contract VaultTestBase is Test {
 
     /// @dev Core conservation checks that must hold after every successful or reverted operation.
     function _assertAccountingConsistent() internal view {
+        _assertAccountingConsistentWith(0, 0);
+    }
+
+    /// @dev Same, allowing for `don0/don1` ERC-6909 claims donated straight to the vault (never counted in B_a).
+    function _assertAccountingConsistentWith(uint256 don0, uint256 don1) internal view {
         Currency[2] memory cs = [c0, c1];
+        uint256[2] memory don = [don0, don1];
         for (uint256 i; i < 2; ++i) {
             Currency c = cs[i];
-            assertEq(vault.backing(c), _claims(address(vault), c), "backing != vault ERC-6909 balance");
+            assertEq(vault.backing(c) + don[i], _claims(address(vault), c), "backing + donations != ERC-6909 balance");
             assertLe(vault.reserved(c), vault.backing(c), "reserved > backing");
             assertLe(
                 vault.reserved(c) + vault.claimableAssets(c), vault.backing(c), "commitments + claimables > backing"
