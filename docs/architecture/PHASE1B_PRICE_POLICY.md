@@ -76,6 +76,12 @@ in exact integer or rational arithmetic, not floating point.
 Reference market price of 3,000 USDC per WETH (an illustrative number, not data). The policy sets a 5% band around it.
 Values were computed exactly with integer arithmetic.
 
+> **Erratum (Phase 1B-1, `PHASE1B_DECISIONS.md` D14).** These two floors **cross**: their product is about 0.905 ×
+> `2^192`, which would allow a profitable round trip at the floors. The vault now rejects this configuration. A valid
+> pair is to sell WETH at ≥ 2,850 USDC and sell USDC at ≥ 1/2,850 WETH
+> (`F = 27799355268162925471418929942456140351`). The per-row arithmetic below is still correct for each direction
+> taken alone.
+
 | Vault sells | Human floor | `F` (X96) | Bits | Required input for … |
 |---|---|---|---|---|
 | WETH | ≥ 2,850 USDC per WETH | `225800263165653362142` | 68 | 1 WETH → 2,850.000001 USDC (`2850000001` raw); 1 wei → 1 raw USDC; 1 gwei → 3 raw USDC |
@@ -240,7 +246,10 @@ F_eff(asset0)·(1 − x_min)  ≤  P  ≤  2^192 / (F_eff(asset1)·(1 − x_min)
   below the market price; the floor bounds how far.
 - Outside the band, trades that would breach `F_eff` **revert** in `exchange` (`PriceBelowFloor`). They never execute
   at a worse price. Mis-configuring a hook is a liveness failure, not a loss.
-- **Example** (§2.3 floors, 3,000 USDC per WETH with USDC as `asset0`): the band is the WETH price range in which both
+- **D14 (Phase 1B-1).** Because the vault requires `F_eff(asset0)·F_eff(asset1) ≥ 2^192`, this band is non-empty only
+  if `F_eff(asset0)·F_eff(asset1)·(1 − x_min)^2 ≤ 2^192`: a hook trades both directions only when its spread straddles
+  the vault's pivot interval (`PHASE1B_DECISIONS.md` D14).
+- **Example** (§2.3 floors, which are crossed and now invalid; see the erratum there), 3,000 USDC per WETH with USDC as `asset0`): the band is the WETH price range in which both
   directions are executable, about 2,850 to 3,150 USDC per WETH, widened slightly by `x_min`. A hook owner who sets the
   reference to 1 USDC per WETH can no longer sell the vault's WETH. Before Phase 1B they could, down to the curator floor.
 
@@ -268,9 +277,9 @@ Additional rules:
   register a hook and raise curator ceilings with no delay. A code-level delay only helps if every risk-increasing
   action is delayed. For UHI11 the recommendation is operational: the owner should be a multisig or timelock at
   deployment, and the owner is documented as fully trusted.
-- **No band-consistency check.** The product `F(asset0) · F(asset1) ≤ 2^192` (a non-empty two-sided band) is **not**
-  enforced. Setting one side very high is a legitimate de-risking move. An empty band only stops trading; it cannot
-  lose value.
+- **Directional consistency is enforced (superseded by `PHASE1B_DECISIONS.md` D14).** Whenever both floors are
+  configured, `F(asset0) · F(asset1) ≥ 2^192` is required, so no round trip at the floors is profitable. Raising one
+  side, the guardian's de-risking move, always preserves this.
 
 ## 7. New bounds apply immediately to outstanding commitments (PROPOSAL)
 
@@ -453,6 +462,6 @@ event SellHaltedSet(Currency indexed currencyOut, bool halted, address indexed b
 | D3 | Code-level delay on loosening | **No** for UHI11. The owner is fully trusted and should be a multisig or timelock operationally. Revisit together with a delay on every risk-increasing action. |
 | D4 | Reject activation when `f_c < f_v` (in addition to `max` at exchange) | **Yes** |
 | D9 | Hooks pre-check the vault floor inside `beforeSwap` | **No.** The vault is authoritative. Expose `effectiveFloorX96` and `requiredInput` for off-chain `quote()` only, which avoids an extra external call per swap. |
-| D14 | Enforce two-sided band consistency `F(a0)·F(a1) ≤ 2^192` | **No** (§6) |
+| D14 | Directional consistency | **Superseded:** enforce `F(a0)·F(a1) ≥ 2^192` (`PHASE1B_DECISIONS.md`) |
 
 The decisions on authorization (D5–D8, D10–D13) are in `PHASE1B_CURATOR_AUTH.md` §13.
