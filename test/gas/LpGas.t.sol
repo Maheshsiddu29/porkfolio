@@ -95,4 +95,49 @@ contract LpGasTest is VaultTestBase {
         vault.cancelRequest(req);
         console2.log("cancelRequest gas:", g - gasleft());
     }
+
+    // ---- Phase 1A-H: paths affected by inline queue processing ----
+
+    /// A small request is pending but deliverable (inventory was released); lp0 then redeems.
+    /// Before 1A-H lp0 was queued; after, the head is finalized inline and lp0 exits instantly.
+    function test_gas_redeem_whileHeadDeliverable() public {
+        _depositShares(lpB, 10 ether);
+        uint256 id = _allocate(keyA, c1, uint128(vault.admissibleCapacity(c1)));
+        _redeem(lpB, 10 ether, true);
+        vm.prank(owner);
+        vault.release(id);
+        vm.prank(lp0);
+        uint256 g = gasleft();
+        vault.redeem(1000 ether, 0, 0, lp0, true);
+        console2.log("redeem while a deliverable request is pending gas:", g - gasleft());
+    }
+
+    /// The head cannot be served (token1 fully committed); lp0's redeem is queued either way.
+    function test_gas_redeem_whileHeadBlocked() public {
+        _depositShares(lpB, 10 ether);
+        _allocate(keyA, c1, uint128(vault.admissibleCapacity(c1)));
+        _redeem(lpB, 10 ether, true);
+        vm.prank(lp0);
+        uint256 g = gasleft();
+        vault.redeem(1000 ether, 0, 0, lp0, true);
+        console2.log("redeem while the head is blocked gas:", g - gasleft());
+    }
+
+    /// Ten canceled requests ahead of one live request: cost of skipping them.
+    function test_gas_processQueue_skipTenCanceled() public {
+        _depositShares(lpB, 11 ether);
+        uint256 id = _allocate(keyA, c1, uint128(vault.admissibleCapacity(c1)));
+        for (uint256 i; i < 11; ++i) {
+            _redeem(lpB, 1 ether, true);
+        }
+        for (uint256 r = 1; r <= 10; ++r) {
+            vm.prank(lpB);
+            vault.cancelRequest(r);
+        }
+        vm.prank(owner);
+        vault.release(id);
+        uint256 g = gasleft();
+        vault.processQueue(11);
+        console2.log("processQueue over 10 canceled + 1 live gas:", g - gasleft());
+    }
 }
