@@ -1,4 +1,6 @@
-# UHI11: Heterogeneous v4 Hooks / Conditional Commitment Engine
+# Porkfolio
+
+UHI11: heterogeneous Uniswap v4 hooks drawing on a shared commitment vault (conditional commitment engine).
 
 This is a **Claude Code kickoff pack**, not a deployed protocol or completed Solidity implementation. It contains the user-supplied research blueprint, agent guardrails, a risk register, a scoped proof-of-feasibility task, and a schedule aligned with UHI11. The architecture is a *hypothesis* until tested against a pinned version of real Uniswap v4 contracts.
 
@@ -75,3 +77,13 @@ Docs:
 
 - `docs/architecture/PHASE1AH_REPORT.md`: problems reproduced, fixes, validation, before/after gas.
 - `docs/architecture/SHARE_ACCOUNTING.md` §10: zero-asset and dust states.
+
+## Phase 1B-0 — price policy and curator authorization (specification only)
+
+No Solidity changed. Review these before any Phase 1B implementation:
+
+- `docs/architecture/PHASE1B_PRICE_POLICY.md`: minimum execution-price policy (units, 6/18-decimal normalization,
+  effective floor `max(vault floor, curator floor)`, who may tighten and loosen, static floor vs oracle).
+- `docs/architecture/PHASE1B_CURATOR_AUTH.md`: EIP-712 curator authorization, nonces, lifecycle and state machine,
+  roles.
+- `docs/architecture/PHASE1B_THREATS_AND_PLAN.md`: threat model, invariants, required tests, commit plan.
