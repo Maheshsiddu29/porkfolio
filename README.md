@@ -61,3 +61,17 @@ The vault is a two-asset, in-kind, proportional-share reserve. It is not an ERC-
 
 - **Model and derivations:** `docs/architecture/SHARE_ACCOUNTING.md`.
 - **Validation, gas, decisions and Phase 1B proposal:** `docs/architecture/PHASE1A_REPORT.md`.
+
+## Phase 1A-H — redemption security hardening
+
+Changes:
+
+- **Owner-only initialization.** Only the owner can seed the vault.
+- **Inline queue processing in `redeem`.** A redeem now serves already-deliverable queued requests before the instant
+  tier.
+- **Defined zero-asset and dust behaviour.**
+
+Docs:
+
+- `docs/architecture/PHASE1AH_REPORT.md`: problems reproduced, fixes, validation, before/after gas.
+- `docs/architecture/SHARE_ACCOUNTING.md` §10: zero-asset and dust states.

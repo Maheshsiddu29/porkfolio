@@ -40,11 +40,12 @@ Rounding in each formula below always favours the vault, meaning the remaining h
 
 | Operation | Effect |
 |---|---|
-| `initialDeposit(x0, x1)` (requires `S = 0`, `x0, x1 > 0`) | `S := ⌊√(x0·x1)⌋`; requires `S > M`; caller gets `S − M`; `M` locked; `B_a := x_a` |
+| `initialDeposit(x0, x1, receiver)` (**owner only**; requires `S = 0`, `x0, x1 > 0`) | `S := ⌊√(x0·x1)⌋`; requires `S > M`; owner pays; `receiver` gets `S − M`; `M` locked; `B_a := x_a`. Runs at most once, since `S ≥ M` afterwards. |
 | `deposit(s)` | pays `x_a = ⌈s · N_a / S⌉` of each asset, bounded by `maxAmount_a`; `S += s`; `B_a += x_a` |
 | entitlement of `s` shares | `e_a(s) = ⌊s · N_a / S⌋` |
 | deliverable shares | `s_max = min over a with N_a > 0 of ⌊F_a · S / N_a⌋` (∞ if both `N_a = 0`) |
-| `redeem(s)`, instant part | `s_inst = min(s, s_max)` **only if `P = 0`**, otherwise 0; pays `e_a(s_inst)`; `S −= s_inst`; `B_a −= e_a` |
+| `redeem(s)`, inline queue step | if `P > 0`: first run up to `INLINE_QUEUE_STEPS = 4` steps of `processQueue` (Phase 1A-H) |
+| `redeem(s)`, instant part | `s_inst = min(s, s_max)` **only if `P = 0` after the inline step**, otherwise 0; pays `e_a(s_inst)`; `S −= s_inst`; `B_a −= e_a` |
 | `redeem(s)`, queued part | `s − s_inst` moves from `s_i` into a new request; `P += s − s_inst` (S unchanged) |
 | `processQueue`, per head request `h` | `s = min(pending_h, s_max)`; `e = e_a(s)`; `pending_h −= s`; `claimable_h += e`; `W_a += e`; `P −= s`; `S −= s` |
 | `cancelRequest(r)` (request LP only) | `s_i += pending_r`; `P −= pending_r`; `pending_r := 0` |
@@ -143,6 +144,11 @@ Evidence:
 1. **Instant tier.** An LP may take its full in-kind entitlement for as many shares as free inventory can deliver in
    *both* assets (`s_max`). It may do this **only while no shares are pending.** Any remainder is either queued or
    the call reverts (`InsufficientLiquidity`), at the caller's choice.
+
+   **Phase 1A-H.** If shares are pending, `redeem` first runs up to `INLINE_QUEUE_STEPS = 4` FIFO steps of the queue,
+   then applies the rule above. This stops a request that is already deliverable but unprocessed from blocking every
+   instant exit. Earlier requests are still finalized first, in the same transaction, and the redeemer's extra gas is
+   bounded.
 2. **Queue.** Strict FIFO by request id. Partial fills happen only at the head. Escrowed shares keep their full economic
    exposure (fees, trades) until the moment they are finalized. At that point they are converted at
    `⌊s · N_a / S⌋`, which is the same rate every other share would get in that block.
@@ -163,7 +169,11 @@ limits *how many* shares can leave now.
 
 ### 6.2 Fairness (VERIFIED)
 
-- **No queue jumping.** While `P > 0`, a new redeemer is queued in full. `test_fifoFairness_competingRequests` shows
+- **No stale-queue denial of service** (Phase 1A-H). A pending request that free inventory could already serve is served
+  by the next redeemer's inline step, and that redeemer then exits instantly
+  (`test_DOS_staleDeliverableEntry_doesNotBlockInstantExit`, `test_interleaved_depositSwapCancelEmergencyRelease`).
+  Both failed before the fix; mutation H1 is caught.
+- **No queue jumping.** While `P > 0` after the inline step, a new redeemer is queued in full. `test_fifoFairness_competingRequests` shows
   this, and mutation M1 is caught.
 - **FIFO ordering.** `invariant_fifoOrdering` checks that no later request has any finalized shares while an earlier
   one is pending. Mutation M6 is caught.
@@ -254,23 +264,69 @@ asserts `P = 0`.
 ## 9. Unresolved cases and limitations
 
 1. **Liveness needs callers.** It depends on `release` and `processQueue` being called; there is no keeper incentive.
-2. **Queue spam.** Requests are cheap. A spammer can force processors to spend gas: one `processQueue(10)` call over
-   ten spam requests measured 324,794 gas in-test, about 32k per request (`test_queueSpam_boundedProcessing`, warm
-   in-test measurement, not isolated). Spam cannot reorder or block the queue. Possible fixes are a minimum request size or a per-request deposit (Phase 1B
-   decision).
+2. **Queue spam, and the cost of processing it.**
+   - **Creating a request** costs about 145k gas for the vault frame.
+   - **Finalizing a live request** costs about 120k isolated, or about 32k per request warm in a batch.
+   - **Skipping a canceled request** is cheaper still: `processQueue` over 10 canceled + 1 live entry measured
+     144,856 gas, against 120,726 for one live entry alone.
+   - So a spammer pays more than processors do. Spam cannot reorder or block the queue.
+   - **Phase 1A-H** adds that a redeemer may pay for up to 4 inline steps; the inline attempt when the head is blocked
+     measured +10,737 gas.
+   - No minimum size or bond was added (approved decision 3). A size floor in share units would have to be
+     re-denominated whenever the per-share basket changes, and it would block legitimate small holders.
 3. **Curator griefing.** A large LP can queue, which blocks new commitments through `D_a`, and then cancel. The effect
    is bounded by that LP's share. A cancel cooldown is a possible fix (decision).
 4. **Race for free inventory.** While `P = 0`, instant redemptions are first-come-first-served by transaction order and
    are exposed to MEV ordering.
-5. **Initialization ratio.** Initialization is permissionless, and the first depositor sets the basket ratio. A
-   front-run initialization cannot steal from later depositors (§3), but it can set an inconvenient ratio. Option:
-   owner-only initialization.
+5. **Initialization (resolved in Phase 1A-H).** `initialDeposit` is owner-only, and the asset pair is fixed in the
+   constructor. Before initialization, nothing an attacker can do changes the owner's outcome: deposit, redeem,
+   processing and allocation all revert, and donations are ignored (`Initialization.t.sol`).
 6. **Shares are not transferable** (no ERC-20 or ERC-6909 share token in Phase 1A).
-7. **Edge cases not exercised by tests:**
-   - The both-assets-zero `DustRedemption` branch.
-   - The `NoAssets` state (`S > 0`, `N_0 = N_1 = 0`). It needs every asset drained while `S ≥ M`; no test reaches it.
+7. **Zero-asset edge cases** (Phase 1A-H). See §10.
+   - The both-assets-zero `DustRedemption` branch is now exercised.
+   - The `NoAssets` state (`S > 0`, `N_0 = N_1 = 0`) is **unreachable** (§10.1). Its revert is defensive only and not
+     exercised by tests.
+   - **Head-of-line** under strict FIFO is a documented tradeoff, not eliminated: a large head request absorbs every
+     unit of freed inventory before anyone behind it (`test_INTENDED_headOfLine_largePartialHead`).
 8. **Caps.** `B_a` and `S` are capped at `int128.max`. Swaps that would push `B_in` beyond that revert.
 9. **Unanalysed token behaviour.** Fee-on-transfer tokens fail closed at deposit (`SettlementMismatch`), but no test
    uses such a token. Rebasing and ERC-777 tokens are unanalysed.
 10. **Formal methods.** Nothing in this document is formally verified. The invariant campaign is bounded (§8 of
     `PHASE1A_REPORT.md`).
+
+## 10. Zero-asset, depleted and dust states (Phase 1A-H)
+
+### 10.1 Reachability: `N_0 + N_1 > 0` while `S > 0` (ARGUED; checked by `invariant_equationsFromRawSources`)
+
+After initialization both `N_a > 0`. Go through each operation:
+
+- **Trade.** It lowers only `N_out`. It raises `N_in` by `amountIn ≥ 1`, because `exchange` rejects a zero input.
+- **Redemption or finalization.** For any `N_a > 0`, `e_a = ⌊s N_a / S⌋ < N_a`, because `s ≤ S − M < S` (the locked
+  `M` can never be redeemed). So no positive balance reaches zero this way.
+- **Claim.** Leaves `N_a` unchanged.
+- **Deposit.** Only raises `N_a`.
+
+So at most one asset can be at zero at a time, and only because of a trade. Both at zero cannot happen.
+
+### 10.2 Defined behaviour
+
+| State | Behaviour | Evidence |
+|---|---|---|
+| `N_a = 0` for one asset | That asset is skipped in `s_max`. Its `D_a = 0` and admission `= 0` (no commitment of an absent asset). Deposits pay 0 of it and `⌈s N_b / S⌉ ≥ 1` of the other, so shares are always backed. Redemptions and claims pay a zero leg, and the zero transfer is skipped. A later trade brings the asset back. | `test_asset1AtZero_definedBehaviour`, `test_asset0AtZero_mirror` |
+| Both `N_a = 0` | Unreachable (§10.1). Defensive behaviour if it were reached: `deposit` → `NoAssets`; `redeem` → `DustRedemption`; queued requests finalize at zero. | proof + invariant |
+| Redemption rounds to 0 in both assets | Fully instant → `DustRedemption` (shares are not burned for nothing). Queued remainder → `DustRedemption`. A partial instant slice that is dust → the whole request is queued. | `test_bothAssetsZero_unreachable_nearTotalDepletionIsEconomic` |
+| Head slice rounds to 0 but the request has more pending | Not finalized; the head waits for inventory, and no shares are burned. | `test_dustPartialSlice_isNotFinalized` (mutation H5) |
+| A whole pending request rounds to 0 | Finalized at zero, status `Completed`. Not trapped, and it does not block the queue. | `test_dustPendingRequest_finalizesAtZero_notTrapped` |
+| Near-total depletion (e.g. `N = (0, 1 wei)`) | Accounting identities still hold, and shares are worth under 1 wei. New deposits are fully backed, but the `int128` share cap limits new value to a tiny amount: the vault is terminal in practice. | same test |
+| Emptied vault (only `M` remain) | Normal re-entry at a basket of about `N/M`; round trip is exact. | `test_emptiedVault_reentry` |
+| Uninitialized vault | `previewDeposit` → `NotInitialized` (was `NoAssets`); `deliverableShares` = 0 (was `type(uint256).max`); `previewRedeem` = (0, 0); every other view = 0; `processQueue` is a no-op. | `test_uninitializedVault_viewsAndCallsNeverDivideByZero` |
+
+### 10.3 Economic loss vs accounting error
+
+The depletion tests use a **registered** hook and a curator floor of 0, so these are *authorised* trades. LPs lose value,
+and pending requests share the loss pro rata: `D_a` protects their *capacity*, not their *value*
+(`test_pendingRequest_capacityProtected_valueSharesLoss`).
+
+After every step, `_assertEquations` re-derives `N`, `F`, `D` and admission from raw PoolManager balances and storage,
+and they match. The losses are economic, not accounting errors. The control that bounds them is the curator floor; the
+Phase 1B minimum execution-price policy (approved decision 7) is the planned independent bound.
