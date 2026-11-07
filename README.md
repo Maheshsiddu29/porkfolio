@@ -33,3 +33,17 @@ This is a **Claude Code kickoff pack**, not a deployed protocol or completed Sol
 - UHI11 schedule: https://atrium.academy/sponsors
 
 Claude must pin upstream dependency commits and record them. Never assume moving `main` is reproducible.
+
+## Milestone 0 — build and test
+
+```bash
+git submodule update --init --recursive   # pinned v4-periphery (+ transitive v4-core) and forge-std
+forge build
+forge test -vvv                           # real PoolManager integration, adversarial, invariant, gas
+forge fmt --check
+forge test --match-contract GasBaseline -vv --isolate
+```
+
+Layout: `src/` (vault, hooks), `test/{integration,security,unit,invariant,gas,utils}`, `docs/architecture/`
+(`ACCOUNTING_FLOW.md` — verified v4 behaviour, settlement mechanism, solvency model, blueprint corrections;
+`MILESTONE0_REPORT.md` — validation evidence). `script/`, `simulations/`, `sdk/`, `frontend/` are reserved placeholders.
