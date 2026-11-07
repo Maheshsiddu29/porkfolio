@@ -45,6 +45,11 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
     /// @notice Shares permanently locked at initialization (held by address(0)); inflation-attack defence.
     uint256 public constant MIN_SHARES = 1000;
 
+    /// @notice Queue steps a redemption performs before deciding on the instant tier while requests are pending.
+    ///         Serves already-deliverable requests first (FIFO) so that a stale queue does not block instant
+    ///         exits. Bounded so a redeemer's gas cost stays bounded however long the queue is.
+    uint256 public constant INLINE_QUEUE_STEPS = 4;
+
     IPoolManager public immutable poolManager;
     Currency public immutable asset0;
     Currency public immutable asset1;
@@ -206,8 +211,9 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
     // ==================================================================
 
     /// @notice Redeem `shares` for their in-kind basket floor(shares * N_a / S).
-    ///         Instant tier: only when the queue holds no pending shares, and only up to what free inventory
-    ///         F_a can deliver for BOTH assets. The remainder is escrowed in the FIFO queue if
+    ///         If requests are pending, up to INLINE_QUEUE_STEPS of the FIFO queue are processed first.
+    ///         Instant tier: only when (after that) the queue holds no pending shares, and only up to what free
+    ///         inventory F_a can deliver for BOTH assets. The remainder is escrowed in the FIFO queue if
     ///         `queueRemainder`, otherwise the call reverts. `minAmount0/1` bound the instantly delivered amounts.
     function redeem(uint256 shares, uint256 minAmount0, uint256 minAmount1, address receiver, bool queueRemainder)
         external
@@ -217,9 +223,12 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
         if (receiver == address(0)) revert ZeroAddress();
         uint256 balance = sharesOf[msg.sender];
         if (shares > balance) revert InsufficientShares(shares, balance);
-        uint256 supply = totalShares;
 
-        // Queued LPs have priority over newly freed inventory: no instant exits while anyone is waiting.
+        // Queued LPs have priority over newly freed inventory. Serve them first (bounded), then allow an instant
+        // exit only if nobody is still waiting. Without this step a deliverable-but-unprocessed request would
+        // block every instant exit until someone called processQueue separately.
+        if (pendingShares != 0) _processQueue(INLINE_QUEUE_STEPS);
+        uint256 supply = totalShares;
         if (pendingShares == 0) {
             uint256 deliverable = _deliverableShares(supply);
             instantShares = shares < deliverable ? shares : deliverable;
@@ -275,6 +284,10 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
     /// @param maxSteps bound on loop iterations (gas control).
     /// @return sharesFinalized total shares converted to claimable assets in this call.
     function processQueue(uint256 maxSteps) external returns (uint256 sharesFinalized) {
+        return _processQueue(maxSteps);
+    }
+
+    function _processQueue(uint256 maxSteps) internal returns (uint256 sharesFinalized) {
         uint256 id = queueHead;
         uint256 end = nextRequestId;
         for (uint256 step; step < maxSteps && id < end; ++step) {

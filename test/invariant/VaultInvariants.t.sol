@@ -199,6 +199,7 @@ contract VaultHandler is Test {
         if (bal == 0) return;
         // Mostly material redemptions (>= 10% of the LP's balance), occasionally dust-sized ones.
         shares = shares % 8 == 0 ? bound(shares, 1, bal) : bound(shares, bal / 10 + 1, bal);
+        (uint256 head, uint256 end, uint256[] memory pend, uint256[2][] memory cl) = _queueSnapshot();
         (uint256 n0, uint256 n1, uint256 s) = _snapshot();
         vm.prank(lp);
         try vault.redeem(shares, 0, 0, lp, queueRemainder) returns (
@@ -208,31 +209,18 @@ contract VaultHandler is Test {
             ghostBacking[c1] -= a1;
             if (instant != 0) instantOk++;
             if (requestId != 0) queuedOk++;
+            // redeem processes up to INLINE_QUEUE_STEPS of the queue first: record those finalizations too.
+            _recordFinalizations(head, end, pend, cl);
             _checkMonotonic(n0, n1, s);
         } catch {}
     }
 
     function process(uint256 steps) external {
         steps = bound(steps, 1, 5);
-        uint256 head = vault.queueHead();
-        uint256 end = vault.nextRequestId();
-        uint256[] memory before = new uint256[](end - head);
-        for (uint256 id = head; id < end; ++id) {
-            before[id - head] = vault.getRequest(id).sharesPending;
-        }
-        uint256[2][] memory claimableBefore = new uint256[2][](end - head);
-        for (uint256 id = head; id < end; ++id) {
-            ISharedCommitmentVault.WithdrawalRequest memory r = vault.getRequest(id);
-            claimableBefore[id - head] = [uint256(r.claimable0), uint256(r.claimable1)];
-        }
+        (uint256 head, uint256 end, uint256[] memory pend, uint256[2][] memory cl) = _queueSnapshot();
         (uint256 n0, uint256 n1, uint256 s) = _snapshot();
         uint256 done = vault.processQueue(steps);
-        for (uint256 id = head; id < end; ++id) {
-            ISharedCommitmentVault.WithdrawalRequest memory r = vault.getRequest(id);
-            ghostFinalizedShares[id] += before[id - head] - r.sharesPending;
-            ghostFinalized[id][0] += r.claimable0 - claimableBefore[id - head][0];
-            ghostFinalized[id][1] += r.claimable1 - claimableBefore[id - head][1];
-        }
+        _recordFinalizations(head, end, pend, cl);
         if (done != 0) finalizedOk++;
         _checkMonotonic(n0, n1, s);
     }
@@ -268,6 +256,32 @@ contract VaultHandler is Test {
     }
 
     // ------------------------------------------------------------------
+
+    function _queueSnapshot()
+        internal
+        view
+        returns (uint256 head, uint256 end, uint256[] memory pend, uint256[2][] memory cl)
+    {
+        head = vault.queueHead();
+        end = vault.nextRequestId();
+        pend = new uint256[](end - head);
+        cl = new uint256[2][](end - head);
+        for (uint256 id = head; id < end; ++id) {
+            ISharedCommitmentVault.WithdrawalRequest memory r = vault.getRequest(id);
+            pend[id - head] = r.sharesPending;
+            cl[id - head] = [uint256(r.claimable0), uint256(r.claimable1)];
+        }
+    }
+
+    /// @dev Only called around redeem/processQueue, which never cancel: any pending decrease is a finalization.
+    function _recordFinalizations(uint256 head, uint256 end, uint256[] memory pend, uint256[2][] memory cl) internal {
+        for (uint256 id = head; id < end; ++id) {
+            ISharedCommitmentVault.WithdrawalRequest memory r = vault.getRequest(id);
+            ghostFinalizedShares[id] += pend[id - head] - r.sharesPending;
+            ghostFinalized[id][0] += r.claimable0 - cl[id - head][0];
+            ghostFinalized[id][1] += r.claimable1 - cl[id - head][1];
+        }
+    }
 
     function _snapshot() internal view returns (uint256, uint256, uint256) {
         return (vault.netAssets(c0), vault.netAssets(c1), vault.totalShares());
