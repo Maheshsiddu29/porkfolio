@@ -38,11 +38,13 @@ contract ShareSecurityTest is VaultTestBase {
     ///         the share price so the victim's deposit rounds to zero shares. Here donations are not counted in
     ///         N_a (backing is internal), deposits are share-denominated (no rounding to zero shares) and
     ///         MIN_SHARES are locked, so the victim loses at most 1 wei per asset and the attacker loses the
-    ///         donation.
+    ///         donation. Since Phase 1A-H only the owner can initialize; this keeps the worst case: a careless
+    ///         owner seeds the minimum (1001/1001 wei) and assigns the single free share to the attacker.
     function test_inflationAttack_firstDepositorCannotStealFromVictim() public {
         SharedCommitmentVault v = new SharedCommitmentVault(manager, owner, c0, c1);
-        _fundAndApprove(attacker, address(v), 1001 + 1000 ether);
-        vm.prank(attacker);
+        _fundAndApprove(attacker, address(v), 1000 ether);
+        _fundAndApprove(owner, address(v), 1001);
+        vm.prank(owner);
         uint256 attackerShares = v.initialDeposit(1001, 1001, attacker);
         assertEq(attackerShares, 1);
 
@@ -92,14 +94,14 @@ contract ShareSecurityTest is VaultTestBase {
 
     function test_initialDeposit_minimumAndLockedShares() public {
         SharedCommitmentVault v = new SharedCommitmentVault(manager, owner, c0, c1);
-        _fundAndApprove(attacker, address(v), 2000);
-        vm.prank(attacker);
+        _fundAndApprove(owner, address(v), 2002);
+        vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InitialDepositTooSmall.selector, 1000, 1000));
         v.initialDeposit(1000, 1000, attacker);
-        vm.prank(attacker);
+        vm.prank(owner);
         v.initialDeposit(1001, 1001, attacker);
         assertEq(v.sharesOf(address(0)), 1000, "locked forever: address(0) cannot call redeem");
-        vm.prank(attacker);
+        vm.prank(owner);
         vm.expectRevert(ISharedCommitmentVault.AlreadyInitialized.selector);
         v.initialDeposit(1001, 1001, attacker);
     }

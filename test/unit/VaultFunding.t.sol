@@ -54,9 +54,13 @@ contract VaultFundingTest is VaultTestBase {
 
         uint256 maxAmt = vault.MAX_AMOUNT();
         uint256 supply = vault.totalShares();
-        vm.startPrank(lp0);
+        vm.prank(lp0);
+        vm.expectRevert(ISharedCommitmentVault.NotOwner.selector);
+        vault.initialDeposit(1 ether, 1 ether, lp0);
+        vm.prank(owner);
         vm.expectRevert(ISharedCommitmentVault.AlreadyInitialized.selector);
         vault.initialDeposit(1 ether, 1 ether, lp0);
+        vm.startPrank(lp0);
         vm.expectRevert(ISharedCommitmentVault.ZeroAmount.selector);
         vault.deposit(0, type(uint256).max, type(uint256).max, lp0);
         vm.expectRevert(ISharedCommitmentVault.ZeroAddress.selector);
@@ -76,6 +80,9 @@ contract VaultFundingTest is VaultTestBase {
         SharedCommitmentVault fresh = new SharedCommitmentVault(manager, owner, c0, c1);
         vm.expectRevert(ISharedCommitmentVault.NotInitialized.selector);
         fresh.deposit(1, 1, 1, lp0);
+        vm.expectRevert(ISharedCommitmentVault.NotOwner.selector);
+        fresh.initialDeposit(1 ether, 1 ether, lp0);
+        vm.startPrank(owner);
         vm.expectRevert(ISharedCommitmentVault.ZeroAmount.selector);
         fresh.initialDeposit(0, 1, lp0);
         vm.expectRevert(ISharedCommitmentVault.ZeroAddress.selector);
@@ -84,6 +91,7 @@ contract VaultFundingTest is VaultTestBase {
         fresh.initialDeposit(maxAmt + 1, 1, lp0);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InitialDepositTooSmall.selector, 1000, 1000));
         fresh.initialDeposit(1000, 1000, lp0);
+        vm.stopPrank();
         (uint256 p0, uint256 p1) = fresh.previewRedeem(1);
         assertEq(p0 + p1, 0);
     }

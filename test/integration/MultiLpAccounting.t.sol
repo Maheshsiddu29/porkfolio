@@ -442,8 +442,8 @@ contract MultiLpAccountingTest is VaultTestBase {
         uint256 amt0 = t0 == usd ? 3_000_000e6 : 1000 ether;
         uint256 amt1 = t1 == usd ? 3_000_000e6 : 1000 ether;
 
-        _mintApprove(t0, t1, address(v), lpA, amt0, amt1);
-        vm.prank(lpA);
+        _mintApprove(t0, t1, address(v), owner, amt0, amt1);
+        vm.prank(owner);
         uint256 shares = v.initialDeposit(amt0, amt1, lpA);
         assertEq(shares + v.MIN_SHARES(), v.totalShares());
 

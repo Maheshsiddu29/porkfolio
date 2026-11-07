@@ -142,10 +142,13 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
     // LP deposits (proportional basket)
     // ==================================================================
 
-    /// @notice First deposit. Sets the initial basket ratio. Mints sqrt(amount0 * amount1) shares, of which
-    ///         MIN_SHARES are locked forever. Both amounts must be non-zero.
+    /// @notice First deposit, OWNER ONLY (the asset pair itself is fixed in the constructor). Sets the initial
+    ///         basket ratio. Mints sqrt(amount0 * amount1) shares to `receiver`, of which MIN_SHARES are locked
+    ///         forever; the owner pays. Both amounts must be non-zero. Because S >= MIN_SHARES afterwards, this can
+    ///         run at most once. All later deposits (`deposit`) are permissionless.
     function initialDeposit(uint256 amount0, uint256 amount1, address receiver)
         external
+        onlyOwner
         whenNotPaused
         returns (uint256 shares)
     {

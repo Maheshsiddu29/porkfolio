@@ -24,7 +24,9 @@ contract LpGasTest is VaultTestBase {
 
     function test_gas_initialDeposit() public {
         SharedCommitmentVault v = new SharedCommitmentVault(manager, owner, c0, c1);
-        vm.startPrank(lpA);
+        token0.mint(owner, 1000 ether);
+        token1.mint(owner, 1000 ether);
+        vm.startPrank(owner);
         token0.approve(address(v), type(uint256).max);
         token1.approve(address(v), type(uint256).max);
         uint256 g = gasleft();

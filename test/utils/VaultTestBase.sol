@@ -116,10 +116,11 @@ abstract contract VaultTestBase is Test {
         deployCodeTo(artifact, abi.encode(manager, vault, hookOwner), hook);
     }
 
-    /// @dev Seed LP initializes the vault: sqrt(amount0 * amount1) shares, MIN_SHARES of them locked.
+    /// @dev The owner initializes the vault (owner-only since Phase 1A-H), paying the seed and assigning the
+    ///      sqrt(amount0 * amount1) - MIN_SHARES shares to the seed LP `lp0`.
     function _fundVault(uint256 amount0, uint256 amount1) internal {
-        _fundLp(lp0, amount0, amount1);
-        vm.prank(lp0);
+        _fundLp(owner, amount0, amount1);
+        vm.prank(owner);
         vault.initialDeposit(amount0, amount1, lp0);
     }
 
