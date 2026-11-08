@@ -9,6 +9,8 @@ import {VaultTestBase} from "../utils/VaultTestBase.sol";
 /// @notice Gas references for LP operations on the real PoolManager. Each test measures exactly one vault call.
 ///         Authoritative numbers come from `forge test --match-contract LpGas --isolate -vvvv` (vault call frame,
 ///         per-transaction cold/warm accounting); the logged gasleft deltas are in-test approximations only.
+///         This file imports the vault, so the vault, PoolManager and hooks here are all built under the vault's
+///         optimizer profile. Gas on the production builds comes from `test/bench/run.sh`.
 contract LpGasTest is VaultTestBase {
     address internal lpA = makeAddr("lpA");
     address internal lpB = makeAddr("lpB");

@@ -37,10 +37,11 @@ forge build --force >/dev/null 2>&1 || { forge build; exit 1; }
 # artifact_row <artifact json> <expected runs or "-">
 artifact_row() {
   local f="$1" expect="$2"
-  local runs via evm init runtime hash margin flag
+  local runs via evm bh init runtime hash margin flag
   runs="$(jq -r '.metadata.settings.optimizer.runs' "$f")"
   via="$(jq -r '.metadata.settings.viaIR' "$f")"
   evm="$(jq -r '.metadata.settings.evmVersion' "$f")"
+  bh="$(jq -r '.metadata.settings.metadata.bytecodeHash // "ipfs"' "$f")"
   init=$(( ($(jq -r '.bytecode.object' "$f" | wc -c) - 3) / 2 ))
   runtime=$(( ($(jq -r '.deployedBytecode.object' "$f" | wc -c) - 3) / 2 ))
   hash="$(cast keccak "$(jq -r '.bytecode.object' "$f")")"
@@ -50,8 +51,8 @@ artifact_row() {
   if [ "$expect" != "-" ] && [ "$runs" != "$expect" ]; then flag="WRONG_RUNS(expected $expect)"; fail=1; fi
   if [ "$expect" != "-" ] && [ "$margin" -lt 0 ]; then flag="OVER_EIP170"; fail=1;
   elif [ "$expect" != "-" ] && [ "$margin" -lt "$TARGET_MARGIN" ] && [ "$flag" = "ok" ]; then flag="BELOW_TARGET"; fi
-  printf '%-50s runs=%-9s viaIR=%-5s evm=%-7s runtime=%-6s init=%-6s margin=%-6s %s\n' \
-    "${f#out/}" "$runs" "$via" "$evm" "$runtime" "$init" "$margin" "$flag"
+  printf '%-50s runs=%-9s viaIR=%-5s evm=%-7s hash=%-5s runtime=%-6s init=%-6s margin=%-6s %s\n' \
+    "${f#out/}" "$runs" "$via" "$evm" "$bh" "$runtime" "$init" "$margin" "$flag"
   printf '%-50s init-code keccak256 (no constructor args) %s\n' "" "$hash"
 }
 

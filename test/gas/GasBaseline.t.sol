@@ -12,6 +12,9 @@ import {VaultTestBase} from "../utils/VaultTestBase.sol";
 /// @notice Gas baselines for one exact-input swap through PoolSwapTest (test router) on the real PoolManager.
 ///         Numbers include router overhead and are meant only for relative comparison under identical settings.
 ///         Run with `forge test --match-contract GasBaseline -vv --isolate` for per-transaction cold/warm accounting.
+///         This file imports the vault, so it is compiled under the vault's optimizer profile together with the
+///         PoolManager, hooks and router; the numbers are for relative comparison within this file only. Gas on the
+///         production builds comes from `test/bench/run.sh`.
 contract GasBaselineTest is VaultTestBase {
     function test_gas_hookA_swap_zeroForOne() public {
         uint256 id = _allocate(keyA, c1, 100_000 ether);

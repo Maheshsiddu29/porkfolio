@@ -14,6 +14,8 @@ import {AuthModeHook} from "../utils/AuthModeHook.sol";
 ///         hook -> vault operator grant. Same hook logic, same pool shape, same amounts; only authorization differs.
 ///         Gas numbers: run `forge test --match-contract AuthorizationComparison --isolate -vvvv` and read the
 ///         PoolSwapTest::swap frame (see PHASE1A_REPORT.md §5).
+///         The PoolManager and hooks in this file are built under the vault's optimizer profile, because the file
+///         imports the vault; both modes are affected equally, so the comparison between them still holds.
 contract AuthorizationComparisonTest is VaultTestBase {
     uint160 internal constant FLAGS = Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG;
 
