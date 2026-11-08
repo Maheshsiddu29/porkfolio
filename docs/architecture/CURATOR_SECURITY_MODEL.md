@@ -183,7 +183,7 @@ Negative and adversarial tests (`test/security/CuratorAuth.t.sol`, `AuthLifecycl
 - **Key management.** A compromised curator key can sign until the curator or a guardian acts. Detection is
   off-chain.
 - **Owner compromise.** The owner can unfreeze (not un-revoke), register hooks and raise ceilings. A multisig and
-  timelock are required before real value (`MAINNET_READINESS.md` G-3).
+  timelock are required before real value (`MAINNET_READINESS.md` G-1, G-2).
 - **Relayer liveness** (`RISKS.md` R7). A signature still needs someone to submit it.
 
 ## 9. Changes to earlier decisions (need confirmation)

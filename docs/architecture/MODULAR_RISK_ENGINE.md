@@ -155,7 +155,7 @@ Cost (ESTIMATE): two `TSTORE` and one `TLOAD` at 100 gas each, plus dispatch, un
   and remain consumable, cancellable and releasable exactly as before.
 - **Outstanding signatures:** they die with the old module (the domain binds `verifyingContract`). Nonce bitmaps do not
   migrate. They do not need to: no message signed for the old domain verifies under the new one.
-- Before real value, module changes go through the multisig and timelock path (`MAINNET_READINESS.md` G-3).
+- Before real value, module changes go through the multisig and timelock path (`MAINNET_READINESS.md` G-1, G-2).
 
 ## 5. Call sequences
 
