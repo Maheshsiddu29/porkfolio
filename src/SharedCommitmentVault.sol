@@ -55,11 +55,11 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
     Currency public immutable asset1;
 
     address public owner;
+    bool public paused; // packed with `owner`: owner-gated, pause-checked calls read one slot
     /// @notice Nominee of a two-step ownership transfer (zero when none is pending).
     address public pendingOwner;
     /// @notice Emergency role that may only REDUCE risk (see `_authorize`). Zero = no guardian.
     address public guardian;
-    bool public paused;
 
     mapping(address consumer => bool) public isConsumer;
     mapping(address curator => bool) public isCurator;
