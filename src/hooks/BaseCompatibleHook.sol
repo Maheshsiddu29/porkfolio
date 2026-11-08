@@ -83,8 +83,13 @@ abstract contract BaseCompatibleHook is IHooks {
     error HookNotImplemented();
     /// @notice Adding liquidity to the pool's own curve is refused; this pool trades only against the vault.
     error NativeLiquidityDisabled();
-    /// @notice The swap was exact output (or had amountSpecified == 0). Only exact input is supported.
+    /// @notice The swap was exact output (amountSpecified > 0). Only exact input is supported.
     error ExactOutputNotSupported();
+    /// @notice The swap had amountSpecified == 0. The pinned PoolManager already rejects this with
+    ///         `SwapAmountCannotBeZero` before any hook runs, so this only fires if a PoolManager does not.
+    error ZeroInput();
+    /// @notice A constructor argument was address(0).
+    error ZeroAddress();
     /// @notice The input or the quoted output exceeds 2^127 - 1.
     error AmountTooLarge();
     /// @notice `hookData` was not exactly one ABI-encoded uint256 allocation id.
@@ -115,13 +120,18 @@ abstract contract BaseCompatibleHook is IHooks {
         _;
     }
 
-    /// @dev Reverts unless this contract's address encodes exactly the permissions in `getHookPermissions`, because
-    ///      the PoolManager decides which callbacks to call from the address bits alone. Then makes the vault an
-    ///      operator over this hook's claims (see the contract documentation for why this direction is safe).
-    /// @param poolManager_ PoolManager the hook's pools live in.
-    /// @param vault_ Vault that fills the swaps.
-    /// @param hookOwner_ Account that may configure pricing.
+    /// @dev Reverts with `ZeroAddress` if any argument is zero: all three are immutable, and a hook built with a
+    ///      zero vault or owner could never fill a swap or be configured. Then reverts unless this contract's address
+    ///      encodes exactly the permissions in `getHookPermissions`, because the PoolManager decides which callbacks
+    ///      to call from the address bits alone. Finally makes the vault an operator over this hook's claims (see the
+    ///      contract documentation for why this direction is safe).
+    /// @param poolManager_ PoolManager the hook's pools live in. Non-zero.
+    /// @param vault_ Vault that fills the swaps. Non-zero.
+    /// @param hookOwner_ Account that may configure pricing. Non-zero.
     constructor(IPoolManager poolManager_, ISharedCommitmentVault vault_, address hookOwner_) {
+        if (address(poolManager_) == address(0) || address(vault_) == address(0) || hookOwner_ == address(0)) {
+            revert ZeroAddress();
+        }
         poolManager = poolManager_;
         vault = vault_;
         hookOwner = hookOwner_;
@@ -173,8 +183,8 @@ abstract contract BaseCompatibleHook is IHooks {
 
     /// @notice Fills the whole swap from the vault and tells the PoolManager to skip the pool's own curve.
     /// @dev See the contract documentation for the four settlement steps and why the deltas net to zero.
-    ///      Rejects exact-output swaps, inputs above 2^127 - 1, `hookData` that is not exactly 32 bytes, and quotes
-    ///      of zero. Every vault-side rule (registration, allocation binding, expiry, quota, price floor, pause, halt)
+    ///      Rejects exact-output swaps, zero-amount swaps, inputs above 2^127 - 1, `hookData` that is not exactly 32
+    ///      bytes, and quotes of zero. Every vault-side rule (registration, allocation binding, expiry, quota, price floor, pause, halt)
     ///      is enforced inside `vault.exchange`; any failure there reverts the swap.
     /// @param key Pool being swapped on.
     /// @param params Swap parameters. `amountSpecified` must be negative (exact input).
@@ -187,7 +197,10 @@ abstract contract BaseCompatibleHook is IHooks {
         onlyPoolManager
         returns (bytes4, BeforeSwapDelta, uint24)
     {
-        if (params.amountSpecified >= 0) revert ExactOutputNotSupported();
+        if (params.amountSpecified >= 0) {
+            if (params.amountSpecified == 0) revert ZeroInput();
+            revert ExactOutputNotSupported();
+        }
         // Bound before negation: avoids int256.min overflow and keeps the value castable to int128.
         // forge-lint: disable-next-line(unsafe-typecast) MAX_AMOUNT = 2^127-1 fits in int256.
         if (params.amountSpecified < -int256(MAX_AMOUNT)) revert AmountTooLarge();
