@@ -58,7 +58,7 @@ contract HookPriceBandsTest is VaultTestBase {
                 (uint256 dIn, uint256 dOut) = zeroForOne ? (b0 - a0, a1 - b1) : (b1 - a1, a0 - b0);
                 assertEq(dIn, 1000 ether);
                 assertGt(dOut, 0);
-                assertTrue(_meets(dIn, dOut, vault.effectiveFloorX96(id)), "measured deltas meet the floor");
+                assertTrue(_meets(dIn, dOut, lens.effectiveFloorX96(vault, id)), "measured deltas meet the floor");
                 assertLt(dOut, dIn, "both hooks quote below 1:1 (fee / impact)");
             }
         }
@@ -299,14 +299,14 @@ contract HookPriceBands6x18Test is VaultTestBase {
             (uint256 dIn, uint256 dOut) = _sell(keys[h], cW, 1 ether, idU);
             assertEq(dIn, 1 ether);
             assertTrue(dOut > 2950e6 && dOut < 3000e6, "~2,985 USDC for 1 WETH");
-            assertGe(dIn, FullMath.mulDivRoundingUp(dOut, v.effectiveFloorX96(idU), Q96));
+            assertGe(dIn, FullMath.mulDivRoundingUp(dOut, lens.effectiveFloorX96(v, idU), Q96));
 
             // Trader sells 3,000 USDC: the vault sells WETH.
             uint256 idW = _alloc(keys[h], cW, 500 ether);
             (dIn, dOut) = _sell(keys[h], cU, 3000e6, idW);
             assertEq(dIn, 3000e6);
             assertTrue(dOut > 0.98 ether && dOut < 1 ether, "~0.995 WETH for 3,000 USDC");
-            assertGe(dIn, FullMath.mulDivRoundingUp(dOut, v.effectiveFloorX96(idW), Q96));
+            assertGe(dIn, FullMath.mulDivRoundingUp(dOut, lens.effectiveFloorX96(v, idW), Q96));
         }
     }
 

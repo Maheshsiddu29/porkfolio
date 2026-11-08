@@ -13,6 +13,7 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 
 import {ISharedCommitmentVault} from "./interfaces/ISharedCommitmentVault.sol";
+import {IVaultState} from "./interfaces/IVaultState.sol";
 
 /// @title SharedCommitmentVault
 /// @notice A two-asset reserve that several Uniswap v4 hooks can sell from. LPs deposit both assets and receive
@@ -61,9 +62,15 @@ import {ISharedCommitmentVault} from "./interfaces/ISharedCommitmentVault.sol";
 ///   Consumer  Registered hook that calls `exchange` against allocations made out to it.
 ///   LP        Anyone, after initialization: deposits, redeems, cancels and claims its own requests.
 ///
+/// Read-only helpers. This contract serves its stored records (public getters, `getAllocation`, `getRequest`) and
+/// the admission limit `admissibleCapacity`. Previews, request status, N_a, F_a, D_a, deliverable shares and an
+/// allocation's effective floor are computed by `VaultLens`, a separate stateless contract that reads the getters
+/// declared in `IVaultState`. Nothing in this contract calls the lens; every check here uses its own internal copy
+/// of those formulas.
+///
 /// Not implemented here: signed (EIP-712) allocation instructions, curator cancellation of its own allocations,
 /// epoch-based expiry, transferable share tokens, and any protocol, curator or performance fee.
-contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
+contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCallback {
     /// @notice Largest amount accepted for any single asset amount, per-asset backing, or the share supply:
     ///         2^127 - 1.
     /// @dev The PoolManager converts amounts to int128 for its delta accounting, so anything larger would revert
@@ -428,7 +435,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
         if (shares == 0) revert ZeroAmount();
         if (shares > MAX_AMOUNT - supply) revert AmountTooLarge();
 
-        (amount0, amount1) = _previewDeposit(shares, supply);
+        (amount0, amount1) = _depositAmounts(shares, supply);
         if (amount0 > maxAmount0 || amount1 > maxAmount1) revert SlippageExceeded();
         if (amount0 > MAX_AMOUNT - backing[asset0] || amount1 > MAX_AMOUNT - backing[asset1]) {
             revert AmountTooLarge();
@@ -851,17 +858,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
     }
 
     // ==================================================================
-    // Views
+    // Views. Derived values and previews are in VaultLens (see the contract documentation).
     // ==================================================================
-
-    /// @notice Floor that `exchange` would apply to this allocation right now: max(live vault floor, curator floor).
-    /// @dev Reverts in the same cases `exchange` would for policy reasons: the direction is unconfigured or halted.
-    ///      An unknown id reverts with `PriceFloorNotConfigured` because its stored currency is address(0).
-    /// @param allocationId Allocation to inspect.
-    /// @return Effective floor, Q64.96 raw input per raw output.
-    function effectiveFloorX96(uint256 allocationId) external view returns (uint256) {
-        return _effectiveFloor(_allocations[allocationId]);
-    }
 
     /// @notice Stored state of an allocation. Returns an all-zero struct for an unknown id.
     /// @param allocationId Allocation to read.
@@ -875,48 +873,6 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
     /// @return The request record.
     function getRequest(uint256 requestId) external view returns (WithdrawalRequest memory) {
         return _requests[requestId];
-    }
-
-    /// @notice Lifecycle state of a withdrawal request, derived from its stored amounts.
-    /// @dev Pending has priority: a partially finalized request with claimable assets is still Pending. A request
-    ///      canceled after a partial finalization reports Claimable until it is claimed, then Canceled.
-    /// @param requestId Request to inspect.
-    /// @return The request's current status.
-    function requestStatus(uint256 requestId) external view returns (RequestStatus) {
-        WithdrawalRequest storage r = _requests[requestId];
-        if (r.lp == address(0)) return RequestStatus.None;
-        if (r.sharesPending != 0) return RequestStatus.Pending;
-        if (r.claimable0 != 0 || r.claimable1 != 0) return RequestStatus.Claimable;
-        return r.canceled ? RequestStatus.Canceled : RequestStatus.Completed;
-    }
-
-    /// @notice N_a: assets owned by outstanding shares, i.e. backing minus assets already owed to finalized
-    ///         requests. Committed capacity Q_a is included, because it still belongs to the shareholders.
-    /// @param currency asset0 or asset1. Any other currency returns 0.
-    /// @return Raw units of `currency`.
-    function netAssets(Currency currency) public view returns (uint256) {
-        return backing[currency] - claimableAssets[currency];
-    }
-
-    /// @notice F_a = B_a - W_a - Q_a: inventory that can be paid out now without breaking a live commitment or
-    ///         touching assets owed to finalized requests.
-    /// @param currency asset0 or asset1. Any other currency returns 0.
-    /// @return Raw units of `currency`.
-    function freeInventory(Currency currency) public view returns (uint256) {
-        return backing[currency] - claimableAssets[currency] - reserved[currency];
-    }
-
-    /// @notice D_a = ceil(P * N_a / S): what the pending queue would be owed in `currency` if it were finalized now.
-    /// @dev Rounded up so that capacity protected for the queue is never less than its exact pro-rata share.
-    ///      Example: P = 300, S = 1,000 and N_a = 1,001 give ceil(300.3) = 301. The value moves with N_a, so trades
-    ///      change it. It protects the queue's capacity, not the value it will receive: queued shares still share
-    ///      losses.
-    /// @param currency Asset to evaluate.
-    /// @return Raw units of `currency`, or 0 when nothing is pending.
-    function pendingDemand(Currency currency) public view returns (uint256) {
-        uint256 p = pendingShares;
-        if (p == 0) return 0;
-        return FullMath.mulDivRoundingUp(p, netAssets(currency), totalShares);
     }
 
     /// @notice Largest new allocation of `currency` the admission rule accepts right now: N_a - Q_a - R_a - D_a,
@@ -934,63 +890,52 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
     /// @return Raw units of `currency`.
     function admissibleCapacity(Currency currency) public view returns (uint256) {
         return
-            _sub0(_sub0(_sub0(netAssets(currency), reserved[currency]), bufferFloor[currency]), pendingDemand(currency));
-    }
-
-    /// @notice Largest number of shares whose in-kind basket free inventory could pay right now.
-    /// @dev Ignores queue priority: `redeem` only uses this for an instant exit when nothing is pending. Returns 0
-    ///      before initialization.
-    /// @return Share count.
-    function deliverableShares() external view returns (uint256) {
-        uint256 supply = totalShares;
-        return supply == 0 ? 0 : _deliverableShares(supply);
-    }
-
-    /// @notice Amounts `deposit` would charge for `shares` in the current state: ceil(shares * N_a / S) per asset.
-    /// @dev Reverts with `NotInitialized` before the first deposit, since there is no ratio to price against.
-    /// @param shares Shares to price.
-    /// @return amount0 Raw asset0 required.
-    /// @return amount1 Raw asset1 required.
-    function previewDeposit(uint256 shares) external view returns (uint256 amount0, uint256 amount1) {
-        uint256 supply = totalShares;
-        if (supply == 0) revert NotInitialized();
-        return _previewDeposit(shares, supply);
-    }
-
-    /// @notice In-kind basket of `shares` in the current state: floor(shares * N_a / S) per asset.
-    /// @dev This is what the shares are worth, not what `redeem` can pay now; free inventory and the queue decide
-    ///      that. Returns (0, 0) before initialization.
-    /// @param shares Shares to value.
-    /// @return amount0 Raw asset0.
-    /// @return amount1 Raw asset1.
-    function previewRedeem(uint256 shares) external view returns (uint256 amount0, uint256 amount1) {
-        uint256 supply = totalShares;
-        if (supply == 0) return (0, 0);
-        return _entitlement(shares, supply);
+            _sub0(
+                _sub0(_sub0(_netAssets(currency), reserved[currency]), bufferFloor[currency]), _pendingDemand(currency)
+            );
     }
 
     // ==================================================================
     // Internal
     // ==================================================================
 
+    /// @dev N_a = B_a - W_a: assets owned by outstanding shares, i.e. backing minus assets already owed to finalized
+    ///      requests. Committed capacity Q_a is included, because it still belongs to the shareholders. Cannot
+    ///      underflow: every path keeps W_a <= B_a. Returns 0 for a currency outside the pair.
+    function _netAssets(Currency currency) internal view returns (uint256) {
+        return backing[currency] - claimableAssets[currency];
+    }
+
+    /// @dev D_a = ceil(P * N_a / S): what the pending queue would be owed in `currency` if it were finalized now.
+    ///      Rounded up so that capacity protected for the queue is never less than its exact pro-rata share.
+    ///      Example: P = 300, S = 1,000 and N_a = 1,001 give ceil(300.3) = 301. The value moves with N_a, so trades
+    ///      change it. It protects the queue's capacity, not the value it will receive: queued shares still share
+    ///      losses. P > 0 implies S >= P > 0, so the division is safe. Returns 0 when nothing is pending.
+    function _pendingDemand(Currency currency) internal view returns (uint256) {
+        uint256 p = pendingShares;
+        if (p == 0) return 0;
+        return FullMath.mulDivRoundingUp(p, _netAssets(currency), totalShares);
+    }
+
     /// @dev Deposit price for `shares`: ceil(shares * N_a / supply) of each asset. FullMath keeps the intermediate
     ///      product in 512 bits, so no overflow is possible for amounts within MAX_AMOUNT. Reverts with `NoAssets` if
     ///      both N_a are zero; this state cannot be reached while shares exist (a trade can empty at most one asset,
     ///      and the locked MIN_SHARES stop redemptions from emptying either), so the check is defensive.
-    function _previewDeposit(uint256 shares, uint256 supply) internal view returns (uint256 amount0, uint256 amount1) {
-        uint256 n0 = netAssets(asset0);
-        uint256 n1 = netAssets(asset1);
+    ///      `VaultLens.previewDeposit` repeats this formula for callers choosing `maxAmount0/1`.
+    function _depositAmounts(uint256 shares, uint256 supply) internal view returns (uint256 amount0, uint256 amount1) {
+        uint256 n0 = _netAssets(asset0);
+        uint256 n1 = _netAssets(asset1);
         if (n0 == 0 && n1 == 0) revert NoAssets();
         amount0 = FullMath.mulDivRoundingUp(shares, n0, supply);
         amount1 = FullMath.mulDivRoundingUp(shares, n1, supply);
     }
 
-    /// @dev Redemption value of `shares`: floor(shares * N_a / supply) of each asset. Used for instant redemptions,
-    ///      queue finalization and previews. Rounding down means the redeemer, not the remaining holders, absorbs the
-    ///      fraction, so N_a / S never falls when shares leave.
+    /// @dev Redemption value of `shares`: floor(shares * N_a / supply) of each asset. Used for instant redemptions
+    ///      and queue finalization; `VaultLens.previewRedeem` repeats it. Rounding down means the redeemer, not the
+    ///      remaining holders, absorbs the fraction, so N_a / S never falls when shares leave.
     function _entitlement(uint256 shares, uint256 supply) internal view returns (uint256 amount0, uint256 amount1) {
-        amount0 = FullMath.mulDiv(shares, netAssets(asset0), supply);
-        amount1 = FullMath.mulDiv(shares, netAssets(asset1), supply);
+        amount0 = FullMath.mulDiv(shares, _netAssets(asset0), supply);
+        amount1 = FullMath.mulDiv(shares, _netAssets(asset1), supply);
     }
 
     /// @dev Largest s such that floor(s * N_a / S) <= F_a for both assets, i.e. min over a of floor(F_a * S / N_a),
@@ -1001,9 +946,9 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
     ///      type(uint256).max, which callers then cap by the shares actually requested.
     function _deliverableShares(uint256 supply) internal view returns (uint256 cap) {
         cap = type(uint256).max;
-        uint256 n0 = netAssets(asset0);
+        uint256 n0 = _netAssets(asset0);
         if (n0 != 0) cap = FullMath.mulDiv(n0 - reserved[asset0], supply, n0);
-        uint256 n1 = netAssets(asset1);
+        uint256 n1 = _netAssets(asset1);
         if (n1 != 0) {
             uint256 c1 = FullMath.mulDiv(n1 - reserved[asset1], supply, n1);
             if (c1 < cap) cap = c1;

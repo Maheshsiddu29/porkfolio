@@ -216,7 +216,7 @@ contract PricePolicyTest is VaultTestBase {
         delta = bound(delta, -3, 3);
         Currency cOut = sellOne ? c1 : c0;
         uint256 id = _allocM(cOut, uint128(out), uint160(curatorFloor));
-        uint256 feff = vault.effectiveFloorX96(id);
+        uint256 feff = lens.effectiveFloorX96(vault, id);
         assertEq(feff, curatorFloor > Q96 ? curatorFloor : Q96);
 
         uint256 req = _required(out, feff);
@@ -255,7 +255,7 @@ contract PricePolicyTest is VaultTestBase {
         uint160 tight = uint160(Q96 * 102 / 100);
         vm.prank(guardian);
         vault.setSellFloor(c1, tight);
-        assertEq(vault.effectiveFloorX96(id), tight);
+        assertEq(lens.effectiveFloorX96(vault, id), tight);
 
         _tradeExpect(id, c1, 1000 ether, 1000 ether, _belowFloor(1000 ether, _required(1000 ether, tight)));
         // Hook A's own pricing is no longer enough: the vault rejects its quote.
@@ -278,7 +278,7 @@ contract PricePolicyTest is VaultTestBase {
         uint256 id = _allocM(c1, 10_000 ether, curatorFloor);
         // Owner loosens the token1 floor to 0.5 (consistent: token0 floor raised to 2 first).
         _setFloors(uint160(Q96 * 2), uint160(Q96 / 2));
-        assertEq(vault.effectiveFloorX96(id), curatorFloor, "max(vault, curator)");
+        assertEq(lens.effectiveFloorX96(vault, id), curatorFloor, "max(vault, curator)");
 
         uint256 between = _required(1000 ether, Q96); // above the new vault floor, below the curator's
         _tradeExpect(id, c1, between, 1000 ether, _belowFloor(between, _required(1000 ether, curatorFloor)));
@@ -327,7 +327,7 @@ contract PricePolicyTest is VaultTestBase {
         vm.expectRevert(halted);
         vault.allocate(r);
         vm.expectRevert(halted);
-        vault.effectiveFloorX96(id1);
+        lens.effectiveFloorX96(vault, id1);
 
         _trade(id0, c0, 1000 ether, 1000 ether); // the opposite direction still trades
         vm.prank(owner);

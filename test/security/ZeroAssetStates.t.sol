@@ -105,16 +105,16 @@ contract ZeroAssetStatesTest is VaultTestBase {
 
     function test_asset1AtZero_definedBehaviour() public {
         _drainOneToOne(c1);
-        assertEq(vault.netAssets(c1), 0);
-        assertEq(vault.netAssets(c0), 2 * VAULT_FUNDING);
+        assertEq(lens.netAssets(vault, c1), 0);
+        assertEq(lens.netAssets(vault, c0), 2 * VAULT_FUNDING);
         _assertEquations();
 
         // Views: no division by zero; token1 imposes no delivery constraint.
-        assertEq(vault.freeInventory(c1), 0);
-        assertEq(vault.pendingDemand(c1), 0);
+        assertEq(lens.freeInventory(vault, c1), 0);
+        assertEq(lens.pendingDemand(vault, c1), 0);
         assertEq(vault.admissibleCapacity(c1), 0);
-        assertEq(vault.deliverableShares(), vault.totalShares());
-        (uint256 p0, uint256 p1) = vault.previewRedeem(1000 ether);
+        assertEq(lens.deliverableShares(vault), vault.totalShares());
+        (uint256 p0, uint256 p1) = lens.previewRedeem(vault, 1000 ether);
         assertEq(p0, 2000 ether);
         assertEq(p1, 0);
 
@@ -151,7 +151,7 @@ contract ZeroAssetStatesTest is VaultTestBase {
         // Token1 re-enters through a trade; both legs are live again.
         uint256 id = _allocate(keyE, c0, 10_000 ether);
         _swap(keyE, false, 10_000 ether, id);
-        (p0, p1) = vault.previewRedeem(1000 ether);
+        (p0, p1) = lens.previewRedeem(vault, 1000 ether);
         assertGt(p0, 0);
         assertGt(p1, 0);
         _assertEquations();
@@ -160,7 +160,7 @@ contract ZeroAssetStatesTest is VaultTestBase {
 
     function test_asset0AtZero_mirror() public {
         _drainOneToOne(c0);
-        assertEq(vault.netAssets(c0), 0);
+        assertEq(lens.netAssets(vault, c0), 0);
         (uint256 d0, uint256 d1) = _depositShares(lpA, 1000 ether);
         assertEq(d0, 0);
         assertEq(d1, 2000 ether);
@@ -183,8 +183,8 @@ contract ZeroAssetStatesTest is VaultTestBase {
         _drainOneToOne(c1); // N = (2M, 0)
         uint256 sold = vault.admissibleCapacity(c0);
         uint256 paid = _drainAdmissibleAtFloor(c0); // registered hook at the most permissive legal floor
-        assertEq(vault.netAssets(c0), 0);
-        assertEq(vault.netAssets(c1), paid);
+        assertEq(lens.netAssets(vault, c0), 0);
+        assertEq(lens.netAssets(vault, c1), paid);
         assertGe(paid * FixedPoint96.Q96, sold * MIN_CONSISTENT_FLOOR, "paid at least the floor");
         assertGt(paid, 0);
         _assertEquations();
@@ -192,7 +192,7 @@ contract ZeroAssetStatesTest is VaultTestBase {
         // A unit of 1e18 shares is now worth < 1 wei in both assets: redeeming it reverts instead of burning shares
         // for nothing. This is an economic loss (authorised trade at an owner-approved floor), not an accounting
         // error.
-        (uint256 e0, uint256 e1) = vault.previewRedeem(1 ether);
+        (uint256 e0, uint256 e1) = lens.previewRedeem(vault, 1 ether);
         assertEq(e0 + e1, 0);
         vm.prank(lp0);
         vm.expectRevert(ISharedCommitmentVault.DustRedemption.selector);
@@ -200,7 +200,7 @@ contract ZeroAssetStatesTest is VaultTestBase {
 
         // New assets can still enter, priced at the depleted per-share basket and fully backed.
         uint256 S = vault.totalShares();
-        (uint256 d0, uint256 d1) = vault.previewDeposit(S);
+        (uint256 d0, uint256 d1) = lens.previewDeposit(vault, S);
         assertEq(d0, 0);
         assertEq(d1, paid, "S new shares cost exactly the remaining basket");
         _depositShares(lpA, S);
@@ -208,7 +208,7 @@ contract ZeroAssetStatesTest is VaultTestBase {
         uint256 room = vault.MAX_AMOUNT() - vault.totalShares();
         (uint256 m0, uint256 m1) = _fundAndPreviewMax(room);
         assertEq(m0, 0);
-        assertEq(m1, FullMath.mulDivRoundingUp(room, vault.netAssets(c1), vault.totalShares()));
+        assertEq(m1, FullMath.mulDivRoundingUp(room, lens.netAssets(vault, c1), vault.totalShares()));
         assertLt(m1, VAULT_FUNDING / 10_000, "max depositable value after depletion < 0.01% of the original pool");
         _assertEquations();
     }
@@ -220,17 +220,17 @@ contract ZeroAssetStatesTest is VaultTestBase {
         uint256 lock = _allocate(keyA, c1, uint128(vault.admissibleCapacity(c1)));
         (uint256 instant,,, uint256 req) = _redeem(lpA, 100_000 ether, true);
         assertEq(instant, 0);
-        uint256 d0 = vault.pendingDemand(c0);
+        uint256 d0 = lens.pendingDemand(vault, c0);
         assertEq(d0, 100_000 ether);
 
         _drainAdmissibleAtFloor(c0); // takes N0 - D0 = 1M token0 at the most permissive legal floor
-        assertEq(vault.netAssets(c0), d0, "the drain could not touch pending demand");
+        assertEq(lens.netAssets(vault, c0), d0, "the drain could not touch pending demand");
         _assertEquations();
 
         vm.prank(owner);
         vault.release(lock);
         uint256 S = vault.totalShares();
-        uint256 n0 = vault.netAssets(c0);
+        uint256 n0 = lens.netAssets(vault, c0);
         vault.processQueue(1);
         ISharedCommitmentVault.WithdrawalRequest memory w = vault.getRequest(req);
         assertEq(w.sharesPending, 0, "finalized, not trapped");
@@ -250,18 +250,18 @@ contract ZeroAssetStatesTest is VaultTestBase {
         (uint256 instant,,, uint256 req) = _redeem(lpSmall, 1, true);
         assertEq(instant, 0);
         (,,, uint256 reqA) = _redeem(lpA, 1000 ether, true); // queued behind the tiny request
-        uint256 d0 = vault.pendingDemand(c0);
+        uint256 d0 = lens.pendingDemand(vault, c0);
         vm.prank(owner);
         vault.release(lock);
         _drainAdmissibleAtFloor(c0); // takes everything except the protected pending demand
-        assertEq(vault.netAssets(c0), d0);
+        assertEq(lens.netAssets(vault, c0), d0);
 
-        (uint256 e0, uint256 e1) = vault.previewRedeem(1);
+        (uint256 e0, uint256 e1) = lens.previewRedeem(vault, 1);
         assertEq(e0 + e1, 0, "1 share is now worth < 1 wei in both assets");
 
         vault.processQueue(5);
-        assertEq(uint8(vault.requestStatus(req)), uint8(ISharedCommitmentVault.RequestStatus.Completed));
-        assertEq(uint8(vault.requestStatus(reqA)), uint8(ISharedCommitmentVault.RequestStatus.Claimable));
+        assertEq(uint8(lens.requestStatus(vault, req)), uint8(ISharedCommitmentVault.RequestStatus.Completed));
+        assertEq(uint8(lens.requestStatus(vault, reqA)), uint8(ISharedCommitmentVault.RequestStatus.Claimable));
         assertEq(vault.pendingShares(), 0, "the dust request did not block the queue");
         vm.prank(lpSmall);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.NothingToClaim.selector, req));
@@ -280,20 +280,20 @@ contract ZeroAssetStatesTest is VaultTestBase {
         _drainAtFloor(c0, 1_500_000 ether);
         // Lock all but 1 wei of token0.
         _allocate(keyA, c0, uint128(vault.admissibleCapacity(c0) - 1));
-        assertEq(vault.freeInventory(c0), 1);
+        assertEq(lens.freeInventory(vault, c0), 1);
 
         // lp0 exits: a 2-share instant slice takes the free wei, the rest is queued.
         (uint256 instant,,, uint256 req) = _redeem(lp0, vault.sharesOf(lp0), true);
         assertEq(instant, 2);
-        assertEq(vault.freeInventory(c0), 0);
+        assertEq(lens.freeInventory(vault, c0), 0);
         uint256 pendingBefore = vault.getRequest(req).sharesPending;
 
         // 1 wei of token0 becomes free again (a 1-share deposit). The deliverable slice is 1 share, worth
         // floor(1 * N_a / S) = 0 wei in both assets: it must NOT be finalized.
         _depositShares(lpA, 1);
-        assertEq(vault.freeInventory(c0), 1);
-        assertEq(vault.deliverableShares(), 1);
-        (uint256 e0, uint256 e1) = vault.previewRedeem(1);
+        assertEq(lens.freeInventory(vault, c0), 1);
+        assertEq(lens.deliverableShares(vault), 1);
+        (uint256 e0, uint256 e1) = lens.previewRedeem(vault, 1);
         assertEq(e0 + e1, 0);
         assertEq(vault.processQueue(5), 0, "no shares burned for nothing");
         assertEq(vault.getRequest(req).sharesPending, pendingBefore);
@@ -310,7 +310,7 @@ contract ZeroAssetStatesTest is VaultTestBase {
     function test_emptiedVault_reentry() public {
         _redeem(lp0, vault.sharesOf(lp0), false);
         assertEq(vault.totalShares(), vault.MIN_SHARES());
-        assertEq(vault.netAssets(c0), vault.MIN_SHARES());
+        assertEq(lens.netAssets(vault, c0), vault.MIN_SHARES());
         (uint256 p0, uint256 p1) = _depositShares(lpA, 500_000 ether);
         assertEq(p0, 500_000 ether);
         assertEq(p1, 500_000 ether);
@@ -323,20 +323,20 @@ contract ZeroAssetStatesTest is VaultTestBase {
     function test_uninitializedVault_viewsAndCallsNeverDivideByZero() public {
         SharedCommitmentVault v = new SharedCommitmentVault(manager, owner, c0, c1);
         vm.expectRevert(ISharedCommitmentVault.NotInitialized.selector);
-        v.previewDeposit(1);
-        (uint256 a, uint256 b) = v.previewRedeem(1);
+        lens.previewDeposit(v, 1);
+        (uint256 a, uint256 b) = lens.previewRedeem(v, 1);
         assertEq(a + b, 0);
-        assertEq(v.deliverableShares(), 0);
-        assertEq(v.pendingDemand(c0), 0);
+        assertEq(lens.deliverableShares(v), 0);
+        assertEq(lens.pendingDemand(v, c0), 0);
         assertEq(v.admissibleCapacity(c0), 0);
-        assertEq(v.netAssets(c1), 0);
-        assertEq(v.freeInventory(c1), 0);
+        assertEq(lens.netAssets(v, c1), 0);
+        assertEq(lens.freeInventory(v, c1), 0);
         assertEq(v.processQueue(10), 0);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InsufficientShares.selector, 1, 0));
         v.redeem(1, 0, 0, address(this), true);
     }
 
     function _fundAndPreviewMax(uint256 room) internal view returns (uint256, uint256) {
-        return vault.previewDeposit(room);
+        return lens.previewDeposit(vault, room);
     }
 }

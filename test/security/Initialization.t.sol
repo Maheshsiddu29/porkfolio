@@ -80,7 +80,7 @@ contract InitializationTest is VaultTestBase {
         assertEq(v.backing(c1), 1000 ether);
         assertEq(v.sharesOf(lpA), shares);
         assertEq(v.sharesOf(address(0)), v.MIN_SHARES());
-        (uint256 p0, uint256 p1) = v.previewDeposit(1 ether);
+        (uint256 p0, uint256 p1) = lens.previewDeposit(v, 1 ether);
         assertEq(p0, 2 ether, "basket ratio is the owner's, 4:1 per 2 shares");
         assertEq(p1, 0.5 ether);
     }

@@ -55,10 +55,10 @@ contract ShareSecurityTest is VaultTestBase {
         donor.donate(c1, 1000 ether, address(v));
         vm.stopPrank();
         assertEq(manager.balanceOf(address(v), c0.toId()), 1001 + 1000 ether, "donation landed");
-        assertEq(v.netAssets(c0), 1001, "donation not counted");
+        assertEq(lens.netAssets(v, c0), 1001, "donation not counted");
 
         uint256 victimShares = 500 ether;
-        (uint256 p0, uint256 p1) = v.previewDeposit(victimShares);
+        (uint256 p0, uint256 p1) = lens.previewDeposit(v, victimShares);
         assertEq(p0, 500 ether, "price unaffected by donation");
         _fundAndApprove(victim, address(v), p0);
         vm.prank(victim);
@@ -76,8 +76,8 @@ contract ShareSecurityTest is VaultTestBase {
 
     function test_donation_toLiveVault_doesNotMoveSharePrice() public {
         _depositShares(lpA, 100_000 ether);
-        (uint256 e0, uint256 e1) = vault.previewRedeem(vault.sharesOf(lpA));
-        uint256 deliverable = vault.deliverableShares();
+        (uint256 e0, uint256 e1) = lens.previewRedeem(vault, vault.sharesOf(lpA));
+        uint256 deliverable = lens.deliverableShares(vault);
 
         token0.mint(attacker, 50_000 ether);
         vm.startPrank(attacker);
@@ -85,10 +85,10 @@ contract ShareSecurityTest is VaultTestBase {
         donor.donate(c0, 50_000 ether, address(vault));
         vm.stopPrank();
 
-        (uint256 f0, uint256 f1) = vault.previewRedeem(vault.sharesOf(lpA));
+        (uint256 f0, uint256 f1) = lens.previewRedeem(vault, vault.sharesOf(lpA));
         assertEq(f0, e0);
         assertEq(f1, e1);
-        assertEq(vault.deliverableShares(), deliverable);
+        assertEq(lens.deliverableShares(vault), deliverable);
         assertEq(_claims(address(vault), c0), vault.backing(c0) + 50_000 ether, "surplus is stranded, not owned");
     }
 
@@ -123,7 +123,7 @@ contract ShareSecurityTest is VaultTestBase {
     ///         deposit's msg.sender. An LP's standing approval cannot be spent by anyone else.
     function test_depositAlwaysPullsFromCaller() public {
         _fundLp(lpA, 1_000_000 ether, 1_000_000 ether); // lpA has approved the vault for max
-        (uint256 p0, uint256 p1) = vault.previewDeposit(1000 ether);
+        (uint256 p0, uint256 p1) = lens.previewDeposit(vault, 1000 ether);
         vm.prank(attacker); // attacker holds no tokens and names lpA's funds nowhere
         vm.expectRevert(bytes("TRANSFER_FROM_FAILED"));
         vault.deposit(1000 ether, p0, p1, attacker);
@@ -223,7 +223,7 @@ contract ShareSecurityTest is VaultTestBase {
         vault.redeem(1, 0, 0, lp0, false);
         _swap(keyA, true, 1_005_025 ether, id2); // ~all of the commitment at the 50 bps max fee
         assertGt(vault.getAllocation(id2).consumed, 999_999 ether);
-        assertEq(vault.freeInventory(c1), 0);
+        assertEq(lens.freeInventory(vault, c1), 0);
         assertEq(vault.backing(c1), 500_000 ether + vault.reserved(c1), "only claimable + unconsumed remain");
 
         vm.prank(lpA);
@@ -277,7 +277,7 @@ contract ShareSecurityTest is VaultTestBase {
     function test_failedDeposit_rollsBackShareState() public {
         uint256 S = vault.totalShares();
         uint256 b0 = vault.backing(c0);
-        (uint256 p0, uint256 p1) = vault.previewDeposit(1000 ether);
+        (uint256 p0, uint256 p1) = lens.previewDeposit(vault, 1000 ether);
         token0.mint(lpA, p0);
         token1.mint(lpA, p1 - 1); // one wei short of token1
         vm.startPrank(lpA);
@@ -348,7 +348,7 @@ contract ShareSecurityTest is VaultTestBase {
         vm.prank(owner);
         vault.setPaused(true);
 
-        (uint256 p0, uint256 p1) = vault.previewDeposit(1 ether);
+        (uint256 p0, uint256 p1) = lens.previewDeposit(vault, 1 ether);
         _fundLp(lpA, p0, p1);
         vm.prank(lpA);
         vm.expectRevert(ISharedCommitmentVault.Paused.selector);
@@ -376,7 +376,7 @@ contract ShareSecurityTest is VaultTestBase {
     // ==================================================================
 
     function test_slippageBounds_depositAndRedeem() public {
-        (uint256 p0, uint256 p1) = vault.previewDeposit(100_000 ether);
+        (uint256 p0, uint256 p1) = lens.previewDeposit(vault, 100_000 ether);
         _fundLp(lpA, p0 * 2, p1 * 2);
         // A swap lands first and shifts the basket composition.
         uint256 id = _allocate(keyB, c0, 200_000 ether);
@@ -385,7 +385,7 @@ contract ShareSecurityTest is VaultTestBase {
         vm.expectRevert(ISharedCommitmentVault.SlippageExceeded.selector);
         vault.deposit(100_000 ether, p0, p1, lpA);
 
-        (uint256 e0, uint256 e1) = vault.previewRedeem(100_000 ether);
+        (uint256 e0, uint256 e1) = lens.previewRedeem(vault, 100_000 ether);
         vm.prank(lp0);
         vm.expectRevert(ISharedCommitmentVault.SlippageExceeded.selector);
         vault.redeem(100_000 ether, e0 + 1, e1, lp0, false);

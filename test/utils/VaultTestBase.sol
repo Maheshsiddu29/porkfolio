@@ -19,6 +19,7 @@ import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultLens} from "../../src/VaultLens.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {HookA_DynamicFee} from "../../src/hooks/HookA_DynamicFee.sol";
 import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
@@ -43,6 +44,7 @@ abstract contract VaultTestBase is Test {
     Currency internal c1;
 
     SharedCommitmentVault internal vault;
+    VaultLens internal lens; // stateless read-only helpers (previews, N_a, F_a, D_a, request status)
     HookA_DynamicFee internal hookA;
     HookB_BoundedImpact internal hookB;
     PoolKey internal keyA; // HookA pool: fee 3000 / tickSpacing 60
@@ -70,6 +72,7 @@ abstract contract VaultTestBase is Test {
         c1 = Currency.wrap(address(token1));
 
         vault = new SharedCommitmentVault(manager, owner, c0, c1);
+        lens = new VaultLens();
         batchRouter = new BatchSwapRouter(manager, address(vault));
 
         hookA = HookA_DynamicFee(_deployHook("HookA_DynamicFee.sol:HookA_DynamicFee", 0xA11CE));
@@ -142,7 +145,7 @@ abstract contract VaultTestBase is Test {
 
     /// @dev Mint `shares` to `lp` at the current basket price, funding the LP with exactly what is needed.
     function _depositShares(address lp, uint256 shares) internal returns (uint256 amount0, uint256 amount1) {
-        (amount0, amount1) = vault.previewDeposit(shares);
+        (amount0, amount1) = lens.previewDeposit(vault, shares);
         _fundLp(lp, amount0, amount1);
         vm.prank(lp);
         vault.deposit(shares, amount0, amount1, lp);
@@ -292,10 +295,10 @@ abstract contract VaultTestBase is Test {
             assertLe(Q[i] + W[i], B, "Q + W > B");
             uint256 N = B - W[i];
             nSum += N;
-            assertEq(vault.netAssets(c), N, "N != B - W");
-            assertEq(vault.freeInventory(c), N - Q[i], "F != N - Q");
+            assertEq(lens.netAssets(vault, c), N, "N != B - W");
+            assertEq(lens.freeInventory(vault, c), N - Q[i], "F != N - Q");
             uint256 D = P == 0 ? 0 : FullMath.mulDivRoundingUp(P, N, S);
-            assertEq(vault.pendingDemand(c), D, "D != ceil(P*N/S)");
+            assertEq(lens.pendingDemand(vault, c), D, "D != ceil(P*N/S)");
             assertLe(D, N, "D > N");
             // Q + D <= 2N < 2^129 cannot overflow. R is unbounded (the guardian may raise it to type(uint256).max),
             // so it is compared against what is left rather than added to Q + D.

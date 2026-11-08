@@ -58,8 +58,8 @@ contract MultiLpAccountingTest is VaultTestBase {
 
         // lpB joins after the trades at the new composition, paying ceil(shares * N_a / S).
         uint256 S = vault.totalShares();
-        uint256 n0 = vault.netAssets(c0);
-        uint256 n1 = vault.netAssets(c1);
+        uint256 n0 = lens.netAssets(vault, c0);
+        uint256 n1 = lens.netAssets(vault, c1);
         (a0, a1) = _depositShares(lpB, 250_000 ether);
         assertEq(a0, FullMath.mulDivRoundingUp(250_000 ether, n0, S));
         assertEq(a1, FullMath.mulDivRoundingUp(250_000 ether, n1, S));
@@ -68,8 +68,8 @@ contract MultiLpAccountingTest is VaultTestBase {
 
         // lpA partially exits instantly at floor(shares * N_a / S).
         S = vault.totalShares();
-        n0 = vault.netAssets(c0);
-        n1 = vault.netAssets(c1);
+        n0 = lens.netAssets(vault, c0);
+        n1 = lens.netAssets(vault, c1);
         (uint256 instant, uint256 r0, uint256 r1,) = _redeem(lpA, 200_000 ether, false);
         assertEq(instant, 200_000 ether);
         assertEq(r0, FullMath.mulDiv(200_000 ether, n0, S));
@@ -110,9 +110,9 @@ contract MultiLpAccountingTest is VaultTestBase {
         uint256 id = _allocate(keyA, c1, 300_000 ether);
         _swap(keyA, true, 200_000 ether, id);
 
-        (uint256 before0, uint256 before1) = vault.previewRedeem(vault.sharesOf(lp0));
+        (uint256 before0, uint256 before1) = lens.previewRedeem(vault, vault.sharesOf(lp0));
         _depositShares(lpA, 777_777 ether + 13);
-        (uint256 after0, uint256 after1) = vault.previewRedeem(vault.sharesOf(lp0));
+        (uint256 after0, uint256 after1) = lens.previewRedeem(vault, vault.sharesOf(lp0));
         assertGe(after0, before0, "lp0 token0 claim diluted");
         assertGe(after1, before1, "lp0 token1 claim diluted");
     }
@@ -164,11 +164,11 @@ contract MultiLpAccountingTest is VaultTestBase {
         assertEq(r0, 200_000 ether);
         assertEq(r1, 200_000 ether);
         assertEq(vault.pendingShares(), 800_000 ether);
-        assertEq(uint8(vault.requestStatus(req)), uint8(ISharedCommitmentVault.RequestStatus.Pending));
+        assertEq(uint8(lens.requestStatus(vault, req)), uint8(ISharedCommitmentVault.RequestStatus.Pending));
 
         // Nothing is free in token1, and pending demand (800k token0) now blocks token0 allocations beyond
         // N0 - D0 = 1.8M - 800k.
-        assertEq(vault.pendingDemand(c0), 800_000 ether);
+        assertEq(lens.pendingDemand(vault, c0), 800_000 ether);
         assertEq(vault.admissibleCapacity(c0), 1_000_000 ether);
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyB, c0, 1_000_000 ether + 1);
         vm.prank(curator);
@@ -187,10 +187,10 @@ contract MultiLpAccountingTest is VaultTestBase {
         vault.release(id);
 
         uint256 S = vault.totalShares();
-        uint256 n0 = vault.netAssets(c0);
-        uint256 n1 = vault.netAssets(c1);
+        uint256 n0 = lens.netAssets(vault, c0);
+        uint256 n1 = lens.netAssets(vault, c1);
         assertEq(vault.processQueue(10), 800_000 ether);
-        assertEq(uint8(vault.requestStatus(req)), uint8(ISharedCommitmentVault.RequestStatus.Claimable));
+        assertEq(uint8(lens.requestStatus(vault, req)), uint8(ISharedCommitmentVault.RequestStatus.Claimable));
         ISharedCommitmentVault.WithdrawalRequest memory w = vault.getRequest(req);
         assertEq(w.claimable0, FullMath.mulDiv(800_000 ether, n0, S));
         assertEq(w.claimable1, FullMath.mulDiv(800_000 ether, n1, S));
@@ -203,7 +203,7 @@ contract MultiLpAccountingTest is VaultTestBase {
         (uint256 c0Out, uint256 c1Out) = vault.claim(req);
         assertEq(c0Out, w.claimable0);
         assertEq(c1Out, w.claimable1);
-        assertEq(uint8(vault.requestStatus(req)), uint8(ISharedCommitmentVault.RequestStatus.Completed));
+        assertEq(uint8(lens.requestStatus(vault, req)), uint8(ISharedCommitmentVault.RequestStatus.Completed));
         _assertAccountingConsistent();
     }
 
@@ -243,7 +243,7 @@ contract MultiLpAccountingTest is VaultTestBase {
         assertEq(c.claimable1, 300_000 ether);
         assertEq(c.sharesPending, 0);
         assertEq(vault.getRequest(req0).sharesPending, 100_000 ether, "lp0 behind C, untouched");
-        assertEq(vault.freeInventory(c1), 0);
+        assertEq(lens.freeInventory(vault, c1), 0);
         assertEq(vault.queueHead(), req0);
 
         // Remaining commitment expires; lp0's request completes last.
@@ -273,7 +273,7 @@ contract MultiLpAccountingTest is VaultTestBase {
         vault.release(id1); // F1 = 400k
         assertEq(vault.processQueue(10), 400_000 ether);
         assertEq(vault.getRequest(req).sharesPending, 600_000 ether);
-        assertEq(uint8(vault.requestStatus(req)), uint8(ISharedCommitmentVault.RequestStatus.Pending));
+        assertEq(uint8(lens.requestStatus(vault, req)), uint8(ISharedCommitmentVault.RequestStatus.Pending));
         assertEq(vault.queueHead(), req, "head stays on a partially filled request");
 
         vm.prank(lpA);
@@ -284,7 +284,7 @@ contract MultiLpAccountingTest is VaultTestBase {
         vm.prank(owner);
         vault.release(id2);
         assertEq(vault.processQueue(10), 600_000 ether);
-        assertEq(uint8(vault.requestStatus(req)), uint8(ISharedCommitmentVault.RequestStatus.Claimable));
+        assertEq(uint8(lens.requestStatus(vault, req)), uint8(ISharedCommitmentVault.RequestStatus.Claimable));
         vm.prank(lpA);
         (g0, g1) = vault.claim(req);
         assertEq(g0, 600_000 ether);
@@ -306,7 +306,7 @@ contract MultiLpAccountingTest is VaultTestBase {
         vault.release(id);
         vault.processQueue(1);
         ISharedCommitmentVault.WithdrawalRequest memory w = vault.getRequest(req);
-        (uint256 b0, uint256 b1) = vault.previewRedeem(vault.sharesOf(lpB));
+        (uint256 b0, uint256 b1) = lens.previewRedeem(vault, vault.sharesOf(lpB));
         // A's shares left the supply, so B's preview uses a slightly different S; floor rounding differs by <= 1.
         assertApproxEqAbs(w.claimable0, b0, 1);
         assertApproxEqAbs(w.claimable1, b1, 1);
@@ -317,10 +317,10 @@ contract MultiLpAccountingTest is VaultTestBase {
     function test_adverseInventory_assetNearlyDrained() public {
         uint256 id = _allocate(keyA, c1, uint128(VAULT_FUNDING));
         _swap(keyA, true, 1_000_000 ether, id); // ~99.5% of token1 sold
-        uint256 left1 = vault.netAssets(c1);
+        uint256 left1 = lens.netAssets(vault, c1);
         assertLt(left1, VAULT_FUNDING / 100);
 
-        (uint256 p0, uint256 p1) = vault.previewDeposit(1_000_000 ether);
+        (uint256 p0, uint256 p1) = lens.previewDeposit(vault, 1_000_000 ether);
         assertGt(p0, 1_990_000 ether);
         assertEq(p1, FullMath.mulDivRoundingUp(1_000_000 ether, left1, vault.totalShares()));
 
@@ -353,10 +353,10 @@ contract MultiLpAccountingTest is VaultTestBase {
         vm.prank(owner);
         vault.release(id2);
         uint256 S = vault.totalShares();
-        uint256 deliverable = vault.deliverableShares();
+        uint256 deliverable = lens.deliverableShares(vault);
         assertEq(deliverable, 400_000 ether);
         assertEq(vault.processQueue(1), deliverable);
-        assertEq(uint8(vault.requestStatus(req)), uint8(ISharedCommitmentVault.RequestStatus.Pending));
+        assertEq(uint8(lens.requestStatus(vault, req)), uint8(ISharedCommitmentVault.RequestStatus.Pending));
         assertEq(vault.totalShares(), S - deliverable);
 
         vm.prank(lp0);
@@ -368,7 +368,7 @@ contract MultiLpAccountingTest is VaultTestBase {
         assertEq(returned, 500_000 ether - deliverable);
         assertEq(vault.sharesOf(lpA), returned);
         assertEq(vault.pendingShares(), 0);
-        assertEq(uint8(vault.requestStatus(req)), uint8(ISharedCommitmentVault.RequestStatus.Claimable));
+        assertEq(uint8(lens.requestStatus(vault, req)), uint8(ISharedCommitmentVault.RequestStatus.Claimable));
 
         vm.prank(lpA);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.NothingPending.selector, req));
@@ -377,11 +377,11 @@ contract MultiLpAccountingTest is VaultTestBase {
         vm.prank(lpA);
         (uint256 g0, uint256 g1) = vault.claim(req);
         assertGt(g0 + g1, 0);
-        assertEq(uint8(vault.requestStatus(req)), uint8(ISharedCommitmentVault.RequestStatus.Canceled));
+        assertEq(uint8(lens.requestStatus(vault, req)), uint8(ISharedCommitmentVault.RequestStatus.Canceled));
         vm.prank(lpA);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.NothingToClaim.selector, req));
         vault.claim(req);
-        assertEq(uint8(vault.requestStatus(999)), uint8(ISharedCommitmentVault.RequestStatus.None));
+        assertEq(uint8(lens.requestStatus(vault, 999)), uint8(ISharedCommitmentVault.RequestStatus.None));
         _assertAccountingConsistent();
     }
 
@@ -448,7 +448,7 @@ contract MultiLpAccountingTest is VaultTestBase {
         assertEq(shares + v.MIN_SHARES(), v.totalShares());
 
         uint256 sharesB = v.totalShares() / 3;
-        (uint256 p0, uint256 p1) = v.previewDeposit(sharesB);
+        (uint256 p0, uint256 p1) = lens.previewDeposit(v, sharesB);
         _mintApprove(t0, t1, address(v), lpB, p0, p1);
         vm.prank(lpB);
         v.deposit(sharesB, p0, p1, lpB);
@@ -478,14 +478,14 @@ contract MultiLpAccountingTest is VaultTestBase {
 
     function _assertProportional(address lp) internal view {
         uint256 s = vault.sharesOf(lp);
-        (uint256 e0, uint256 e1) = vault.previewRedeem(s);
-        assertEq(e0, FullMath.mulDiv(s, vault.netAssets(c0), vault.totalShares()));
-        assertEq(e1, FullMath.mulDiv(s, vault.netAssets(c1), vault.totalShares()));
+        (uint256 e0, uint256 e1) = lens.previewRedeem(vault, s);
+        assertEq(e0, FullMath.mulDiv(s, lens.netAssets(vault, c0), vault.totalShares()));
+        assertEq(e1, FullMath.mulDiv(s, lens.netAssets(vault, c1), vault.totalShares()));
     }
 
     function _logState(string memory label) internal view {
         console2.log(label);
-        console2.log("  S, N0, N1:", vault.totalShares(), vault.netAssets(c0), vault.netAssets(c1));
+        console2.log("  S, N0, N1:", vault.totalShares(), lens.netAssets(vault, c0), lens.netAssets(vault, c1));
         console2.log("  Q0, Q1   :", vault.reserved(c0), vault.reserved(c1));
     }
 }

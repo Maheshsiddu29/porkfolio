@@ -76,6 +76,7 @@ contract ProductionArtifactGasTest is Test {
     string internal constant VAULT_ARTIFACT = "SharedCommitmentVault.sol:SharedCommitmentVault";
     string internal constant HOOK_A_ARTIFACT = "HookA_DynamicFee.sol:HookA_DynamicFee";
     string internal constant HOOK_B_ARTIFACT = "HookB_BoundedImpact.sol:HookB_BoundedImpact";
+    string internal constant LENS_ARTIFACT = "VaultLens.sol:VaultLens";
 
     PoolManager internal manager;
     PoolSwapTest internal swapRouter;
@@ -146,10 +147,12 @@ contract ProductionArtifactGasTest is Test {
 
     /// @notice Ties the deployed contracts to the artifacts `run.sh` inspects, and logs their sizes. Immutables do
     ///         not change code length, so equal lengths show the deployed code came from that artifact's build.
-    function test_bench_sizes() public view {
+    function test_bench_sizes() public {
+        address lens = deployCode(LENS_ARTIFACT);
         _logSize("SharedCommitmentVault", address(vault), VAULT_ARTIFACT);
         _logSize("HookA_DynamicFee", hookA, HOOK_A_ARTIFACT);
         _logSize("HookB_BoundedImpact", hookB, HOOK_B_ARTIFACT);
+        _logSize("VaultLens", lens, LENS_ARTIFACT);
         console2.log("BENCH runtime PoolManager (default profile):", address(manager).code.length);
     }
 

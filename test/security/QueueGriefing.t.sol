@@ -26,11 +26,11 @@ contract QueueGriefingTest is VaultTestBase {
     /// @dev Commit every admissible unit of token1 so that F1 == 0 and nothing can be delivered in kind.
     function _lockToken1() internal returns (uint256 id) {
         id = _allocate(keyA, c1, uint128(vault.admissibleCapacity(c1)));
-        assertEq(vault.freeInventory(c1), 0);
+        assertEq(lens.freeInventory(vault, c1), 0);
     }
 
     function _status(uint256 req) internal view returns (ISharedCommitmentVault.RequestStatus) {
-        return vault.requestStatus(req);
+        return lens.requestStatus(vault, req);
     }
 
     // ------------------------------------------------------------------
@@ -142,7 +142,7 @@ contract QueueGriefingTest is VaultTestBase {
 
         // A new LP deposits and tries to exit at once: its token1 goes to the head first.
         _depositShares(lpB, 1 ether);
-        assertGt(vault.freeInventory(c0), 1_000_000 ether, "token0 is plentiful");
+        assertGt(lens.freeInventory(vault, c0), 1_000_000 ether, "token0 is plentiful");
         vm.prank(lpB);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InsufficientLiquidity.selector, 1 ether, 0));
         vault.redeem(1 ether, 0, 0, lpB, false);

@@ -92,7 +92,7 @@ contract VaultFundingTest is VaultTestBase {
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InitialDepositTooSmall.selector, 1000, 1000));
         fresh.initialDeposit(1000, 1000, lp0);
         vm.stopPrank();
-        (uint256 p0, uint256 p1) = fresh.previewRedeem(1);
+        (uint256 p0, uint256 p1) = lens.previewRedeem(fresh, 1);
         assertEq(p0 + p1, 0);
     }
 
@@ -144,7 +144,7 @@ contract VaultFundingTest is VaultTestBase {
         uint256 lpShares = vault.sharesOf(lp0);
         uint256 S = vault.totalShares();
 
-        uint256 deliverable = vault.deliverableShares();
+        uint256 deliverable = lens.deliverableShares(vault);
         assertEq(deliverable, S * 20 / 100);
         vm.prank(lp0);
         vm.expectRevert(
@@ -156,13 +156,13 @@ contract VaultFundingTest is VaultTestBase {
         assertEq(instant, deliverable);
         assertEq(a1, C - Q, "exactly the free token1");
         assertEq(a0, C - Q, "token0 delivered pro rata, not more");
-        assertEq(vault.freeInventory(c1), 0);
+        assertEq(lens.freeInventory(vault, c1), 0);
         assertEq(vault.pendingShares(), lpShares - instant);
 
         // After expiry the capacity is NOT returned until someone calls release (lazy expiry).
         vm.warp(vault.getAllocation(id).expiry);
         assertEq(vault.processQueue(10), 0);
-        assertEq(uint8(vault.requestStatus(requestId)), uint8(ISharedCommitmentVault.RequestStatus.Pending));
+        assertEq(uint8(lens.requestStatus(vault, requestId)), uint8(ISharedCommitmentVault.RequestStatus.Pending));
 
         vault.release(id);
         assertEq(vault.processQueue(10), lpShares - instant);
@@ -204,7 +204,7 @@ contract VaultFundingTest is VaultTestBase {
     ///         (e.g. re-entered from inside a swap), because PoolManager.unlock reverts AlreadyUnlocked.
     function test_redeem_cannotNestInsideUnlock() public {
         NestedRedeemer n = new NestedRedeemer(manager, vault);
-        (uint256 a0, uint256 a1) = vault.previewDeposit(1 ether);
+        (uint256 a0, uint256 a1) = lens.previewDeposit(vault, 1 ether);
         token0.mint(address(n), a0);
         token1.mint(address(n), a1);
         n.depositShares(1 ether);

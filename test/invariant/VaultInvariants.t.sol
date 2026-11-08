@@ -17,6 +17,7 @@ import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultLens} from "../../src/VaultLens.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {AuthModeHook} from "../utils/AuthModeHook.sol";
@@ -51,6 +52,7 @@ contract VaultHandler is Test {
     }
 
     SharedCommitmentVault internal vault;
+    VaultLens internal lens = new VaultLens();
     IPoolManager internal manager;
     PoolSwapTest internal router;
     ClaimDonor internal donor;
@@ -191,7 +193,7 @@ contract VaultHandler is Test {
         uint256 id = _allocate(keyE, out, q, 1 days);
         if (id == 0) return;
         if (_swap(keyE, out == c1, q, id)) drainsOk++;
-        if (vault.netAssets(c0) == 0 || vault.netAssets(c1) == 0) zeroAssetStatesSeen++;
+        if (lens.netAssets(vault, c0) == 0 || lens.netAssets(vault, c1) == 0) zeroAssetStatesSeen++;
     }
 
     // ------------------------------------------------------------------
@@ -274,7 +276,7 @@ contract VaultHandler is Test {
     function setBuffer(bool sellOne, uint256 value, bool huge, bool asGuardian) external {
         Currency c = sellOne ? c1 : c0;
         value = huge && asGuardian
-            ? type(uint256).max - bound(value, 0, vault.reserved(c) + vault.pendingDemand(c))
+            ? type(uint256).max - bound(value, 0, vault.reserved(c) + lens.pendingDemand(vault, c))
             : bound(value, sellOne ? 0 : 50_000 ether, 300_000 ether);
         uint256 before = vault.bufferFloor(c);
         vm.prank(asGuardian ? guardian : owner);
@@ -333,7 +335,7 @@ contract VaultHandler is Test {
     function deposit(uint256 lpSeed, uint256 shares) external {
         address lp = lps[lpSeed % lps.length];
         shares = bound(shares, 1, 200_000 ether);
-        (uint256 a0, uint256 a1) = vault.previewDeposit(shares);
+        (uint256 a0, uint256 a1) = lens.previewDeposit(vault, shares);
         MockERC20(Currency.unwrap(c0)).mint(lp, a0);
         MockERC20(Currency.unwrap(c1)).mint(lp, a1);
         uint256 e0 = _erc20(c0, lp);
@@ -474,7 +476,7 @@ contract VaultHandler is Test {
         MockERC20(Currency.unwrap(zeroForOne ? c0 : c1)).mint(trader, amountIn);
         Currency cout = zeroForOne ? c1 : c0;
         uint256 feff;
-        try vault.effectiveFloorX96(id) returns (uint256 f) {
+        try lens.effectiveFloorX96(vault, id) returns (uint256 f) {
             feff = f;
         } catch {}
         Snap memory p = _take();
@@ -564,8 +566,8 @@ contract VaultHandler is Test {
         p.pm1 = manager.balanceOf(address(vault), c1.toId());
         p.w0 = vault.claimableAssets(c0);
         p.w1 = vault.claimableAssets(c1);
-        p.n0 = vault.netAssets(c0);
-        p.n1 = vault.netAssets(c1);
+        p.n0 = lens.netAssets(vault, c0);
+        p.n1 = lens.netAssets(vault, c1);
         p.s = vault.totalShares();
     }
 
@@ -592,7 +594,9 @@ contract VaultHandler is Test {
     /// Trades are excluded because they legitimately change the per-share basket in both assets.
     function _checkMonotonic(Snap memory p) internal {
         uint256 s2 = vault.totalShares();
-        if (vault.netAssets(c0) * p.s < p.n0 * s2 || vault.netAssets(c1) * p.s < p.n1 * s2) perShareDecreased = true;
+        if (lens.netAssets(vault, c0) * p.s < p.n0 * s2 || lens.netAssets(vault, c1) * p.s < p.n1 * s2) {
+            perShareDecreased = true;
+        }
     }
 }
 
@@ -751,6 +755,78 @@ contract VaultInvariantsTest is VaultTestBase {
         _assertEquationsWith(handler.ghostDonated(c0), handler.ghostDonated(c1));
     }
 
+    /// VaultLens previews equal what the vault actually does in the current state. Each operation runs for real on
+    /// a snapshot that is rolled back afterwards, so the campaign state is not changed:
+    ///   - `deposit` charges exactly `previewDeposit`;
+    ///   - with an empty queue, `redeem` pays min(balance, `deliverableShares`) instantly, and pays
+    ///     `previewRedeem` of that slice (or queues everything, or reverts as dust, exactly when the model says so);
+    ///   - with a non-empty queue, `processQueue(1)` finalizes min(head pending, `deliverableShares`) shares of the
+    ///     head request for `previewRedeem` of them.
+    /// A divergence would mean the lens repeats a formula or rounding of the vault incorrectly.
+    function invariant_lensPreviewsMatchExecution() public {
+        uint256 snap = vm.snapshotState();
+        if (!vault.paused()) {
+            address probe = makeAddr("lensProbe");
+            uint256 shares = vault.totalShares() / 100 + 1;
+            (uint256 p0, uint256 p1) = lens.previewDeposit(vault, shares);
+            _fundLp(probe, p0, p1);
+            vm.prank(probe);
+            (uint256 a0, uint256 a1) = vault.deposit(shares, p0, p1, probe);
+            assertEq(a0, p0, "deposit asset0 != previewDeposit");
+            assertEq(a1, p1, "deposit asset1 != previewDeposit");
+            vm.revertToState(snap);
+            snap = vm.snapshotState();
+        }
+        if (vault.pendingShares() == 0) {
+            _checkInstantRedeemMatchesLens();
+        } else {
+            _checkHeadFinalizationMatchesLens();
+        }
+        vm.revertToState(snap);
+    }
+
+    function _checkInstantRedeemMatchesLens() internal {
+        uint256 bal = vault.sharesOf(lp0);
+        if (bal == 0) return;
+        uint256 d = lens.deliverableShares(vault);
+        uint256 inst = bal < d ? bal : d;
+        (uint256 e0, uint256 e1) = lens.previewRedeem(vault, inst);
+        bool dust;
+        if (inst != 0 && e0 == 0 && e1 == 0) {
+            if (inst == bal) dust = true;
+            else inst = 0;
+        }
+        if (!dust && inst < bal) {
+            (uint256 r0, uint256 r1) = lens.previewRedeem(vault, bal - inst);
+            dust = r0 == 0 && r1 == 0;
+        }
+        if (inst == 0) (e0, e1) = (0, 0);
+        vm.prank(lp0);
+        try vault.redeem(bal, 0, 0, lp0, true) returns (uint256 got, uint256 a0, uint256 a1, uint256) {
+            assertFalse(dust, "redeem succeeded where the lens model predicts a dust revert");
+            assertEq(got, inst, "instant shares != min(balance, deliverableShares)");
+            assertEq(a0, e0, "instant asset0 != previewRedeem");
+            assertEq(a1, e1, "instant asset1 != previewRedeem");
+        } catch (bytes memory reason) {
+            assertTrue(dust, "redeem reverted where the lens model predicts success");
+            assertEq(bytes4(reason), ISharedCommitmentVault.DustRedemption.selector, "unexpected redeem revert");
+        }
+    }
+
+    function _checkHeadFinalizationMatchesLens() internal {
+        uint256 head = vault.queueHead();
+        ISharedCommitmentVault.WithdrawalRequest memory r = vault.getRequest(head);
+        if (r.sharesPending == 0) return; // processQueue(1) would only skip this entry
+        uint256 d = lens.deliverableShares(vault);
+        uint256 s = r.sharesPending < d ? r.sharesPending : d;
+        (uint256 e0, uint256 e1) = lens.previewRedeem(vault, s);
+        bool finalizes = s != 0 && !(e0 == 0 && e1 == 0 && s < r.sharesPending);
+        assertEq(vault.processQueue(1), finalizes ? s : 0, "finalized shares != min(pending, deliverableShares)");
+        ISharedCommitmentVault.WithdrawalRequest memory after_ = vault.getRequest(head);
+        assertEq(after_.claimable0 - r.claimable0, finalizes ? e0 : 0, "finalized asset0 != previewRedeem");
+        assertEq(after_.claimable1 - r.claimable1, finalizes ? e1 : 0, "finalized asset1 != previewRedeem");
+    }
+
     /// Every successful action moved real ERC-20 / ERC-6909 balances by exactly its accounting change;
     /// W_a changed only through finalization or claims; no allocation exceeded the admissible capacity; and
     /// admissibleCapacity never reverted, including with a buffer floor near type(uint256).max.
@@ -833,7 +909,7 @@ contract VaultInvariantsTest is VaultTestBase {
 
         handler.drain(1); // sell all admissible token1 at 1:1
         assertEq(handler.drainsOk(), 1);
-        assertEq(vault.netAssets(c1), 0, "zero-asset state reached");
+        assertEq(lens.netAssets(vault, c1), 0, "zero-asset state reached");
         handler.deposit(3, 1000 ether); // deposits into a depleted asset
         handler.redeem(3, 1000 ether, true);
 

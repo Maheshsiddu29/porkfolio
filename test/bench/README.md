@@ -35,6 +35,7 @@ gas numbers, however, include a PoolManager and hooks that are not the productio
 |---|---|---|
 | `SharedCommitmentVault` | `vm.getCode("SharedCommitmentVault.sol:SharedCommitmentVault")`, the only vault artifact | the vault's restriction, or the default if there is none |
 | `HookA_DynamicFee`, `HookB_BoundedImpact` | `deployCodeTo` with the default-profile artifact | default (`optimizer_runs` in `foundry.toml`) |
+| `VaultLens` | `deployCode("VaultLens.sol:VaultLens")`, default-profile artifact (only sizes are measured) | default |
 | `PoolManager` | `new PoolManager`, compiled in this file | default, which matches pinned v4-core's own `foundry.toml` (via-IR, 44,444,444 runs) |
 | `PoolSwapTest`, `PoolModifyLiquidityTest` | compiled in this file | default; test routers, included in every swap number |
 
@@ -42,7 +43,7 @@ gas numbers, however, include a PoolManager and hooks that are not the productio
 
 - the vault's artifact does not record the expected runs;
 - there is more than one vault artifact;
-- a hook has no default-profile artifact;
+- a hook or `VaultLens` has no default-profile artifact;
 - any of them exceeds the EIP-170 runtime limit of 24,576 bytes.
 
 A margin below the project target of 2,048 bytes is flagged `BELOW_TARGET` but does not fail the run.

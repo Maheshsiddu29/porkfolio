@@ -106,7 +106,7 @@ contract AdmissibleCapacityTest is VaultTestBase {
     function test_AC_bufferFloorNearMax_withReservedAndPending() public {
         _setUpReservedAndPending();
         uint256 q = vault.reserved(c1);
-        uint256 d = vault.pendingDemand(c1);
+        uint256 d = lens.pendingDemand(vault, c1);
         assertGt(q, 0, "fixture: Q > 0");
         assertGt(d, 0, "fixture: D > 0");
 
@@ -132,9 +132,9 @@ contract AdmissibleCapacityTest is VaultTestBase {
     ///         a buffer floor one unit higher refuses `cap` and reports `cap - 1` as available.
     function test_AC_exactBoundary_withAllTermsNonZero() public {
         _setUpReservedAndPending();
-        uint256 n = vault.netAssets(c1);
+        uint256 n = lens.netAssets(vault, c1);
         uint256 q = vault.reserved(c1);
-        uint256 d = vault.pendingDemand(c1);
+        uint256 d = lens.pendingDemand(vault, c1);
         uint256 cap = 777 ether;
         uint256 r = n - q - d - cap;
 
@@ -153,7 +153,9 @@ contract AdmissibleCapacityTest is VaultTestBase {
         assertEq(vault.admissibleCapacity(c1), cap);
         _allocate(keyA, c1, uint128(cap));
         assertEq(vault.admissibleCapacity(c1), 0);
-        assertEq(vault.reserved(c1) + vault.bufferFloor(c1) + vault.pendingDemand(c1), n, "Q + R + D == N exactly");
+        assertEq(
+            vault.reserved(c1) + vault.bufferFloor(c1) + lens.pendingDemand(vault, c1), n, "Q + R + D == N exactly"
+        );
 
         req = _request(keyA, c1, 1);
         vm.prank(curator);
@@ -185,7 +187,7 @@ contract AdmissibleCapacityTest is VaultTestBase {
 
         uint256 n = b - w;
         uint256 d = _referenceDemand(p, n, s);
-        assertEq(vault.pendingDemand(c1), d, "D matches the independent ceil");
+        assertEq(lens.pendingDemand(vault, c1), d, "D matches the independent ceil");
         assertEq(vault.admissibleCapacity(c1), _reference(n, q, r, d), "capacity matches reference");
     }
 
@@ -224,7 +226,7 @@ contract AdmissibleCapacityTest is VaultTestBase {
     ///         capacity, and otherwise reverts with `InsufficientBacking(requested, reference)`.
     function testFuzz_AC_allocateAgreesWithReference(uint256 r, uint256 maxOut, bool hugeR) public {
         _setUpReservedAndPending();
-        uint256 n = vault.netAssets(c1);
+        uint256 n = lens.netAssets(vault, c1);
         r = hugeR ? bound(r, MAX - 4 * MAX_AMOUNT, MAX) : bound(r, 0, n);
         vm.prank(owner);
         vault.setBufferFloor(c1, r);
@@ -248,7 +250,9 @@ contract AdmissibleCapacityTest is VaultTestBase {
         } else {
             vault.allocate(req);
             assertEq(vault.reserved(c1), qBefore + maxOut);
-            assertLe(vault.reserved(c1) + vault.bufferFloor(c1) + vault.pendingDemand(c1), n, "admission rule held");
+            assertLe(
+                vault.reserved(c1) + vault.bufferFloor(c1) + lens.pendingDemand(vault, c1), n, "admission rule held"
+            );
         }
     }
 
@@ -276,7 +280,7 @@ contract AdmissibleCapacityTest is VaultTestBase {
         _allocate(keyA, c1, 300_000 ether);
 
         assertGt(vault.pendingShares(), 0, "fixture: P > 0");
-        assertGt(vault.netAssets(c1), vault.reserved(c1) + vault.pendingDemand(c1), "fixture: room left");
+        assertGt(lens.netAssets(vault, c1), vault.reserved(c1) + lens.pendingDemand(vault, c1), "fixture: room left");
     }
 
     function _write(Currency c, uint256 b, uint256 w, uint256 q, uint256 r, uint256 s, uint256 p) internal {

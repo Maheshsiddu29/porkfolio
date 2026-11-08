@@ -272,7 +272,7 @@ contract SharedLiquiditySwapTest is VaultTestBase {
         // moved: amountIn >= ceil(amountOut * floor / 2^96). In this fixture both floors are 1:1, so this is
         // amountIn >= quoted. Both hooks also charge a positive fee or impact at their 1:1 reference price, and
         // for inputs >= 1e6 that removes at least one raw unit, so the output is strictly below the input.
-        uint256 floorX96 = vault.effectiveFloorX96(id);
+        uint256 floorX96 = lens.effectiveFloorX96(vault, id);
         assertEq(floorX96, FixedPoint96.Q96, "fixture floor is 1:1");
         assertGe(amountIn, FullMath.mulDivRoundingUp(quoted, floorX96, FixedPoint96.Q96), "below effective floor");
         assertLt(quoted, amountIn, "hook charged no fee or impact");
