@@ -17,6 +17,31 @@ You are the **implementation agent**, not the release manager. The human owner r
 11. If upstream v4 contracts make a proposal impossible, unsafe, or materially different, **stop and report the blocker**; do not silently substitute a different protocol or pretend the proof passed.
 12. Do not describe an audit, formal proof, guaranteed LP exit, or O(1) expiry as accomplished without the relevant evidence.
 
+## Documentation and NatSpec style
+
+Every phase that adds or changes Solidity ships the documentation with the code, in the same commit. No separate cleanup phase.
+
+**Audience.** An intermediate Solidity developer new to this project. Write as an engineer explaining their own code: what it does, why, and what it assumes.
+
+**NatSpec (src/).**
+- Contracts: `@title`, a `@notice` that says what the contract is for, and a `@dev` for custody, trust model, roles and anything not implemented.
+- Public and external functions: `@notice` (purpose), `@dev` (caller restrictions, state changes, failure conditions, rounding), `@param` for every named parameter with units (raw token units, Q64.96, pips, shares, seconds), `@return` for every return value (begin with its name when it is named).
+- Important internal functions: `@dev` explaining their role in accounting or settlement.
+- Structs (fields via `@param`), storage variables, events and custom errors: document whenever the meaning is not obvious from the name. Internal and private state variables take `@dev` only; solc rejects `@notice` there.
+
+**Mathematics.** For each important calculation, state what it computes, why, the units, the rounding direction and who it favours, the boundary cases, and a small numerical example when it helps. Never trade accuracy for simplicity. Keep overflow reasoning next to `FullMath`, casts and `unchecked` blocks.
+
+**Tests.** Explain what a non-obvious test proves and why it matters: invariant handlers and ghost variables, multi-step swaps, malicious hooks, queue ordering, rounding, expected reverts. Do not narrate setup or obvious assertions.
+
+**Do not.**
+- Restate the function name as a sentence, explain Solidity syntax, or use marketing language ("robust", "seamless", "battle-tested", "cutting-edge", "optimal").
+- Claim code is secure, gas-optimal, audited or formally verified without evidence.
+- Describe planned features (signed allocations, curator cancellation, epoch expiry) as implemented. Say plainly when something is not implemented.
+- Mention Claude, AI agents, phases, task labels, ADR numbers or earlier revisions in `src/` comments. Design history belongs in `docs/`.
+- Leave comments about bugs that no longer exist, or comments that would become wrong if an unrelated line changed.
+
+**Comment-only changes must be verified.** Run `forge fmt --check`, `forge build` and the full suite, and compare ABI, storage layout and runtime/init bytecode before and after. With `bytecode_hash = "none"` comments should not change bytecode; if they do, explain why before committing. If documenting reveals a bug, report it separately rather than fixing it in a documentation commit.
+
 ## Required finishing report for each milestone
 
 - **Status**: PASS / PARTIAL / BLOCKED, with reasons.
