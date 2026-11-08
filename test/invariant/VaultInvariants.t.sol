@@ -261,16 +261,20 @@ contract VaultHandler is Test {
         } catch {}
     }
 
-    /// @notice Owner or guardian sets a buffer floor R_a, half the time to a value at or near type(uint256).max.
-    /// @dev Exercises the case where Q_a + R_a + D_a does not fit in 256 bits. `admissibleCapacity` must keep
-    ///      returning (0 in that case) for both assets, `invariant_equationsFromRawSources` checks its value, and the
-    ///      guardian may only raise R_a. asset0 keeps R_0 >= 50,000 so the setUp property "token0 can never be fully
-    ///      drained" still holds.
+    /// @notice Owner or guardian sets a buffer floor R_a. Half of guardian calls choose a value at the 256-bit
+    ///         overflow boundary of Q_a + R_a + D_a (the guardian's "stop new allocations in this asset" action);
+    ///         owner calls always choose an ordinary value and so can lower R_a again.
+    /// @dev The huge value is R = type(uint256).max - offset with offset in [0, Q + D], so Q + R + D overflows for
+    ///      every offset below Q + D and equals type(uint256).max exactly at offset == Q + D. A uniform draw near
+    ///      type(uint256).max would almost never land in that window, which is only Q + D wide. `admissibleCapacity`
+    ///      must keep returning (0 here) for both assets, `invariant_equationsFromRawSources` checks its value, and
+    ///      the guardian may only raise R_a. Only the guardian goes huge so that the blocked state does not persist
+    ///      for most of a run and starve the allocation and swap actions. asset0 keeps R_0 >= 50,000 so the setUp
+    ///      property "token0 can never be fully drained" still holds.
     function setBuffer(bool sellOne, uint256 value, bool huge, bool asGuardian) external {
         Currency c = sellOne ? c1 : c0;
-        uint256 maxAmount = uint256(uint128(type(int128).max));
-        value = huge
-            ? bound(value, type(uint256).max - 4 * maxAmount, type(uint256).max)
+        value = huge && asGuardian
+            ? type(uint256).max - bound(value, 0, vault.reserved(c) + vault.pendingDemand(c))
             : bound(value, sellOne ? 0 : 50_000 ether, 300_000 ether);
         uint256 before = vault.bufferFloor(c);
         vm.prank(asGuardian ? guardian : owner);
