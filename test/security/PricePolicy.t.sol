@@ -394,26 +394,23 @@ contract PricePolicyTest is VaultTestBase {
     }
 
     /// @notice With any legal pair of floors (at the D14 boundary, the most permissive case), a round trip at the
-    ///         floors through the real PoolManager never returns more than it started with.
-    function testFuzz_PP_D14_roundTripAtFloors_neverProfitable(uint256 f1, uint256 x) public {
+    ///         floors through the real PoolManager never returns more than it started with. Both legs execute in
+    ///         every run, each EXACTLY at its floor (the trader's best possible prices).
+    function testFuzz_PP_D14_roundTripAtFloors_neverProfitable(uint256 f1, uint256 out1) public {
         f1 = bound(f1, 2 ** 32 + 1, MAX_FLOOR);
         uint256 f0 = FullMath.mulDivRoundingUp(Q96, Q96, f1);
         _setFloors(uint160(f0), uint160(f1));
 
-        // Leg 1: trader sells x token0; the vault sells token1 at its floor (max output for x).
-        x = bound(x, 1, 1e30);
-        uint256 out1 = FullMath.mulDiv(x, Q96, f1);
-        if (out1 == 0 || out1 > 500_000 ether) return;
+        // Leg 1: the vault sells out1 token1; the trader pays the minimum x = ceil(out1 * f1 / 2^96) token0.
+        uint256 maxOut1 = FullMath.mulDiv(vault.MAX_AMOUNT() - vault.backing(c0), Q96, f1);
+        out1 = bound(out1, 1, maxOut1 < 500_000 ether ? maxOut1 : 500_000 ether);
+        uint256 x = _required(out1, f1);
         token0.mint(trader, x);
-        uint256 id1 = _allocM(c1, uint128(out1), uint160(f1));
-        _trade(id1, c1, x, out1);
+        _trade(_allocM(c1, uint128(out1), uint160(f1)), c1, x, out1);
 
-        // Leg 2: trader sells all of it back; the vault sells token0 at its floor.
+        // Leg 2: the trader sells all out1 back; the vault pays the maximum floor(out1 * 2^96 / f0) token0.
         uint256 back = FullMath.mulDiv(out1, Q96, f0);
-        if (back != 0) {
-            uint256 id0 = _allocM(c0, uint128(back), uint160(f0));
-            _trade(id0, c0, out1, back);
-        }
+        if (back != 0) _trade(_allocM(c0, uint128(back), uint160(f0)), c0, out1, back);
         assertLe(back, x, "round trip at the floors is never profitable");
         _assertEquations();
     }
