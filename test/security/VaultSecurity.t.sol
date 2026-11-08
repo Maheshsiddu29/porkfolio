@@ -11,6 +11,7 @@ import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {stdError} from "forge-std/StdError.sol";
 
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {BaseCompatibleHook} from "../../src/hooks/BaseCompatibleHook.sol";
 import {HookA_DynamicFee} from "../../src/hooks/HookA_DynamicFee.sol";
@@ -381,6 +382,48 @@ contract VaultSecurityTest is VaultTestBase {
         _swapRaw(keyA, true, int256(1 ether), abi.encode(id));
     }
 
+    /// @notice A zero-amount swap never reaches the hook: the pinned PoolManager rejects it first with its own
+    ///         `SwapAmountCannotBeZero`, and `beforeSwap` is not called. If a caller with PoolManager authority did
+    ///         pass zero, the hook reports `ZeroInput`, not `ExactOutputNotSupported`, because a zero swap is not
+    ///         an exact-output swap.
+    function test_zeroAmountSwap_rejectedBeforeAndInsideHook() public {
+        uint256 id = _allocate(keyA, c1, QUOTA);
+        vm.expectCall(address(hookA), abi.encodePacked(IHooks.beforeSwap.selector), 0);
+        vm.expectRevert(IPoolManager.SwapAmountCannotBeZero.selector);
+        _swapRaw(keyA, true, 0, abi.encode(id));
+
+        // Direct calls go to hookB so the zero-call expectation above stays about hookA and the PoolManager path.
+        vm.prank(address(manager));
+        vm.expectRevert(BaseCompatibleHook.ZeroInput.selector);
+        hookB.beforeSwap(trader, keyB, _params(true, 0), abi.encode(id));
+
+        vm.prank(address(manager));
+        vm.expectRevert(BaseCompatibleHook.ExactOutputNotSupported.selector);
+        hookB.beforeSwap(trader, keyB, _params(true, 1), abi.encode(id));
+    }
+
+    /// @notice Every hook constructor argument is immutable. A zero PoolManager, vault or owner would leave a hook
+    ///         that can never be called, never fill a swap, or never be configured. The check runs before the
+    ///         address-permission check, so the revert names the real problem even at an unmined address.
+    function test_hookConstructor_rejectsZeroAddresses() public {
+        vm.expectRevert(BaseCompatibleHook.ZeroAddress.selector);
+        new HookA_DynamicFee(IPoolManager(address(0)), vault, hookOwner);
+        vm.expectRevert(BaseCompatibleHook.ZeroAddress.selector);
+        new HookA_DynamicFee(manager, ISharedCommitmentVault(address(0)), hookOwner);
+        vm.expectRevert(BaseCompatibleHook.ZeroAddress.selector);
+        new HookA_DynamicFee(manager, vault, address(0));
+        vm.expectRevert(BaseCompatibleHook.ZeroAddress.selector);
+        new HookB_BoundedImpact(IPoolManager(address(0)), vault, hookOwner);
+        vm.expectRevert(BaseCompatibleHook.ZeroAddress.selector);
+        new HookB_BoundedImpact(manager, ISharedCommitmentVault(address(0)), hookOwner);
+        vm.expectRevert(BaseCompatibleHook.ZeroAddress.selector);
+        new HookB_BoundedImpact(manager, vault, address(0));
+
+        // Control: non-zero arguments get past the zero check and fail only on the unmined address.
+        vm.expectPartialRevert(Hooks.HookAddressNotValid.selector);
+        new HookA_DynamicFee(manager, vault, hookOwner);
+    }
+
     function test_invalidHookData() public {
         _expectSwapRevert(address(hookA), abi.encodeWithSelector(BaseCompatibleHook.InvalidHookData.selector));
         _swapRaw(keyA, true, -1 ether, "");
@@ -442,11 +485,29 @@ contract VaultSecurityTest is VaultTestBase {
         _assertAccountingConsistent();
     }
 
-    /// @notice The payload is irrelevant (and not in the current encoding): the sender check runs first.
+    /// @notice A well-formed payload in the vault's current encoding (action, account, amount0, amount1) that would
+    ///         pay the whole backing to the attacker if it ran. The sender check rejects it before decoding, and
+    ///         nothing moves. The Deposit form (pulling an LP's approved tokens) is covered in ShareSecurity.
     function test_unlockCallback_onlyPoolManager() public {
+        uint256 b0 = vault.backing(c0);
+        uint256 b1 = vault.backing(c1);
+        bytes memory payload = abi.encode(SharedCommitmentVault.CallbackAction.Withdraw, attacker, b0, b1);
+        (SharedCommitmentVault.CallbackAction action, address account, uint256 a0, uint256 a1) =
+            abi.decode(payload, (SharedCommitmentVault.CallbackAction, address, uint256, uint256));
+        assertEq(uint8(action), uint8(SharedCommitmentVault.CallbackAction.Withdraw));
+        assertEq(account, attacker);
+        assertEq(a0, b0);
+        assertEq(a1, b1);
+
         vm.prank(attacker);
         vm.expectRevert(ISharedCommitmentVault.NotPoolManager.selector);
-        vault.unlockCallback(abi.encode(uint8(1), c0, 1 ether, attacker));
+        vault.unlockCallback(payload);
+
+        assertEq(vault.backing(c0), b0);
+        assertEq(vault.backing(c1), b1);
+        assertEq(token0.balanceOf(attacker), 0);
+        assertEq(token1.balanceOf(attacker), 0);
+        _assertAccountingConsistent();
     }
 
     // ==================================================================

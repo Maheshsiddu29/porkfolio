@@ -131,7 +131,7 @@ contract ShareSecurityTest is VaultTestBase {
 
         vm.prank(attacker);
         vm.expectRevert(ISharedCommitmentVault.NotPoolManager.selector);
-        vault.unlockCallback(abi.encode(uint8(0), lpA, p0, p1));
+        vault.unlockCallback(abi.encode(SharedCommitmentVault.CallbackAction.Deposit, lpA, p0, p1));
     }
 
     // ==================================================================

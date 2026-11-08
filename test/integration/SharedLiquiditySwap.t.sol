@@ -2,6 +2,8 @@
 pragma solidity 0.8.26;
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
@@ -266,9 +268,14 @@ contract SharedLiquiditySwapTest is VaultTestBase {
             zeroForOne ? (vault.backing(c0), vault.backing(c1)) : (vault.backing(c1), vault.backing(c0));
         assertEq(inAfter - inBefore, amountIn, "vault input");
         assertEq(outBefore - outAfter, quoted, "vault output");
-        // Loose sanity bound on the execution price (at least 0.99 in per out). The vault floor in this fixture
-        // is 1:1, which the vault itself enforces; PricePolicy tests check the exact floor on measured deltas.
-        assertGe(amountIn * 100, quoted * 99, "below floor");
+        // Execution price against the exact effective floor (max of vault and curator floor) on the amounts that
+        // moved: amountIn >= ceil(amountOut * floor / 2^96). In this fixture both floors are 1:1, so this is
+        // amountIn >= quoted. Both hooks also charge a positive fee or impact at their 1:1 reference price, and
+        // for inputs >= 1e6 that removes at least one raw unit, so the output is strictly below the input.
+        uint256 floorX96 = vault.effectiveFloorX96(id);
+        assertEq(floorX96, FixedPoint96.Q96, "fixture floor is 1:1");
+        assertGe(amountIn, FullMath.mulDivRoundingUp(quoted, floorX96, FixedPoint96.Q96), "below effective floor");
+        assertLt(quoted, amountIn, "hook charged no fee or impact");
         _assertAccountingConsistent();
     }
 }
