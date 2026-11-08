@@ -88,7 +88,7 @@ digest (emitted in events and used by off-chain tooling).
 
 | Field | Meaning | Checked at activation |
 |---|---|---|
-| `curator` | The authority. Signer (EOA) or ERC-1271 wallet address. | signature valid for `curator` (§5); `curatorCeiling[curator][currencyOut]` has room |
+| `curator` | The authority. Signer (EOA) or ERC-1271 wallet address. | `isCurator[curator]` on both paths (`CURATOR_REVOCATION.md` R1; added after review); signature valid for `curator` (§5); `curatorCeiling[curator][currencyOut]` has room |
 | `vault` | The vault this authorization is for | `== address(this)`. Redundant with `verifyingContract`; kept so that wallets display it and as defence in depth. |
 | `consumer` | The only hook that may consume | `isConsumer[consumer]`; `key.hooks == consumer` |
 | `poolId` | The pool, which commits to `(currency0, currency1, fee, tickSpacing, hooks)` (SOURCE: `PoolIdLibrary.toId` is the keccak of the key) | `key.toId() == poolId`, where `key` is supplied in calldata by the submitter |
@@ -247,6 +247,8 @@ and its ceiling again.
 | Guardian tightens `f_v` or halts vs swap | swap reverts `PriceBelowFloor` or `DirectionHalted` | swap executes at the old `f_v` (it was valid at execution) |
 | Owner deregisters hook vs activation or swap | activation and swap revert `ConsumerNotRegistered` | as executed. The allocation then cannot be consumed; release it (X1, X2 or X3). |
 | Guardian lowers ceiling vs activation | activation reverts `CuratorCeilingExceeded` | allocation exists. A ceiling bounds **new** reservations only, so emergency release is needed to remove it. |
+| Guardian or owner deregisters the curator vs relayer activation of its signature | activation reverts `CuratorNotRegistered` (R1) | allocation exists and stays consumable until X1, X2 or X3 (`CURATOR_REVOCATION.md` §2) |
+| Owner re-registers a previously deregistered curator | — | every outstanding signature of that curator becomes activatable again unless D15 is adopted (`CURATOR_REVOCATION.md` §4) |
 
 In every row, each unit of capacity is released **at most once** and consumed **at most once**, and
 `consumed + released_unused ≤ maxOut`. These are invariants INV-A2 and INV-A3 in `PHASE1B_THREATS_AND_PLAN.md`.
@@ -390,6 +392,8 @@ event AllocationReleased(uint256 indexed id, address indexed by, uint256 unusedC
 | D10 | Two-step ownership transfer | **Yes.** It is small and prevents transfer to a wrong address. |
 | D11 | Domain `name` and `version` strings | `"Porkfolio Vault"`, `"1"`. These are fixed forever per deployment, and changing them invalidates all signatures. |
 | D12 | Lever if the vault exceeds EIP-170 | Minimal hand-written domain first. No contract split without a security reason. |
+| D15 | How to stop re-registration from reviving a curator's outstanding signatures | **Per-curator `authEpoch` in the signed struct**, bumped by deregistration and by the curator (`CURATOR_REVOCATION.md` R2). Must be decided before the struct is final. |
+| D16 | Per-curator freeze checked in `exchange` | **No.** Hook deregistration and emergency release already stop consumption immediately (`CURATOR_REVOCATION.md` §2, §5). |
 | D13 | Existing tests that drain at curator floor 0 (`ZeroAssetStates.t.sol`) | Rewrite them with configured non-zero floors. Zero-asset states stay reachable through trades at legitimate floors, so their coverage is kept. Add negative tests showing that floor 0 is now rejected. |
 
 The price-policy decisions (D1–D4, D9, D14) are in `PHASE1B_PRICE_POLICY.md` §15.

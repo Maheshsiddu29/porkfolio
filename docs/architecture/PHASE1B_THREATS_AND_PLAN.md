@@ -279,15 +279,15 @@ Per `CLAUDE.md` (2–4 commits per milestone), the work is split into three sub-
 
 | # | Commit | Content | Tests |
 |---|---|---|---|
-| 3 | `feat(auth): EIP-712 curator authorization with unordered nonces` | `CuratorAuthorization` replaces `AllocationRequest`; shared `_activate`; `allocate` (direct) and `allocateWithSig` (ECDSA + ERC-1271 via OZ 5.0.2); the OZ remapping; nonce bitmap; `invalidateNonces`; `validAfter`; `hashAuthorization` | `CuratorAuth.t.sol` (T-03, T-05, T-06, T-10); `Mock1271Wallet` |
-| 4 | `feat(auth): curator cancellation and emergency release` | `cancelAllocation`; `emergencyRelease` (owner or guardian); `release` limited to expired allocations; `_close(id, reason)`; `ReleaseReason` | `AuthLifecycle.t.sol` (T-01, T-07, T-08, T-09) |
+| 3 | `feat(auth): EIP-712 curator authorization with unordered nonces` | `CuratorAuthorization` replaces `AllocationRequest`; shared `_activate`, which checks `isCurator` on both paths before signature verification (R1); the D15 epoch field if approved (R2); `allocate` (direct) and `allocateWithSig` (ECDSA + ERC-1271 via OZ 5.0.2); the OZ remapping; nonce bitmap; `invalidateNonces`, which does not require registration (R3); `validAfter`; `hashAuthorization` | `CuratorAuth.t.sol` (T-03, T-05, T-06, T-10); `Mock1271Wallet`; R1–R3 tests in `CURATOR_REVOCATION.md` §5 |
+| 4 | `feat(auth): curator cancellation and emergency release` | `cancelAllocation`, which does not require registration (R3); `emergencyRelease` (owner or guardian); `release` limited to expired allocations; `_close(id, reason)` (R4); `ReleaseReason`; NatSpec on which actions stop consumption immediately (R5) | `AuthLifecycle.t.sol` (T-01, T-07, T-08, T-09, plus `test_LC_race_curatorDeregisterVsActivate_bothOrders`) |
 
 ### Phase 1B-3: integration and evidence
 
 | # | Commit | Content | Tests |
 |---|---|---|---|
 | 5 | `test(hooks): Hook A and Hook B under vault floors` | Real-PoolManager swaps for both hooks across the executable band (`PP` §5): inside, at the boundary ±1, outside, halted, tightened after activation, 6/18 pair. Hook `quote()` view uses `requiredInput` only if D9 is approved; `beforeSwap` is unchanged. | `HookPriceBands.t.sol` (`test_HB_*`) |
-| 6 | `test: Phase 1B invariants, fuzzing and gas` | Handler actions: `activateWithSig`, `activateDirect`, `cancel`, `invalidate`, `emergencyRelease`, `guardianTighten`, `guardianHalt`, `ownerLoosen`. Invariants: INV-P1 to INV-R1. A 10,000-run fuzz profile. `test/gas/AuthGas.t.sol` (`--isolate`). Size check. | all |
+| 6 | `test: Phase 1B invariants, fuzzing and gas` | Handler actions: `activateWithSig`, `activateDirect`, `cancel`, `invalidate`, `emergencyRelease`, `guardianTighten`, `guardianHalt`, `ownerLoosen`, `deregisterCurator`. Invariants: INV-P1 to INV-R1, plus `invariant_activationRequiresRegisteredCurator` (R6). A 10,000-run fuzz profile. `test/gas/AuthGas.t.sol` (`--isolate`). Size check. | all |
 | 7 | `docs: Phase 1B report` | validation, gas before and after, size, mutation check, residual risks | — |
 
 ### Mutation checks to run (manual, not committed, as in Phase 1A-H)
