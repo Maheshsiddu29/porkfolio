@@ -96,10 +96,10 @@ contract LpGasTest is VaultTestBase {
         console2.log("cancelRequest gas:", g - gasleft());
     }
 
-    // ---- Phase 1A-H: paths affected by inline queue processing ----
+    // ---- Paths affected by inline queue processing in redeem ----
 
     /// A small request is pending but deliverable (inventory was released); lp0 then redeems.
-    /// Before 1A-H lp0 was queued; after, the head is finalized inline and lp0 exits instantly.
+    /// The head is finalized inline and lp0 exits instantly, instead of being queued behind it.
     function test_gas_redeem_whileHeadDeliverable() public {
         _depositShares(lpB, 10 ether);
         uint256 id = _allocate(keyA, c1, uint128(vault.admissibleCapacity(c1)));

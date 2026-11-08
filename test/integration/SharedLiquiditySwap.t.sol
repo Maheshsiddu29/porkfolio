@@ -236,6 +236,9 @@ contract SharedLiquiditySwapTest is VaultTestBase {
     // Fuzzed conservation through the real PoolManager
     // ------------------------------------------------------------------
 
+    /// @notice For random sizes and both directions, the swapper's PoolManager delta equals exactly (-amountIn,
+    ///         +quote) and the vault's backing moves by exactly the same amounts: nothing is created or lost in
+    ///         the mint -> exchange -> burn -> return-delta sequence.
     function testFuzz_hookA_exactAccounting(uint256 amountIn, bool zeroForOne) public {
         amountIn = bound(amountIn, 1e6, 5000 ether);
         uint256 id = _allocate(keyA, zeroForOne ? c1 : c0, QUOTA);
@@ -263,7 +266,8 @@ contract SharedLiquiditySwapTest is VaultTestBase {
             zeroForOne ? (vault.backing(c0), vault.backing(c1)) : (vault.backing(c1), vault.backing(c0));
         assertEq(inAfter - inBefore, amountIn, "vault input");
         assertEq(outBefore - outAfter, quoted, "vault output");
-        // Price floor (0.99 in per out) held.
+        // Loose sanity bound on the execution price (at least 0.99 in per out). The vault floor in this fixture
+        // is 1:1, which the vault itself enforces; PricePolicy tests check the exact floor on measured deltas.
         assertGe(amountIn * 100, quoted * 99, "below floor");
         _assertAccountingConsistent();
     }

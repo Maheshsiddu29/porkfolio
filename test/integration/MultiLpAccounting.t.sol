@@ -452,7 +452,7 @@ contract MultiLpAccountingTest is VaultTestBase {
         _mintApprove(t0, t1, address(v), lpB, p0, p1);
         vm.prank(lpB);
         v.deposit(sharesB, p0, p1, lpB);
-        // lpB holds 1/4 of the supply and is owed 1/4 of each balance, rounded down.
+        // lpB bought 1/4 of the new supply and paid 1/3 of each pre-deposit balance, rounded up.
         assertEq(p0, FullMath.mulDivRoundingUp(sharesB, amt0, shares + v.MIN_SHARES()));
         vm.prank(lpB);
         (uint256 instant, uint256 r0, uint256 r1,) = v.redeem(sharesB, 0, 0, lpB, false);

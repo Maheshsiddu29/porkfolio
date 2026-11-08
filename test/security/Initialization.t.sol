@@ -6,7 +6,7 @@ import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVaul
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {ClaimDonor} from "../utils/ClaimDonor.sol";
 
-/// @notice Phase 1A-H Task C: controlled first initialization. The asset pair is fixed by the constructor
+/// @notice Controlled first initialization. The asset pair is fixed by the constructor
 ///         (immutable, set in the deployment transaction itself); the initial reserve can only be established by
 ///         the owner; ordinary deposits stay permissionless afterwards.
 contract InitializationTest is VaultTestBase {

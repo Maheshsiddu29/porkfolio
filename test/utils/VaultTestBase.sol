@@ -89,8 +89,9 @@ abstract contract VaultTestBase is Test {
         vault.setConsumer(address(hookA), true);
         vault.setConsumer(address(hookB), true);
         vault.setCurator(curator, true);
-        // Phase 1B-1 vault floors: 1 raw in per 1 raw out in both directions (F01 * F10 = 2^192 exactly, the
-        // tightest non-crossing pair around the hooks' 1:1 reference). Hooks quote strictly below 1:1 (fee/impact).
+        // Vault floors of 1 raw in per 1 raw out in both directions. Their product is exactly 2^192, the tightest
+        // pair the directional-consistency check accepts around the hooks' 1:1 reference price. Both hooks quote
+        // strictly below 1:1 (fee or impact), so with these floors every hook quote passes in both directions.
         vault.setSellFloor(c0, PRICE_1_1_X96);
         vault.setSellFloor(c1, PRICE_1_1_X96);
         vault.setCuratorCeiling(curator, c0, VAULT_FUNDING);
@@ -122,7 +123,7 @@ abstract contract VaultTestBase is Test {
         deployCodeTo(artifact, abi.encode(manager, vault, hookOwner), hook);
     }
 
-    /// @dev The owner initializes the vault (owner-only since Phase 1A-H), paying the seed and assigning the
+    /// @dev The owner initializes the vault (only the owner can), paying the seed and assigning the
     ///      sqrt(amount0 * amount1) - MIN_SHARES shares to the seed LP `lp0`.
     function _fundVault(uint256 amount0, uint256 amount1) internal {
         _fundLp(owner, amount0, amount1);
@@ -164,7 +165,7 @@ abstract contract VaultTestBase is Test {
             key: key,
             currencyOut: out,
             maxOut: maxOut,
-            minInPerOutX96: PRICE_1_1_X96, // curator floor = vault floor (Phase 1B-1: may not be lower)
+            minInPerOutX96: PRICE_1_1_X96, // curator floor = vault floor (it may not be lower)
             expiry: uint64(block.timestamp + 1 days),
             nonce: nextNonce++,
             deadline: uint64(block.timestamp + 1 hours)
@@ -250,8 +251,9 @@ abstract contract VaultTestBase is Test {
         assertFalse(manager.isOperator(address(vault), address(hookB)), "hookB is vault operator");
     }
 
-    /// @dev Phase 1A-H Task D. Recompute every derived quantity from RAW sources (PoolManager ERC-6909 balances,
-    ///      request storage, allocation storage) and compare with the vault's accounting and views:
+    /// @dev Recompute every derived quantity from RAW sources (PoolManager ERC-6909 balances, request storage,
+    ///      allocation storage) and compare with the vault's accounting and views. This catches a stored aggregate
+    ///      drifting away from the records it summarizes, which a test reading only the vault's own views cannot:
     ///        B_a = PM balance,  W_a = Σ claimable,  P = Σ pending,  Q_a = Σ unreleased (maxOut - consumed),
     ///        N_a = B_a - W_a,  F_a = N_a - Q_a,  D_a = ceil(P * N_a / S),  admissible = max(0, N_a - Q_a - R_a - D_a).
     ///      Assumes no ERC-6909 donations to the vault in the calling test.

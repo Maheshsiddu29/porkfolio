@@ -15,7 +15,7 @@ import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
 import {ClaimDonor} from "../utils/ClaimDonor.sol";
 
-/// @notice Phase 1B-1 vault-enforced minimum execution price, through the REAL PoolManager.
+/// @notice Vault-enforced minimum execution price, through the REAL PoolManager.
 ///         A registered test hook (`MaliciousConsumerHook`, mode ExactAmounts) lets each test choose the exact
 ///         input and output claims, so the vault's check is exercised at, above and below its boundary without any
 ///         hook pricing logic in the way: the vault must not rely on a hook to enforce its floor.
@@ -93,7 +93,8 @@ contract PricePolicyTest is VaultTestBase {
         return h1 > h2 || (h1 == h2 && l1 >= l2);
     }
 
-    /// @dev Owner reconfigures both floors in an order D14 accepts (raise the other side to the max first).
+    /// @dev Owner reconfigures both floors in an order the directional-consistency check accepts: raising the
+    ///      token1 floor to the maximum first leaves room to set the token0 floor to anything.
     function _setFloors(uint160 f0, uint160 f1) internal {
         vm.startPrank(owner);
         vault.setSellFloor(c1, MAX_FLOOR);
@@ -143,7 +144,7 @@ contract PricePolicyTest is VaultTestBase {
         v.setConsumer(address(hookA), true);
         v.setCuratorCeiling(curator, c1, type(uint256).max);
         v.setCuratorCeiling(curator, c0, type(uint256).max);
-        // With no opposite floor, D14 cannot catch a zero floor: the explicit zero check must.
+        // With no opposite floor, the consistency check is skipped, so only the explicit zero check stops this.
         vm.expectRevert(ISharedCommitmentVault.ZeroPriceFloor.selector);
         v.setSellFloor(c0, 0);
         v.setSellFloor(c0, uint160(Q96)); // only one direction opened
@@ -335,7 +336,7 @@ contract PricePolicyTest is VaultTestBase {
     }
 
     // ------------------------------------------------------------------
-    // D14: directional consistency and cyclic trades
+    // Directional consistency (F0 * F1 >= 2^192) and cyclic trades
     // ------------------------------------------------------------------
 
     function test_PP_D14_inconsistentFloorsRejected_exactBoundary() public {
@@ -379,7 +380,8 @@ contract PricePolicyTest is VaultTestBase {
         vm.stopPrank();
     }
 
-    /// @notice What D14 prevents: a crossed pair (each side 0.99) would let a trader cycle A -> B -> A at the floors
+    /// @notice What the consistency check prevents: a crossed pair (each side 0.99) would let a trader cycle
+    ///         A -> B -> A at the floors
     ///         for a profit taken from LPs. The vault refuses to configure it.
     function test_PP_D14_crossedPair_wouldBeProfitable_andIsRejected() public {
         uint256 f = Q96 * 99 / 100;
@@ -396,9 +398,10 @@ contract PricePolicyTest is VaultTestBase {
         vm.stopPrank();
     }
 
-    /// @notice With any legal pair of floors (at the D14 boundary, the most permissive case), a round trip at the
-    ///         floors through the real PoolManager never returns more than it started with. Both legs execute in
-    ///         every run, each EXACTLY at its floor (the trader's best possible prices).
+    /// @notice With any legal pair of floors (at the consistency boundary, the most permissive case), a round trip
+    ///         at the floors through the real PoolManager never returns more than it started with. Both legs execute
+    ///         in every run, each EXACTLY at its floor (the trader's best possible prices). Leg 1 rounds the trader's
+    ///         payment up and leg 2 rounds the payout down, so rounding never works in the trader's favour.
     function testFuzz_PP_D14_roundTripAtFloors_neverProfitable(uint256 f1, uint256 out1) public {
         f1 = bound(f1, 2 ** 32 + 1, MAX_FLOOR);
         uint256 f0 = FullMath.mulDivRoundingUp(Q96, Q96, f1);

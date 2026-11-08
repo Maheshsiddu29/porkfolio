@@ -14,16 +14,17 @@ import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {AuthModeHook} from "../utils/AuthModeHook.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
 
-/// @notice Phase 1A-H Task B: zero-asset, depleted and dust states, reached through the real PoolManager.
-///         A test-only 1:1 hook drains an asset exactly. Phase 1B-1 (decision D13): floor-0 trades no longer exist,
-///         so near-total depletion is reached by a registered hook trading EXACTLY at the most permissive floor the
-///         owner can legally configure: f_v(out) = 2^32 + 1 against f_v(opposite) = 2^160 - 1 (D14 forces
-///         f_out >= ceil(2^192 / f_opp)), i.e. ~2^-64 raw input per raw output. This models an authorised but
+/// @notice Zero-asset, depleted and dust states, reached through the real PoolManager.
+///         A test-only 1:1 hook drains an asset exactly. A zero vault floor cannot be configured, so near-total
+///         depletion is reached by a registered hook trading EXACTLY at the most permissive floor the owner can
+///         legally configure: f_v(out) = 2^32 + 1 against f_v(opposite) = 2^160 - 1 (directional consistency
+///         forces f_out >= ceil(2^192 / f_opp)), i.e. ~2^-64 raw input per raw output. This models an authorised but
 ///         catastrophic economic loss that now requires an explicit owner decision. After every step the accounting
 ///         equations are re-derived from raw balances (`_assertEquations`): losses must be economic, never
 ///         accounting errors.
 contract ZeroAssetStatesTest is VaultTestBase {
-    /// @dev Largest representable floor, and the smallest floor D14 then allows in the opposite direction.
+    /// @dev Largest representable floor, and the smallest floor directional consistency then allows in the
+    ///      opposite direction.
     uint160 internal constant MAX_FLOOR = type(uint160).max;
     uint160 internal constant MIN_CONSISTENT_FLOOR = 2 ** 32 + 1; // ceil(2^192 / (2^160 - 1))
 
@@ -71,7 +72,8 @@ contract ZeroAssetStatesTest is VaultTestBase {
     }
 
     /// @dev The owner deliberately opens the most permissive legal floor for selling `out`: the opposite direction
-    ///      is raised to the maximum floor first (otherwise D14 rejects the change), then `out` is lowered.
+    ///      is raised to the maximum floor first (otherwise the consistency check rejects the change), then `out`
+    ///      is lowered.
     function _ownerOpensExtremeFloor(Currency out) internal {
         vm.startPrank(owner);
         vault.setSellFloor(out == c0 ? c1 : c0, MAX_FLOOR);
@@ -174,9 +176,9 @@ contract ZeroAssetStatesTest is VaultTestBase {
 
     /// @notice Every trade adds at least 1 wei of the input asset, and a redemption can never take all of a
     ///         positive balance (the locked MIN_SHARES keep a pro-rata residual). So N0 + N1 > 0 after
-    ///         initialization. Here both assets are drained as far as the price policy allows. Phase 1B-1: the
-    ///         second drain can no longer be "everything for 1 wei"; even the most permissive legal floor makes the
-    ///         hook pay ceil(2M ether * (2^32 + 1) / 2^96) = ~108k wei of token1.
+    ///         initialization. Here both assets are drained as far as the price policy allows. The second drain
+    ///         cannot be "everything for 1 wei": even the most permissive legal floor makes the hook pay
+    ///         ceil(2M ether * (2^32 + 1) / 2^96) = ~108k wei of token1.
     function test_bothAssetsZero_unreachable_nearTotalDepletionIsEconomic() public {
         _drainOneToOne(c1); // N = (2M, 0)
         uint256 sold = vault.admissibleCapacity(c0);
@@ -302,6 +304,9 @@ contract ZeroAssetStatesTest is VaultTestBase {
     // Empty vault (only the locked MIN_SHARES remain) and uninitialized vault
     // ------------------------------------------------------------------
 
+    /// @notice After every redeemable share has left, only the locked MIN_SHARES and their 1,000 wei of each asset
+    ///         remain. A new depositor is priced from that residual basket and can exit with exactly what it paid,
+    ///         so an emptied vault is reusable rather than stuck.
     function test_emptiedVault_reentry() public {
         _redeem(lp0, vault.sharesOf(lp0), false);
         assertEq(vault.totalShares(), vault.MIN_SHARES());

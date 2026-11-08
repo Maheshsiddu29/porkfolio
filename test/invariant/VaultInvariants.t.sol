@@ -27,6 +27,16 @@ import {ClaimDonor} from "../utils/ClaimDonor.sol";
 ///         multi-LP deposits, instant/queued redemptions (with inline queue processing), queue processing,
 ///         cancellations and claims. Each action may revert; the invariants must hold after every step, and each
 ///         successful action is checked against the ACTUAL balance movements it caused.
+/// @dev How the checks work. The fuzzer calls handler functions in random order with random arguments. Each
+///      action wraps its vault call in try/catch: a revert is a legitimate outcome (for example a swap below the
+///      floor), so the campaign runs with fail_on_revert = false. Properties that can only be judged at the moment
+///      of an action (did this deposit lower N_a / S? did this swap move claims below the floor?) are checked inside
+///      the handler and recorded as sticky violation flags. The invariant functions then assert those flags are
+///      still false, together with properties of the current state.
+///
+///      Ghost variables are an independent record of what SHOULD be true, built only from what each action
+///      returned or measurably moved. Comparing them with the vault's own storage catches bugs where the vault's
+///      bookkeeping and its real token movements drift apart.
 contract VaultHandler is Test {
     struct Snap {
         uint256 b0;
@@ -57,11 +67,13 @@ contract VaultHandler is Test {
     uint256[] public allocationIds;
     uint256 internal nonce = 1_000_000;
 
-    /// Ghost ledger: backing implied by deposits - payouts + swap inputs received - swap outputs paid.
+    /// Ghost ledger: backing implied by deposits - payouts + swap inputs received - swap outputs paid. Built from
+    /// return values and measured swap deltas, never from `vault.backing`, so it is an independent check of B_a.
     mapping(Currency => uint256) public ghostBacking;
     /// ERC-6909 claims sent straight to the vault (never part of B_a).
     mapping(Currency => uint256) public ghostDonated;
-    /// Per request: assets ever finalized and assets ever paid by claim (double-claim detection).
+    /// Per request: assets ever finalized and assets ever paid by claim. claimed + still claimable must equal
+    /// finalized, so a request paid twice, or paid more than was finalized for it, is detected.
     mapping(uint256 => uint256[2]) internal ghostFinalized;
     mapping(uint256 => uint256[2]) internal ghostClaimed;
     mapping(uint256 => uint256) public ghostFinalizedShares;
@@ -167,7 +179,9 @@ contract VaultHandler is Test {
     }
 
     /// @notice Sell every admissible unit of one asset through the 1:1 hook: reaches N_a == 0 whenever nothing
-    ///         is reserved, buffered or pending in that asset.
+    ///         is reserved, buffered or pending in that asset. Zero-asset states are where division-by-zero and
+    ///         rounding bugs hide, and random swaps alone would almost never reach them. (setUp gives token0 a
+    ///         buffer floor, so only token1 can actually reach zero.)
     function drain(uint256 seed) external {
         Currency out = seed % 2 == 0 ? c0 : c1;
         uint256 q = vault.admissibleCapacity(out);
@@ -179,7 +193,7 @@ contract VaultHandler is Test {
     }
 
     // ------------------------------------------------------------------
-    // Phase 1B-1 risk-policy actions
+    // Risk-policy actions: floors, halts and the guardian's tighten-only rule
     // ------------------------------------------------------------------
 
     /// @notice Guardian raises one floor by 0.01%-2%. Must always succeed (raising keeps D14) and never lower it.
@@ -397,7 +411,7 @@ contract VaultHandler is Test {
                 currencyOut: out,
                 // forge-lint: disable-next-line(unsafe-typecast)
                 maxOut: uint128(maxOut),
-                minInPerOutX96: _curatorFloor(out), // >= live vault floor (Phase 1B-1)
+                minInPerOutX96: _curatorFloor(out), // must be >= the live vault floor or allocate reverts
                 expiry: uint64(block.timestamp + lifetime),
                 nonce: nonce++,
                 deadline: uint64(block.timestamp)
@@ -454,7 +468,10 @@ contract VaultHandler is Test {
         } catch {}
     }
 
-    /// @dev INV-P1 on MEASURED ERC-6909 deltas: dIn * 2^96 >= dOut * F_eff, compared in 512 bits.
+    /// @dev INV-P1 on MEASURED ERC-6909 deltas: dIn * 2^96 >= dOut * F_eff, compared in 512 bits. Measuring the
+    ///      vault's real claim balances (not the amounts the hook or vault reported) means a bug that moved
+    ///      different amounts than it checked would still be caught. The effective floor is read before the swap,
+    ///      because that is the floor the vault applied.
     function _checkEffectiveFloor(Snap memory p, bool zeroForOne, uint256 feff) internal {
         Snap memory q = _take();
         (uint256 dIn, uint256 dOut) = zeroForOne ? (q.pm0 - p.pm0, p.pm1 - q.pm1) : (q.pm1 - p.pm1, p.pm0 - q.pm0);
@@ -467,6 +484,8 @@ contract VaultHandler is Test {
         if (h1 < h2 || (h1 == h2 && l1 < l2)) priceViolated = true;
     }
 
+    /// @dev Full 512-bit product a * b as (hi, lo). lo is the product mod 2^256; mm is the product mod 2^256 - 1;
+    ///      their difference (with a borrow) recovers the high word. Independent of FullMath, which the vault uses.
     function _mul512(uint256 a, uint256 b) internal pure returns (uint256 hi, uint256 lo) {
         unchecked {
             uint256 mm = mulmod(a, b, type(uint256).max);
@@ -475,6 +494,8 @@ contract VaultHandler is Test {
         }
     }
 
+    /// @dev Records pending shares and claimables of every request from the head onward, so that
+    ///      `_recordFinalizations` can attribute what an inline or explicit queue step finalized.
     function _queueSnapshot()
         internal
         view
@@ -531,7 +552,9 @@ contract VaultHandler is Test {
         if (vault.claimableAssets(c0) != p.w0 || vault.claimableAssets(c1) != p.w1) claimableTouched = true;
     }
 
-    /// N'_a / S' >= N_a / S  <=>  N'_a * S >= N_a * S'  (products < 2^254, no overflow).
+    /// N'_a / S' >= N_a / S  <=>  N'_a * S >= N_a * S'  (products < 2^254, no overflow). Called only after
+    /// non-trade LP actions: deposits round up and redemptions round down precisely so that this never fails.
+    /// Trades are excluded because they legitimately change the per-share basket in both assets.
     function _checkMonotonic(Snap memory p) internal {
         uint256 s2 = vault.totalShares();
         if (vault.netAssets(c0) * p.s < p.n0 * s2 || vault.netAssets(c1) * p.s < p.n1 * s2) perShareDecreased = true;
@@ -686,13 +709,13 @@ contract VaultInvariantsTest is VaultTestBase {
         assertFalse(handler.perShareDecreased(), "per-share basket decreased");
     }
 
-    /// Task D: N = B - W, F = N - Q, D = ceil(P N / S), admission = N - Q - R - D, all recomputed from raw
+    /// N = B - W, F = N - Q, D = ceil(P N / S), admission = N - Q - R - D, all recomputed from raw
     /// PoolManager balances, request storage and allocation storage; and N0 + N1 > 0 while shares exist.
     function invariant_equationsFromRawSources() public view {
         _assertEquationsWith(handler.ghostDonated(c0), handler.ghostDonated(c1));
     }
 
-    /// Task D: every successful action moved real ERC-20 / ERC-6909 balances by exactly its accounting change;
+    /// Every successful action moved real ERC-20 / ERC-6909 balances by exactly its accounting change;
     /// W_a changed only through finalization or claims; no allocation exceeded the admissible capacity.
     function invariant_actualBalanceMovementsMatchAccounting() public view {
         assertFalse(handler.balanceMismatch(), "balance movement != accounting change");
@@ -705,7 +728,8 @@ contract VaultInvariantsTest is VaultTestBase {
         assertFalse(handler.priceViolated(), "a swap executed below the effective floor");
     }
 
-    /// D14: whenever both directions are configured, F0 * F1 >= 2^192 (no profitable round trip at the floors).
+    /// Directional consistency: F0 * F1 >= 2^192 at all times (no profitable round trip at the floors). The handler
+    /// moves floors as close to that boundary as it can, so this checks the vault never let a change cross it.
     function invariant_directionalFloorsConsistent() public view {
         (uint160 f0,) = vault.sellPolicy(c0);
         (uint160 f1,) = vault.sellPolicy(c1);
@@ -785,7 +809,7 @@ contract VaultInvariantsTest is VaultTestBase {
         invariant_equationsFromRawSources();
         invariant_actualBalanceMovementsMatchAccounting();
 
-        // Phase 1B-1 policy actions: each path is exercised and the policy invariants hold.
+        // Price-policy actions: each path is exercised and the policy invariants hold.
         handler.allocate(3, 10_000 ether, 1 days); // fresh hookB allocation, token1 out
         uint256 swapsBefore = handler.swapsOk();
         handler.guardianTighten(true, 200); // token1 floor +2%: above HookB's 1:1-minus-impact quote

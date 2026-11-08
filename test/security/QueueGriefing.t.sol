@@ -6,8 +6,9 @@ import {console2} from "forge-std/console2.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 
-/// @notice Phase 1A-H Task A: queue griefing audit. Each test is labelled INTENDED (a fairness property that must
-///         hold) or DOS (behaviour that would be an avoidable denial of service if it occurred).
+/// @notice Queue griefing: can an LP, by queuing, cancelling or splitting requests, block or overtake others?
+///         Each test is labelled INTENDED (a fairness property that must hold) or DOS (behaviour that would be an
+///         avoidable denial of service if it occurred).
 contract QueueGriefingTest is VaultTestBase {
     address internal lpA = makeAddr("lpA");
     address internal lpB = makeAddr("lpB");

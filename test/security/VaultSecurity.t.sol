@@ -168,7 +168,7 @@ contract VaultSecurityTest is VaultTestBase {
 
     function test_unauthorisedCurator_hasZeroCeiling() public {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, 1);
-        // Phase 1B-1: an unregistered address is rejected before any ceiling is consulted...
+        // An unregistered address is rejected before any ceiling is consulted...
         vm.prank(attacker);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.CuratorNotRegistered.selector, attacker));
         vault.allocate(req);
@@ -193,7 +193,7 @@ contract VaultSecurityTest is VaultTestBase {
         );
         vault.allocate(req);
 
-        // Aggregate: R + ΣQ + newQ must not exceed C.
+        // Aggregate: Q + newQ + R + D must not exceed N (here D = 0 and N = backing).
         vm.prank(owner);
         vault.setBufferFloor(c1, 200_000 ether);
         _allocate(keyA, c1, 500_000 ether);
@@ -366,7 +366,7 @@ contract VaultSecurityTest is VaultTestBase {
         vm.expectRevert(ISharedCommitmentVault.Paused.selector);
         vault.allocate(req);
 
-        // Phase 1A: the owner has no asset path; LP redemption stays available while paused.
+        // The owner has no asset path; LP redemption stays available while paused.
         (uint256 instant,,,) = _redeem(lp0, 1 ether, false);
         assertEq(instant, 1 ether);
     }
@@ -442,6 +442,7 @@ contract VaultSecurityTest is VaultTestBase {
         _assertAccountingConsistent();
     }
 
+    /// @notice The payload is irrelevant (and not in the current encoding): the sender check runs first.
     function test_unlockCallback_onlyPoolManager() public {
         vm.prank(attacker);
         vm.expectRevert(ISharedCommitmentVault.NotPoolManager.selector);
@@ -450,6 +451,11 @@ contract VaultSecurityTest is VaultTestBase {
 
     // ==================================================================
     // Compromised *registered* hook: what the vault still guarantees
+    //
+    // The owner has whitelisted the hook, so registration checks do not help. Each attack must still fail on
+    // something the hook cannot control: ERC-6909 balances and allowances on the real PoolManager (the vault
+    // never granted the hook any authority over its claims), the allocation's quota, or the price floor. Every
+    // test then checks that the vault's backing and real claim balances are exactly as before.
     // ==================================================================
 
     function test_maliciousHook_cannotTakeOutputWithoutFundingInput() public {

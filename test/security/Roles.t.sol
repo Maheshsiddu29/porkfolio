@@ -7,7 +7,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 
-/// @notice Phase 1B-1 role security: two-step ownership, a guardian that can only REDUCE risk, explicitly
+/// @notice Role security: two-step ownership, a guardian that can only REDUCE risk, explicitly
 ///         registered curators, and the guarantee that no emergency action moves LP assets or blocks LP exits.
 contract RolesTest is VaultTestBase {
     address internal guardian = makeAddr("guardian");
@@ -82,6 +82,8 @@ contract RolesTest is VaultTestBase {
     // Guardian: risk-reducing only, never escalates
     // ------------------------------------------------------------------
 
+    /// @notice The guardian can neither turn itself into the owner nor appoint someone else, and every setter it
+    ///         can reach accepts only the risk-reducing direction (tighten, revoke, pause), never the reverse.
     function test_RO_guardianCannotEscalateOrIncreaseRisk() public {
         vm.startPrank(guardian);
         // Ownership and the guardian slot are owner-only (plain NotOwner: these are not risk actions at all).

@@ -12,8 +12,8 @@ import {VaultTestBase} from "../utils/VaultTestBase.sol";
 
 /// @notice Funding (ERC-20 -> ERC-6909) and redemption paths through the real PoolManager, and the
 ///         reserve condition's limits on exit liquidity.
-/// @dev Phase 1A migration of the Milestone-0 funding tests: owner deposit/withdraw no longer exist, so each
-///      M0 test is kept with the same intent, expressed through LP shares (see PHASE1A_REPORT.md §4).
+/// @dev These tests predate LP shares, when the owner funded the vault directly. Each keeps its original intent,
+///      expressed through LP shares (see PHASE1A_REPORT.md §4).
 contract VaultFundingTest is VaultTestBase {
     function test_initialDeposit_mintsSharesBackedByRealClaims() public view {
         // setUp initialized the vault through unlock -> sync -> transfer -> settle -> mint (both assets).
@@ -133,9 +133,10 @@ contract VaultFundingTest is VaultTestBase {
         new SharedCommitmentVault(manager, owner, c0, c0);
     }
 
-    /// @notice RISKS.md R1 counterexample, executable, now with shares. With C = 100 and ΣQ = 80 in token1,
-    ///         the reserve condition R + ΣQ <= C holds, yet the sole LP can exit only 20% instantly: an in-kind
-    ///         exit needs BOTH assets pro rata. The rest waits in the queue until capacity is (lazily) released.
+    /// @notice RISKS.md R1 counterexample, executable. With 80% of token1 committed (Q1 = 0.8 * N1), every
+    ///         commitment is fully backed, yet the sole LP can exit only 20% instantly: an in-kind exit needs BOTH
+    ///         assets pro rata, and F1 limits it. The rest waits in the queue until capacity is (lazily) released.
+    ///         Backed commitments do not imply immediate full withdrawal.
     function test_R1_reserveConditionDoesNotGrantFullExit() public {
         uint256 C = vault.backing(c1);
         uint128 Q = uint128(C * 80 / 100);

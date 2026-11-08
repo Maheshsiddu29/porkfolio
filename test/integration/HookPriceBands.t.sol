@@ -16,7 +16,7 @@ import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
 
-/// @notice Phase 1B-1: the two production hooks (HookA_DynamicFee, HookB_BoundedImpact) under vault-enforced floors,
+/// @notice The two production hooks (HookA_DynamicFee, HookB_BoundedImpact) under vault-enforced floors,
 ///         through the real PoolManager, in both directions, on an 18/18 pair (fixture) and a 6/18 USDC/WETH pair.
 ///         The hooks are unchanged: every rejection below comes from the vault, never from hook-side checks.
 contract HookPriceBandsTest is VaultTestBase {
@@ -125,7 +125,8 @@ contract HookPriceBandsTest is VaultTestBase {
     }
 
     /// @notice Cycling token0 -> token1 (Hook A) -> token0 (Hook B) never profits the trader, and the vault's 1:1
-    ///         valuation (k = 1 lies in the pivot interval of the 1:1 floors) never decreases (D14 proof).
+    ///         valuation (k = 1 lies in the pivot interval of the 1:1 floors) never decreases. This is the
+    ///         property the directional-consistency check exists for (PHASE1B_DECISIONS.md, D14).
     function test_HB_cyclicTradesThroughBothHooks_neverProfitable() public {
         uint256 id1 = _allocate(keyA, c1, 500_000 ether);
         uint256 id0 = _allocate(keyB, c0, 500_000 ether);
@@ -331,7 +332,8 @@ contract HookPriceBands6x18Test is VaultTestBase {
         _swap(kA, cW == x0, 1 ether, idU);
     }
 
-    /// @notice The Phase 1B-0 worked example (2,850 / 3,150) is a crossed pair and is now rejected.
+    /// @notice An earlier specification's worked example (sell WETH >= 2,850, buy WETH <= 3,150 USDC) is a crossed
+    ///         pair: the vault's best bid would exceed its worst ask. The vault refuses to configure it.
     function test_HB_6x18_crossedPhase1B0Example_rejected() public {
         vm.startPrank(owner);
         v.setSellFloor(cW, _sellWethFloor(2850));

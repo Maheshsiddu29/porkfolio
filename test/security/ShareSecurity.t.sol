@@ -38,7 +38,7 @@ contract ShareSecurityTest is VaultTestBase {
     ///         the share price so the victim's deposit rounds to zero shares. Here donations are not counted in
     ///         N_a (backing is internal), deposits are share-denominated (no rounding to zero shares) and
     ///         MIN_SHARES are locked, so the victim loses at most 1 wei per asset and the attacker loses the
-    ///         donation. Since Phase 1A-H only the owner can initialize; this keeps the worst case: a careless
+    ///         donation. Only the owner can initialize; this test keeps the worst case: a careless
     ///         owner seeds the minimum (1001/1001 wei) and assigns the single free share to the attacker.
     function test_inflationAttack_firstDepositorCannotStealFromVictim() public {
         SharedCommitmentVault v = new SharedCommitmentVault(manager, owner, c0, c1);
@@ -138,6 +138,8 @@ contract ShareSecurityTest is VaultTestBase {
     // Double redemption / double claim / authority
     // ==================================================================
 
+    /// @notice Queued shares leave the LP's free balance at once, so they cannot be redeemed again while they wait.
+    ///         After finalization the request pays exactly once: a second claim and a late cancel both revert.
     function test_sharesCannotBeRedeemedTwice() public {
         _depositShares(lpA, 100_000 ether);
         uint256 id = _allocate(keyA, c1, uint128(vault.admissibleCapacity(c1)));
@@ -270,6 +272,8 @@ contract ShareSecurityTest is VaultTestBase {
     // Rollback
     // ==================================================================
 
+    /// @notice The vault writes shares and backing before it pulls tokens inside the unlock. If the second token
+    ///         transfer fails, the whole call reverts, including the first token's transfer and the share credit.
     function test_failedDeposit_rollsBackShareState() public {
         uint256 S = vault.totalShares();
         uint256 b0 = vault.backing(c0);
@@ -289,6 +293,9 @@ contract ShareSecurityTest is VaultTestBase {
         _assertAccountingConsistent();
     }
 
+    /// @notice A swap whose router never pays the input fails at the end of the PoolManager unlock
+    ///         (CurrencyNotSettled). The vault had already updated backing and quota inside `exchange`; all of it
+    ///         must roll back, leaving queued shares and supply exactly as they were.
     function test_failedSwapSettlement_leavesQueueUntouched() public {
         _depositShares(lpA, 500_000 ether);
         uint256 id = _allocate(keyA, c1, 1_400_000 ether);
@@ -316,7 +323,7 @@ contract ShareSecurityTest is VaultTestBase {
     // ==================================================================
 
     function test_ownerHasNoPathToShareholderAssets() public {
-        // The Milestone-0 owner funding functions no longer exist.
+        // Owner-only deposit/withdraw functions from an earlier design must not exist.
         (bool ok,) = address(vault).call(abi.encodeWithSignature("withdraw(address,uint256,address)", c0, 1, owner));
         assertFalse(ok);
         (ok,) = address(vault).call(abi.encodeWithSignature("deposit(address,uint256)", c0, 1));
