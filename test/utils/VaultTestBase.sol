@@ -89,6 +89,10 @@ abstract contract VaultTestBase is Test {
         vault.setConsumer(address(hookA), true);
         vault.setConsumer(address(hookB), true);
         vault.setCurator(curator, true);
+        // Phase 1B-1 vault floors: 1 raw in per 1 raw out in both directions (F01 * F10 = 2^192 exactly, the
+        // tightest non-crossing pair around the hooks' 1:1 reference). Hooks quote strictly below 1:1 (fee/impact).
+        vault.setSellFloor(c0, PRICE_1_1_X96);
+        vault.setSellFloor(c1, PRICE_1_1_X96);
         vault.setCuratorCeiling(curator, c0, VAULT_FUNDING);
         vault.setCuratorCeiling(curator, c1, VAULT_FUNDING);
         vm.stopPrank();
@@ -160,7 +164,7 @@ abstract contract VaultTestBase is Test {
             key: key,
             currencyOut: out,
             maxOut: maxOut,
-            minInPerOutX96: uint160(FixedPoint96.Q96 * 99 / 100), // accept >= 0.99 in per 1 out
+            minInPerOutX96: PRICE_1_1_X96, // curator floor = vault floor (Phase 1B-1: may not be lower)
             expiry: uint64(block.timestamp + 1 days),
             nonce: nextNonce++,
             deadline: uint64(block.timestamp + 1 hours)

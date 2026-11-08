@@ -21,7 +21,8 @@ contract MaliciousConsumerHook is BaseTestHooks {
         BurnVaultClaims, // burn the vault's ERC-6909 claims directly
         TransferFromVault, // ERC-6909 transferFrom(vault -> hook)
         OverQuota, // request more output than the allocation's remaining capacity
-        BelowFloor // pay 1 wei of input for the output
+        BelowFloor, // pay 1 wei of input for the output
+        ExactAmounts // fund the swap's full input and request exactly `amountOut` (e.g. a trade AT the floor)
     }
 
     IPoolManager public immutable manager;
@@ -57,14 +58,15 @@ contract MaliciousConsumerHook is BaseTestHooks {
             manager.burn(address(vault), cout.toId(), amountOut);
         } else if (attack == Attack.TransferFromVault) {
             manager.transferFrom(address(vault), address(this), cout.toId(), amountOut);
-        } else if (attack == Attack.OverQuota) {
+        } else if (attack == Attack.OverQuota || attack == Attack.ExactAmounts) {
             manager.mint(address(this), cin.toId(), amountIn);
             vault.exchange(key, params.zeroForOne, allocationId, amountIn, amountOut);
-        } else {
+        } else if (attack == Attack.BelowFloor) {
             manager.mint(address(this), cin.toId(), 1);
             vault.exchange(key, params.zeroForOne, allocationId, 1, amountOut);
         }
-        // Unreachable when the vault behaves correctly; every branch above reverts.
+        // Every attack branch above reverts when the vault behaves correctly; only ExactAmounts at an admissible
+        // price reaches this point.
         manager.burn(address(this), cout.toId(), amountOut);
         // forge-lint: disable-next-line(unsafe-typecast)
         return (IHooks.beforeSwap.selector, toBeforeSwapDelta(int128(int256(amountIn)), -int128(int256(amountOut))), 0);

@@ -49,6 +49,16 @@ interface ISharedCommitmentVault {
         uint160 minInPerOutX96;
     }
 
+    /// @notice Vault-controlled price policy for one direction, keyed by the currency the vault SELLS.
+    /// @param minInPerOutX96 Vault floor f_v: minimum raw input per raw output, Q64.96. Zero = never configured
+    ///                       (direction closed). Can be raised by owner or guardian, lowered only by the owner,
+    ///                       never reset to zero.
+    /// @param halted         Emergency stop for this direction (new allocations and consumption).
+    struct SellPolicy {
+        uint160 minInPerOutX96;
+        bool halted;
+    }
+
     /// @notice A queued redemption. `sharesPending` shares are escrowed and still carry P&L; finalized
     ///         portions are converted into fixed `claimable0/1` amounts owed to `receiver`.
     struct WithdrawalRequest {
@@ -119,6 +129,11 @@ interface ISharedCommitmentVault {
     error DirectionMismatch();
     error QuotaExceeded(uint256 requested, uint256 remaining);
     error PriceBelowFloor(uint256 amountIn, uint256 requiredIn);
+    error PriceFloorNotConfigured(Currency currencyOut);
+    error DirectionHalted(Currency currencyOut);
+    error ZeroPriceFloor();
+    error FloorBelowVaultMinimum(uint256 curatorFloor, uint256 vaultFloor);
+    error InconsistentDirectionalFloors(uint256 floor, uint256 requiredMinimum);
 
     // ------------------------------------------------------------------
     // Events
@@ -132,6 +147,8 @@ interface ISharedCommitmentVault {
     event ConsumerSet(address indexed consumer, bool registered);
     event CuratorCeilingSet(address indexed curator, Currency indexed currency, uint256 ceiling);
     event BufferFloorSet(Currency indexed currency, uint256 floor);
+    event SellFloorSet(Currency indexed currencyOut, uint160 previousFloor, uint160 newFloor, address indexed by);
+    event SellHaltedSet(Currency indexed currencyOut, bool halted, address indexed by);
     event Deposited(address indexed caller, address indexed receiver, uint256 shares, uint256 amount0, uint256 amount1);
     event Redeemed(address indexed lp, address indexed receiver, uint256 shares, uint256 amount0, uint256 amount1);
     event RedeemRequested(uint256 indexed requestId, address indexed lp, address indexed receiver, uint256 shares);

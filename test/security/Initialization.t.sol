@@ -65,6 +65,7 @@ contract InitializationTest is VaultTestBase {
         vm.startPrank(owner);
         v.setConsumer(address(hookA), true);
         v.setCurator(curator, true);
+        v.setSellFloor(c1, PRICE_1_1_X96);
         v.setCuratorCeiling(curator, c1, type(uint256).max);
         vm.stopPrank();
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c1, 1);

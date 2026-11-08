@@ -70,6 +70,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
     mapping(Currency currency => uint256) public backing;
     mapping(Currency currency => uint256) public reserved;
     mapping(Currency currency => uint256) public bufferFloor;
+    /// @notice Vault price policy per sold currency (see PHASE1B_PRICE_POLICY.md and PHASE1B_DECISIONS.md D14).
+    mapping(Currency currencyOut => SellPolicy) public sellPolicy;
     mapping(Currency currency => uint256) public claimableAssets;
 
     mapping(uint256 allocationId => Allocation) internal _allocations;
@@ -181,6 +183,39 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
         _authorize(floor >= bufferFloor[currency]);
         bufferFloor[currency] = floor;
         emit BufferFloorSet(currency, floor);
+    }
+
+    /// @notice Set the vault floor f_v for trades in which the vault SELLS `currencyOut` (minimum raw input per raw
+    ///         output, Q64.96). Opening a direction (from unset) or lowering a floor is owner-only; the guardian
+    ///         may only raise an already-configured floor. Zero is rejected (use `setSellHalted` to stop a direction).
+    ///         D14: whenever the opposite direction is configured, require f_v * f_opp >= 2^192 so that no round
+    ///         trip at the floors is profitable. Checked exactly, without a 256-bit product (it can reach 2^320):
+    ///         f_v >= ceil(2^192 / f_opp) via FullMath (512-bit intermediate; result <= 2^192 since f_opp >= 1).
+    ///         Applies immediately to every outstanding allocation (read at exchange time).
+    function setSellFloor(Currency currencyOut, uint160 minInPerOutX96) external {
+        if (minInPerOutX96 == 0) revert ZeroPriceFloor();
+        Currency opposite = _otherAsset(currencyOut);
+        SellPolicy storage policy = sellPolicy[currencyOut];
+        uint160 previous = policy.minInPerOutX96;
+        _authorize(previous != 0 && minInPerOutX96 >= previous);
+        uint256 oppositeFloor = sellPolicy[opposite].minInPerOutX96;
+        if (oppositeFloor != 0) {
+            uint256 requiredMinimum = FullMath.mulDivRoundingUp(FixedPoint96.Q96, FixedPoint96.Q96, oppositeFloor);
+            if (minInPerOutX96 < requiredMinimum) {
+                revert InconsistentDirectionalFloors(minInPerOutX96, requiredMinimum);
+            }
+        }
+        policy.minInPerOutX96 = minInPerOutX96;
+        emit SellFloorSet(currencyOut, previous, minInPerOutX96, msg.sender);
+    }
+
+    /// @notice Halt (owner or guardian) or resume (owner only) the direction in which the vault sells `currencyOut`.
+    ///         A halt blocks new allocations and all consumption in that direction at once; LP exits are unaffected.
+    function setSellHalted(Currency currencyOut, bool halted) external {
+        _otherAsset(currencyOut);
+        _authorize(halted);
+        sellPolicy[currencyOut].halted = halted;
+        emit SellHaltedSet(currencyOut, halted, msg.sender);
     }
 
     // ==================================================================
@@ -422,8 +457,9 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
     // ==================================================================
 
     /// @notice Reserve `req.maxOut` of `req.currencyOut` for `req.consumer` on `req.key`.
-    /// @dev msg.sender is the curator. Enforces: pool is the vault's asset pair, consumer registered and bound
-    ///      to the pool, curator ceiling, expiry horizon, instruction deadline, single-use nonce, and
+    /// @dev msg.sender is the curator. Enforces: registered curator, pool is the vault's asset pair, consumer
+    ///      registered and bound to the pool, direction configured and not halted, curator floor >= vault floor,
+    ///      curator ceiling, expiry horizon, instruction deadline, single-use nonce, and
     ///      Q_a + maxOut + R_a + D_a <= N_a (commitments, the buffer floor, pending redemptions and claimable
     ///      redemption assets are all protected).
     function allocate(AllocationRequest calldata req) external whenNotPaused returns (uint256 allocationId) {
@@ -439,6 +475,11 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
         bool outIsCurrency0 = req.currencyOut == req.key.currency0;
         if (!outIsCurrency0 && !(req.currencyOut == req.key.currency1)) revert InvalidCurrency();
         Currency currencyIn = outIsCurrency0 ? req.key.currency1 : req.key.currency0;
+
+        // Price policy (D4): the direction must be configured and open, and the curator floor can only be at least
+        // as strict as the vault floor. Zero curator floors are therefore always rejected (f_v >= 1).
+        uint160 vaultFloor = _vaultFloor(req.currencyOut);
+        if (req.minInPerOutX96 < vaultFloor) revert FloorBelowVaultMinimum(req.minInPerOutX96, vaultFloor);
 
         if (req.maxOut == 0) revert ZeroAmount();
         if (req.maxOut > MAX_AMOUNT) revert AmountTooLarge();
@@ -522,11 +563,15 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
         uint256 remaining = a.maxOut - a.consumed;
         if (amountOut > remaining) revert QuotaExceeded(amountOut, remaining);
 
-        uint256 requiredIn = FullMath.mulDivRoundingUp(amountOut, a.minInPerOutX96, FixedPoint96.Q96);
-        if (amountIn < requiredIn) revert PriceBelowFloor(amountIn, requiredIn);
-
         Currency cin = a.currencyIn;
         Currency cout = a.currencyOut;
+
+        // Execution price on the exact claim amounts moved below (ERC-6909 transfers are exact):
+        // amountIn * 2^96 >= amountOut * max(f_v live now, f_c). amountOut < 2^127 and F < 2^160, so FullMath's
+        // 512-bit product cannot overflow and the result (< 2^191) fits; ceil makes the comparison exact.
+        uint256 requiredIn = FullMath.mulDivRoundingUp(amountOut, _effectiveFloor(a), FixedPoint96.Q96);
+        if (amountIn < requiredIn) revert PriceBelowFloor(amountIn, requiredIn);
+
         uint256 backingIn = backing[cin];
         if (amountIn > MAX_AMOUNT - backingIn) revert AmountTooLarge();
 
@@ -549,6 +594,12 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
     // ==================================================================
     // Views
     // ==================================================================
+
+    /// @notice F_eff = max(live vault floor, the allocation's curator floor). Reverts if the allocation's direction is
+    ///         unconfigured or halted (the same conditions under which `exchange` reverts).
+    function effectiveFloorX96(uint256 allocationId) external view returns (uint256) {
+        return _effectiveFloor(_allocations[allocationId]);
+    }
 
     function getAllocation(uint256 allocationId) external view returns (Allocation memory) {
         return _allocations[allocationId];
@@ -661,6 +712,26 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
         a = _allocations[allocationId];
         if (a.consumer == address(0)) revert UnknownAllocation(allocationId);
         if (a.released) revert AllocationAlreadyReleased(allocationId);
+    }
+
+    /// @dev Live vault floor of the direction selling `currencyOut`; reverts unless configured and not halted.
+    function _vaultFloor(Currency currencyOut) internal view returns (uint160 floor) {
+        SellPolicy memory policy = sellPolicy[currencyOut];
+        floor = policy.minInPerOutX96;
+        if (floor == 0) revert PriceFloorNotConfigured(currencyOut);
+        if (policy.halted) revert DirectionHalted(currencyOut);
+    }
+
+    function _effectiveFloor(Allocation storage a) internal view returns (uint256) {
+        uint160 vaultFloor = _vaultFloor(a.currencyOut);
+        uint160 curatorFloor = a.minInPerOutX96;
+        return curatorFloor > vaultFloor ? curatorFloor : vaultFloor;
+    }
+
+    function _otherAsset(Currency currency) internal view returns (Currency) {
+        if (currency == asset0) return asset1;
+        if (currency == asset1) return asset0;
+        revert InvalidCurrency();
     }
 
     /// @dev Owner: always. Guardian: only when the change is `riskReducing`. msg.sender is never address(0), so an

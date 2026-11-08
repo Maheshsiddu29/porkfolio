@@ -5,6 +5,8 @@ import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
@@ -13,11 +15,18 @@ import {AuthModeHook} from "../utils/AuthModeHook.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
 
 /// @notice Phase 1A-H Task B: zero-asset, depleted and dust states, reached through the real PoolManager.
-///         A test-only 1:1 hook drains an asset exactly; a registered malicious hook with a curator floor of 0
-///         models a legitimate (authorised) but catastrophic economic loss. After every step the accounting
+///         A test-only 1:1 hook drains an asset exactly. Phase 1B-1 (decision D13): floor-0 trades no longer exist,
+///         so near-total depletion is reached by a registered hook trading EXACTLY at the most permissive floor the
+///         owner can legally configure: f_v(out) = 2^32 + 1 against f_v(opposite) = 2^160 - 1 (D14 forces
+///         f_out >= ceil(2^192 / f_opp)), i.e. ~2^-64 raw input per raw output. This models an authorised but
+///         catastrophic economic loss that now requires an explicit owner decision. After every step the accounting
 ///         equations are re-derived from raw balances (`_assertEquations`): losses must be economic, never
 ///         accounting errors.
 contract ZeroAssetStatesTest is VaultTestBase {
+    /// @dev Largest representable floor, and the smallest floor D14 then allows in the opposite direction.
+    uint160 internal constant MAX_FLOOR = type(uint160).max;
+    uint160 internal constant MIN_CONSISTENT_FLOOR = 2 ** 32 + 1; // ceil(2^192 / (2^160 - 1))
+
     uint160 internal constant SWAP_FLAGS = Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG;
 
     address internal lpA = makeAddr("lpA");
@@ -61,14 +70,31 @@ contract ZeroAssetStatesTest is VaultTestBase {
         _swap(keyE, out == c1, q, id);
     }
 
-    /// @dev A curator authorises floor 0; the registered hook takes every admissible unit of `out` for 1 wei.
-    function _drainForOneWei(Currency out) internal {
-        ISharedCommitmentVault.AllocationRequest memory r = _request(keyM, out, uint128(vault.admissibleCapacity(out)));
-        r.minInPerOutX96 = 0;
+    /// @dev The owner deliberately opens the most permissive legal floor for selling `out`: the opposite direction
+    ///      is raised to the maximum floor first (otherwise D14 rejects the change), then `out` is lowered.
+    function _ownerOpensExtremeFloor(Currency out) internal {
+        vm.startPrank(owner);
+        vault.setSellFloor(out == c0 ? c1 : c0, MAX_FLOOR);
+        vault.setSellFloor(out, MIN_CONSISTENT_FLOOR);
+        vm.stopPrank();
+    }
+
+    /// @dev A curator authorises the minimum legal floor; the registered hook takes `amountOut` of `out` paying
+    ///      exactly ceil(amountOut * F / 2^96) of the other asset. Returns the input paid.
+    function _drainAtFloor(Currency out, uint256 amountOut) internal returns (uint256 pay) {
+        _ownerOpensExtremeFloor(out);
+        ISharedCommitmentVault.AllocationRequest memory r = _request(keyM, out, uint128(amountOut));
+        r.minInPerOutX96 = MIN_CONSISTENT_FLOOR;
         vm.prank(curator);
         uint256 id = vault.allocate(r);
-        mal.configure(MaliciousConsumerHook.Attack.BelowFloor, id, r.maxOut);
-        _swapRaw(keyM, out == c1, -1, "");
+        pay = FullMath.mulDivRoundingUp(amountOut, MIN_CONSISTENT_FLOOR, FixedPoint96.Q96);
+        mal.configure(MaliciousConsumerHook.Attack.ExactAmounts, id, amountOut);
+        _swapRaw(keyM, out == c1, -int256(pay), "");
+    }
+
+    /// @dev Sell every admissible unit of `out` at the most permissive legal floor.
+    function _drainAdmissibleAtFloor(Currency out) internal returns (uint256) {
+        return _drainAtFloor(out, vault.admissibleCapacity(out));
     }
 
     // ------------------------------------------------------------------
@@ -148,32 +174,40 @@ contract ZeroAssetStatesTest is VaultTestBase {
 
     /// @notice Every trade adds at least 1 wei of the input asset, and a redemption can never take all of a
     ///         positive balance (the locked MIN_SHARES keep a pro-rata residual). So N0 + N1 > 0 after
-    ///         initialization. Here both assets are drained as far as possible: N = (0, 1 wei).
+    ///         initialization. Here both assets are drained as far as the price policy allows. Phase 1B-1: the
+    ///         second drain can no longer be "everything for 1 wei"; even the most permissive legal floor makes the
+    ///         hook pay ceil(2M ether * (2^32 + 1) / 2^96) = ~108k wei of token1.
     function test_bothAssetsZero_unreachable_nearTotalDepletionIsEconomic() public {
         _drainOneToOne(c1); // N = (2M, 0)
-        _drainForOneWei(c0); // registered hook, curator floor 0: takes 2M token0 for 1 wei token1
+        uint256 sold = vault.admissibleCapacity(c0);
+        uint256 paid = _drainAdmissibleAtFloor(c0); // registered hook at the most permissive legal floor
         assertEq(vault.netAssets(c0), 0);
-        assertEq(vault.netAssets(c1), 1);
+        assertEq(vault.netAssets(c1), paid);
+        assertGe(paid * FixedPoint96.Q96, sold * MIN_CONSISTENT_FLOOR, "paid at least the floor");
+        assertGt(paid, 0);
         _assertEquations();
 
-        // Every holder's claim now rounds to zero in both assets: redemption reverts instead of burning shares
-        // for nothing. This is an economic loss (authorised trade at floor 0), not an accounting error.
-        uint256 s = vault.sharesOf(lp0);
-        (uint256 e0, uint256 e1) = vault.previewRedeem(s);
+        // A unit of 1e18 shares is now worth < 1 wei in both assets: redeeming it reverts instead of burning shares
+        // for nothing. This is an economic loss (authorised trade at an owner-approved floor), not an accounting
+        // error.
+        (uint256 e0, uint256 e1) = vault.previewRedeem(1 ether);
         assertEq(e0 + e1, 0);
         vm.prank(lp0);
         vm.expectRevert(ISharedCommitmentVault.DustRedemption.selector);
-        vault.redeem(s, 0, 0, lp0, true);
+        vault.redeem(1 ether, 0, 0, lp0, true);
 
         // New assets can still enter, priced at the depleted per-share basket and fully backed.
-        (uint256 d0, uint256 d1) = vault.previewDeposit(vault.totalShares());
+        uint256 S = vault.totalShares();
+        (uint256 d0, uint256 d1) = vault.previewDeposit(S);
         assertEq(d0, 0);
-        assertEq(d1, 1, "S new shares cost 1 wei: the per-share basket is 1/S wei");
-        _depositShares(lpA, vault.totalShares());
-        // But the share price is so low that the int128 share cap bounds further deposits (terminal in practice).
+        assertEq(d1, paid, "S new shares cost exactly the remaining basket");
+        _depositShares(lpA, S);
+        // The share price is so low that the int128 share cap bounds further deposits (terminal in practice).
         uint256 room = vault.MAX_AMOUNT() - vault.totalShares();
         (uint256 m0, uint256 m1) = _fundAndPreviewMax(room);
-        assertLt(m0 + m1, 1e18, "max depositable value after depletion is tiny");
+        assertEq(m0, 0);
+        assertEq(m1, FullMath.mulDivRoundingUp(room, vault.netAssets(c1), vault.totalShares()));
+        assertLt(m1, VAULT_FUNDING / 10_000, "max depositable value after depletion < 0.01% of the original pool");
         _assertEquations();
     }
 
@@ -187,7 +221,7 @@ contract ZeroAssetStatesTest is VaultTestBase {
         uint256 d0 = vault.pendingDemand(c0);
         assertEq(d0, 100_000 ether);
 
-        _drainForOneWei(c0); // takes N0 - D0 = 1M token0 for 1 wei token1
+        _drainAdmissibleAtFloor(c0); // takes N0 - D0 = 1M token0 at the most permissive legal floor
         assertEq(vault.netAssets(c0), d0, "the drain could not touch pending demand");
         _assertEquations();
 
@@ -217,7 +251,7 @@ contract ZeroAssetStatesTest is VaultTestBase {
         uint256 d0 = vault.pendingDemand(c0);
         vm.prank(owner);
         vault.release(lock);
-        _drainForOneWei(c0); // takes everything except the protected pending demand
+        _drainAdmissibleAtFloor(c0); // takes everything except the protected pending demand
         assertEq(vault.netAssets(c0), d0);
 
         (uint256 e0, uint256 e1) = vault.previewRedeem(1);
@@ -240,13 +274,8 @@ contract ZeroAssetStatesTest is VaultTestBase {
     ///         State: per-share value < 1 wei in both assets and exactly 1 wei of free token0.
     function test_dustPartialSlice_isNotFinalized() public {
         _drainOneToOne(c1); // N = (2M, 0)
-        // A registered hook takes 1.5M token0 for 1 wei token1 (curator floor 0): N = (0.5M, 1 wei), S = 1M.
-        ISharedCommitmentVault.AllocationRequest memory r = _request(keyM, c0, 1_500_000 ether);
-        r.minInPerOutX96 = 0;
-        vm.prank(curator);
-        uint256 id = vault.allocate(r);
-        mal.configure(MaliciousConsumerHook.Attack.BelowFloor, id, 1_500_000 ether);
-        _swapRaw(keyM, false, -1, "");
+        // A registered hook takes 1.5M token0 at the most permissive legal floor: N = (0.5M, ~81k wei), S = 1M.
+        _drainAtFloor(c0, 1_500_000 ether);
         // Lock all but 1 wei of token0.
         _allocate(keyA, c0, uint128(vault.admissibleCapacity(c0) - 1));
         assertEq(vault.freeInventory(c0), 1);

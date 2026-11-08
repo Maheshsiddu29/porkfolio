@@ -317,7 +317,7 @@ contract VaultHandler is Test {
                 currencyOut: out,
                 // forge-lint: disable-next-line(unsafe-typecast)
                 maxOut: uint128(maxOut),
-                minInPerOutX96: uint160(FixedPoint96.Q96 * 98 / 100),
+                minInPerOutX96: uint160(FixedPoint96.Q96), // >= vault floor (Phase 1B-1)
                 expiry: uint64(block.timestamp + lifetime),
                 nonce: nonce++,
                 deadline: uint64(block.timestamp)
