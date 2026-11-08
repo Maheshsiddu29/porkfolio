@@ -923,10 +923,18 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
     ///         or 0 if that is negative.
     /// @dev Example: N_a = 1,000, Q_a = 300, R_a = 100 and D_a = 150 give 450. This does not include the curator's
     ///      own ceiling, which `allocate` checks separately.
+    ///
+    ///      Each term is subtracted in turn with a floor at zero instead of summing Q_a + R_a + D_a first. R_a is an
+    ///      admin input with no upper bound (the guardian may raise it to type(uint256).max to stop new allocations
+    ///      in this asset), so the sum could overflow and revert with a panic. Because every term is non-negative,
+    ///      max(0, max(0, max(0, N - Q) - R) - D) equals max(0, N - Q - R - D) exactly: once an intermediate result
+    ///      reaches zero, the exact value is already <= 0. The result is therefore unchanged wherever the sum did
+    ///      not overflow, and is 0 (so `allocate` reverts with `InsufficientBacking`) wherever it did.
     /// @param currency Asset the allocation would sell.
     /// @return Raw units of `currency`.
     function admissibleCapacity(Currency currency) public view returns (uint256) {
-        return _sub0(netAssets(currency), reserved[currency] + bufferFloor[currency] + pendingDemand(currency));
+        return
+            _sub0(_sub0(_sub0(netAssets(currency), reserved[currency]), bufferFloor[currency]), pendingDemand(currency));
     }
 
     /// @notice Largest number of shares whose in-kind basket free inventory could pay right now.

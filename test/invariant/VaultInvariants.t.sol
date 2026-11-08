@@ -84,10 +84,12 @@ contract VaultHandler is Test {
     bool public claimableTouched; // W_a changed in an action that is not finalization or claim
     bool public admissionViolated; // an allocation larger than the admissible capacity succeeded
     bool public priceViolated; // INV-P1: a successful swap moved claims below max(vault floor, curator floor)
-    bool public guardianLoosened; // INV-R1: a guardian call lowered a floor or resumed a direction
+    bool public guardianLoosened; // INV-R1: a guardian call lowered a floor or buffer, or resumed a direction
+    bool public capacityReverted; // admissibleCapacity reverted (e.g. Q + R + D overflowing 256 bits)
 
     address public guardian;
     uint256 public floorChangesOk;
+    uint256 public bufferChangesOk;
     uint256 public haltsOk;
     uint256 public guardianRefusals;
 
@@ -257,6 +259,35 @@ contract VaultHandler is Test {
         try vault.setSellFloor(out, uint160(lower)) {
             floorChangesOk++;
         } catch {}
+    }
+
+    /// @notice Owner or guardian sets a buffer floor R_a, half the time to a value at or near type(uint256).max.
+    /// @dev Exercises the case where Q_a + R_a + D_a does not fit in 256 bits. `admissibleCapacity` must keep
+    ///      returning (0 in that case) for both assets, `invariant_equationsFromRawSources` checks its value, and the
+    ///      guardian may only raise R_a. asset0 keeps R_0 >= 50,000 so the setUp property "token0 can never be fully
+    ///      drained" still holds.
+    function setBuffer(bool sellOne, uint256 value, bool huge, bool asGuardian) external {
+        Currency c = sellOne ? c1 : c0;
+        uint256 maxAmount = uint256(uint128(type(int128).max));
+        value = huge
+            ? bound(value, type(uint256).max - 4 * maxAmount, type(uint256).max)
+            : bound(value, sellOne ? 0 : 50_000 ether, 300_000 ether);
+        uint256 before = vault.bufferFloor(c);
+        vm.prank(asGuardian ? guardian : owner);
+        try vault.setBufferFloor(c, value) {
+            bufferChangesOk++;
+            if (asGuardian && value < before) guardianLoosened = true;
+        } catch {
+            if (asGuardian) guardianRefusals++;
+        }
+        try vault.admissibleCapacity(c0) {}
+        catch {
+            capacityReverted = true;
+        }
+        try vault.admissibleCapacity(c1) {}
+        catch {
+            capacityReverted = true;
+        }
     }
 
     function donate(bool zero, uint256 amount) external {
@@ -592,7 +623,7 @@ contract VaultInvariantsTest is VaultTestBase {
         vm.stopPrank();
         handler.setGuardian(guardianAddr);
 
-        bytes4[] memory selectors = new bytes4[](17);
+        bytes4[] memory selectors = new bytes4[](18);
         selectors[0] = VaultHandler.allocate.selector;
         selectors[1] = VaultHandler.swap.selector;
         selectors[2] = VaultHandler.warp.selector;
@@ -610,6 +641,7 @@ contract VaultInvariantsTest is VaultTestBase {
         selectors[14] = VaultHandler.guardianHalt.selector;
         selectors[15] = VaultHandler.ownerResume.selector;
         selectors[16] = VaultHandler.ownerLoosen.selector;
+        selectors[17] = VaultHandler.setBuffer.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -716,11 +748,13 @@ contract VaultInvariantsTest is VaultTestBase {
     }
 
     /// Every successful action moved real ERC-20 / ERC-6909 balances by exactly its accounting change;
-    /// W_a changed only through finalization or claims; no allocation exceeded the admissible capacity.
+    /// W_a changed only through finalization or claims; no allocation exceeded the admissible capacity; and
+    /// admissibleCapacity never reverted, including with a buffer floor near type(uint256).max.
     function invariant_actualBalanceMovementsMatchAccounting() public view {
         assertFalse(handler.balanceMismatch(), "balance movement != accounting change");
         assertFalse(handler.claimableTouched(), "claimable assets changed outside finalize/claim");
         assertFalse(handler.admissionViolated(), "allocation exceeded admissible capacity");
+        assertFalse(handler.capacityReverted(), "admissibleCapacity reverted");
     }
 
     /// INV-P1: every successful swap met max(live vault floor, curator floor) on measured claim deltas.
@@ -757,6 +791,7 @@ contract VaultInvariantsTest is VaultTestBase {
             handler.haltsOk(),
             handler.guardianRefusals()
         );
+        console2.log("bufferChanges:", handler.bufferChangesOk());
     }
 
     /// @notice Guards against a vacuous campaign: a fixed handler sequence must actually exercise every path,

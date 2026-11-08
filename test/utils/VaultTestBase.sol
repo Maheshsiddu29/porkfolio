@@ -297,8 +297,12 @@ abstract contract VaultTestBase is Test {
             uint256 D = P == 0 ? 0 : FullMath.mulDivRoundingUp(P, N, S);
             assertEq(vault.pendingDemand(c), D, "D != ceil(P*N/S)");
             assertLe(D, N, "D > N");
-            uint256 need = Q[i] + vault.bufferFloor(c) + D;
-            assertEq(vault.admissibleCapacity(c), N > need ? N - need : 0, "admission != N - Q - R - D");
+            // Q + D <= 2N < 2^129 cannot overflow. R is unbounded (the guardian may raise it to type(uint256).max),
+            // so it is compared against what is left rather than added to Q + D.
+            uint256 qd = Q[i] + D;
+            uint256 R = vault.bufferFloor(c);
+            uint256 expected = N > qd && N - qd > R ? N - qd - R : 0;
+            assertEq(vault.admissibleCapacity(c), expected, "admission != max(0, N - Q - R - D)");
         }
         if (S != 0) assertGt(nSum, 0, "shares outstanding with no assets");
     }
