@@ -106,3 +106,20 @@ Docs:
 
 - `docs/architecture/PHASE1B_DECISIONS.md`: approved D1–D14.
 - `docs/architecture/PHASE1B1_REPORT.md`: validation, size, gas, mutations, and the Phase 1B-2 plan.
+
+## Phase 1B-2 step 1 — vault optimizer profile and `VaultLens`
+
+```bash
+test/bench/run.sh                                                  # production-artifact sizes, settings, gas
+forge test --match-contract VaultLensTest -vv                      # lens vs vault execution
+FOUNDRY_INVARIANT_RUNS=256 FOUNDRY_INVARIANT_DEPTH=128 forge test --match-contract VaultInvariants
+```
+
+- **Optimizer.** The vault is compiled with `optimizer_runs = 2,000` (runtime 17,035 B, EIP-170 margin 7,541 B).
+  Everything else keeps 44,444,444. Test files that import the vault compile their whole import graph at 2,000 runs, so
+  production gas comes from `test/bench/`, not `test/gas/`.
+- **Lens.** `src/VaultLens.sol` serves the previews, the request status, `N_a`, `F_a`, `D_a`, deliverable shares and
+  an allocation's effective floor. It has no state and no authority, and the vault never calls it. Call it as
+  `lens.previewDeposit(vault, shares)`.
+
+Docs: `docs/architecture/PHASE1B2_STEP1_REPORT.md`.

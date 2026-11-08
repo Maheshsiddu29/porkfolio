@@ -17,7 +17,8 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 | ID | Item | Status | Evidence or gap |
 |---|---|---|---|
 | D-1 | v4-periphery, v4-core, forge-std and OZ pinned by commit (submodules plus `foundry.lock`) | Partial | Submodules pinned (`v4-periphery c6e4754`, `forge-std v1.9.7`); OZ 5.0.2 vendored through v4-core. No record yet of why these commits were chosen or of a check for known advisories. |
-| D-2 | Compiler `0.8.26`, via-IR, `cancun`, `bytecode_hash = none`, optimizer setting per contract recorded | Partial | Recorded in `foundry.toml`. The vault-specific setting (D19) is pending. |
+| D-2 | Compiler `0.8.26`, via-IR, `cancun`, `bytecode_hash = none`, optimizer setting per contract recorded | Done (local) | `foundry.toml`: vault 2,000 runs through `compilation_restrictions`; hooks and `VaultLens` 44,444,444. `test/bench/run.sh` reads the settings back from each artifact's metadata and fails on a mismatch (`PHASE1B2_STEP1_REPORT.md` §2). The authorization module's setting is chosen when it is built. |
+| D-6 | Tests exercise the bytecode that will be deployed | Partial | The vault under test is the production artifact (one artifact only). Functional test files that import the vault compile the hooks and PoolManager at 2,000 runs, not their production settings. Production builds of every contract run only in `test/bench/` (all swap and LP paths, as a smoke test). Before Gate 2, either deploy production artifacts in the functional suite or run it against them on a fork. |
 | D-3 | Unichain supports every opcode used (`TSTORE`/`TLOAD`, `MCOPY`, `PUSH0`) | Not started | Verify on a fork against the live chain, not from documentation alone. |
 | D-4 | Canonical Unichain PoolManager address and bytecode confirmed against Uniswap's published deployment | Not started | — |
 | D-5 | No unreviewed dependency added; OZ used only for EIP-712 and signature checks (D12) | Partial | Policy written; enforce in review. |

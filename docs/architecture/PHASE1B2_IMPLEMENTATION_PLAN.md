@@ -1,7 +1,8 @@
 # Porkfolio — Phase 1B-2 Implementation Plan
 
-**Status: PLAN FOR REVIEW.** It replaces the 1B-2 rows of `PHASE1B_THREATS_AND_PLAN.md` §3 if D17 (architecture B)
-is approved. Every step follows `CLAUDE.md`:
+**Status: IN PROGRESS.** D17 (architecture B) and D19 (vault at 2,000 runs) are approved. Step 1B-2.0 is done
+(`PHASE1B2_STEP1_REPORT.md`); later steps have not started. This plan replaces the 1B-2 rows of
+`PHASE1B_THREATS_AND_PLAN.md` §3. Every step follows `CLAUDE.md`:
 
 - 2–4 coherent commits;
 - NatSpec in the same commit as the code;
@@ -38,7 +39,19 @@ is approved. Every step follows `CLAUDE.md`:
 The real code will be larger than the prototypes: NatSpec adds nothing, but errors, events and full checks do.
 Measure; do not rely on these numbers.
 
-## 1B-2.0 Size levers, no behaviour change
+## 1B-2.0 Size levers, no behaviour change (DONE)
+
+As built: `2b82851` (benchmark harness first, so both sides are measured the same way), `ea370dd` (optimizer profile),
+`b62a28f` (`VaultLens`), `a85ae4d` (lens deployment benchmark). Two deviations from the rows below:
+
+- **`admissibleCapacity` and `getRequest` stay external on the vault.** The first is the exact admission rule the vault
+  enforces, and keeping it costs 67 B. The second is the only way to read request records.
+- **No test-only copy of the old views.** The lens is instead checked against the vault's real execution (deposit,
+  instant redeem, queue finalization, allocation at the admission limit): in a fuzz test and in an invariant that
+  runs on every campaign state. A one-off comparison against the old view code was also run (step 1 report).
+
+Measured vault runtime at 2,000 runs: 17,035 B (prediction 16,682 B).
+
 
 | # | Commit | Content | Tests and evidence |
 |---|---|---|---|

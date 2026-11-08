@@ -1,6 +1,8 @@
 # Porkfolio — Modular Risk Engine: Architecture, Trust Boundaries and Measurements
 
-**Status: ARCHITECTURE FOR REVIEW (Phase 1B-2A). Nothing here is implemented.** Labels: SOURCE (read from the code at
+**Status: ARCHITECTURE (Phase 1B-2A). The owner approved option B (D17) and `optimizer_runs = 2,000` for the vault
+(D19). Implemented so far: step 1B-2.0 only, the vault's optimizer profile and `VaultLens` (§8.3,
+`PHASE1B2_STEP1_REPORT.md`). Everything else here is still a proposal.** Labels: SOURCE (read from the code at
 `4b5e514`), OBSERVED (measured in this milestone; method in §9), ESTIMATE (derived, not measured; how to measure it is
 stated), PROPOSAL, DECISION (needs the owner's approval).
 
@@ -38,7 +40,10 @@ The authorization module is the one split that pays for itself:
 Its costs are measured: about +8,100 gas per activation and about +0.9–1.2M gas to deploy. It never touches swaps or
 withdrawals.
 
-## 2. Current implementation (SOURCE, `4b5e514`)
+## 2. Implementation this design started from (SOURCE, `4b5e514`)
+
+After step 1B-2.0 the vault is 17,035 B at `optimizer_runs = 2,000` and eight views live in `VaultLens` (§8.3).
+The list below is the starting point.
 
 - One contract, 22,814 B runtime (EIP-170 margin 1,762 B), `optimizer_runs = 44,444,444`.
 - It holds custody (ERC-6909 claims on the PoolManager), shares, the FIFO queue, the floors, allocations, `Q_a`,
@@ -410,8 +415,31 @@ fits in one contract, and neither does B's vault.** Lowering `optimizer_runs` is
 - The full C design: build the engine only if D17 rejects B.
 - The transient reentrancy lock: §4.5.
 - Packed curator slot: 1B-2.2.
-- Lens deployment: 1B-2.0.
-- Vault-only optimizer effect: §8.1.
+- Lens deployment: measured in 1B-2.0, §8.3.
+- Vault-only optimizer effect: measured in 1B-2.0, §8.3.
+
+### 8.3 Step 1B-2.0 as built (OBSERVED)
+
+Production builds only, measured by `test/bench/run.sh`. That harness compiles under the default profile and deploys
+the vault's own artifact, the hooks' default-profile artifacts and a PoolManager built with v4-core's settings. This
+removes the confound in §8.1. Full tables are in `PHASE1B2_STEP1_REPORT.md`.
+
+| | Before (`2b82851`) | Vault at 2,000 runs (`ea370dd`) | + `VaultLens` (`b62a28f`) |
+|---|---|---|---|
+| Vault runtime / init (B) | 22,814 / 23,444 | 17,792 / 18,422 | 17,035 / 17,644 |
+| Vault EIP-170 margin (B) | 1,762 | 6,784 | 7,541 |
+| HookA swap, end to end | 214,382 | 214,831 (+449) | 214,456 (+74) |
+| Native v4 swap (control) | 150,303 | 150,303 | 150,303 |
+| Allocate, steady state | 263,307 | 264,212 | 264,080 |
+| Deploy vault (CREATE) | 5,080,926 | 4,001,060 | 3,838,048 |
+| `VaultLens` runtime / deploy (CREATE) | — | — | 5,046 B / 1,167,248 |
+
+- **Vault-only cost of 2,000 runs.** It is +449 gas per swap, not the +1,272 estimated in §8.1. That estimate was for
+  200 runs and subtracted a PoolManager that had also been recompiled.
+- **The lens recovered most of that cost.** Most likely this is because the vault's selector dispatch has 8 fewer
+  entries. This explanation is not verified by trace.
+- **Prototype comparison.** The lens prototype predicted 16,682 B at 2,000 runs. The built vault is 353 B larger,
+  because `getRequest` and `admissibleCapacity` stay external (the step 1 report explains why).
 
 ## 9. Invariants the architecture must keep (existing + new)
 
