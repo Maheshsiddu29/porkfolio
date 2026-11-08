@@ -87,3 +87,22 @@ No Solidity changed. Review these before any Phase 1B implementation:
 - `docs/architecture/PHASE1B_CURATOR_AUTH.md`: EIP-712 curator authorization, nonces, lifecycle and state machine,
   roles.
 - `docs/architecture/PHASE1B_THREATS_AND_PLAN.md`: threat model, invariants, required tests, commit plan.
+
+## Phase 1B-1 — risk roles and vault-enforced price floors
+
+```bash
+forge test --match-contract "PricePolicyTest|RolesTest|HookPriceBands" -vv   # new security and integration tests
+FOUNDRY_INVARIANT_RUNS=256 FOUNDRY_INVARIANT_DEPTH=128 forge test --match-contract VaultInvariants
+```
+
+- **Price floors.** A vault floor per direction (Q64.96, raw input per raw output). The effective floor is
+  `max(live vault floor, curator floor)`, checked on the exact ERC-6909 amounts moved.
+- **Directional consistency.** `F0 · F1 ≥ 2^192` is enforced, so no round trip at the floors is profitable.
+- **Guardian.** Tighten-only.
+- **Ownership.** Two-step transfer.
+- **Curators.** Must be registered.
+
+Docs:
+
+- `docs/architecture/PHASE1B_DECISIONS.md`: approved D1–D14.
+- `docs/architecture/PHASE1B1_REPORT.md`: validation, size, gas, mutations, and the Phase 1B-2 plan.
