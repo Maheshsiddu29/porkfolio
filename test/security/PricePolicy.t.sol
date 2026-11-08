@@ -143,6 +143,9 @@ contract PricePolicyTest is VaultTestBase {
         v.setConsumer(address(hookA), true);
         v.setCuratorCeiling(curator, c1, type(uint256).max);
         v.setCuratorCeiling(curator, c0, type(uint256).max);
+        // With no opposite floor, D14 cannot catch a zero floor: the explicit zero check must.
+        vm.expectRevert(ISharedCommitmentVault.ZeroPriceFloor.selector);
+        v.setSellFloor(c0, 0);
         v.setSellFloor(c0, uint160(Q96)); // only one direction opened
         vm.stopPrank();
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c1, 1);
