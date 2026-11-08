@@ -55,9 +55,14 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
     Currency public immutable asset1;
 
     address public owner;
+    /// @notice Nominee of a two-step ownership transfer (zero when none is pending).
+    address public pendingOwner;
+    /// @notice Emergency role that may only REDUCE risk (see `_authorize`). Zero = no guardian.
+    address public guardian;
     bool public paused;
 
     mapping(address consumer => bool) public isConsumer;
+    mapping(address curator => bool) public isCurator;
     mapping(address curator => mapping(Currency currency => uint256)) public curatorCeiling;
     mapping(address curator => mapping(Currency currency => uint256)) public curatorReserved;
     mapping(address curator => mapping(uint256 nonce => bool)) public nonceUsed;
@@ -108,37 +113,72 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
 
     // ==================================================================
     // Administration (no function here moves assets)
+    //
+    // Owner: every configuration change. Guardian: only changes that REDUCE risk (pause, deregister,
+    // lower a ceiling, raise a buffer floor, emergency release); it can never loosen, register, unpause,
+    // or touch ownership or the guardian slot. Anyone else: nothing.
     // ==================================================================
 
+    /// @notice Step 1 of a two-step transfer: nominate `newOwner` (zero cancels a pending nomination).
+    ///         Ownership moves only when the nominee calls `acceptOwnership`.
     function transferOwnership(address newOwner) external onlyOwner {
-        if (newOwner == address(0)) revert ZeroAddress();
-        emit OwnershipTransferred(owner, newOwner);
-        owner = newOwner;
+        pendingOwner = newOwner;
+        emit OwnershipTransferStarted(owner, newOwner);
+    }
+
+    /// @notice Step 2: the nominee accepts. The guardian is unaffected; the new owner may replace it.
+    function acceptOwnership() external {
+        if (msg.sender != pendingOwner) revert NotPendingOwner();
+        emit OwnershipTransferred(owner, msg.sender);
+        owner = msg.sender;
+        pendingOwner = address(0);
+    }
+
+    /// @notice Appoint or remove (zero) the guardian. Owner only.
+    function setGuardian(address newGuardian) external onlyOwner {
+        emit GuardianSet(guardian, newGuardian);
+        guardian = newGuardian;
     }
 
     /// @notice Emergency stop for deposits, new allocations and all consumption. Redemption, queue
-    ///         processing, cancellation and claims stay available.
-    function setPaused(bool paused_) external onlyOwner {
+    ///         processing, cancellation, claims and release stay available. Guardian may pause, not unpause.
+    function setPaused(bool paused_) external {
+        _authorize(paused_);
         paused = paused_;
         emit PausedSet(paused_);
     }
 
     /// @notice Register or revoke a compatible hook. Revocation takes effect immediately for consumption.
-    function setConsumer(address consumer, bool registered) external onlyOwner {
+    ///         Guardian may revoke only.
+    function setConsumer(address consumer, bool registered) external {
         if (consumer == address(0)) revert ZeroAddress();
+        _authorize(!registered);
         isConsumer[consumer] = registered;
         emit ConsumerSet(consumer, registered);
     }
 
-    /// @notice Maximum outstanding reserved capacity a curator may hold in `currency`. Zero = not authorised.
-    function setCuratorCeiling(address curator, Currency currency, uint256 ceiling) external onlyOwner {
+    /// @notice Register or revoke a curator. Only registered curators may create allocations; revocation blocks
+    ///         new allocations (existing ones are removed by emergency release). Guardian may revoke only.
+    function setCurator(address curator, bool registered) external {
         if (curator == address(0)) revert ZeroAddress();
+        _authorize(!registered);
+        isCurator[curator] = registered;
+        emit CuratorSet(curator, registered);
+    }
+
+    /// @notice Maximum outstanding reserved capacity a curator may hold in `currency`. Zero = no capacity.
+    ///         Guardian may lower only.
+    function setCuratorCeiling(address curator, Currency currency, uint256 ceiling) external {
+        if (curator == address(0)) revert ZeroAddress();
+        _authorize(ceiling <= curatorCeiling[curator][currency]);
         curatorCeiling[curator][currency] = ceiling;
         emit CuratorCeilingSet(curator, currency, ceiling);
     }
 
     /// @notice R_a: inventory that new allocations must leave unreserved. Does not restrict LP redemptions.
-    function setBufferFloor(Currency currency, uint256 floor) external onlyOwner {
+    ///         Guardian may raise only.
+    function setBufferFloor(Currency currency, uint256 floor) external {
+        _authorize(floor >= bufferFloor[currency]);
         bufferFloor[currency] = floor;
         emit BufferFloorSet(currency, floor);
     }
@@ -388,6 +428,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
     ///      redemption assets are all protected).
     function allocate(AllocationRequest calldata req) external whenNotPaused returns (uint256 allocationId) {
         address curator = msg.sender;
+        if (!isCurator[curator]) revert CuratorNotRegistered(curator);
 
         if (req.deadline < block.timestamp) revert InstructionExpired(req.deadline);
         if (nonceUsed[curator][req.nonce]) revert NonceAlreadyUsed(curator, req.nonce);
@@ -436,11 +477,14 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
     }
 
     /// @notice Return an allocation's unused capacity to free inventory.
-    /// @dev Expiry is recognised lazily: after `expiry` anyone may release. Before expiry only the owner
-    ///      may release (emergency), because an unexpired allocation is a commitment to its consumer.
+    /// @dev Expiry is recognised lazily: after `expiry` anyone may release. Before expiry only the owner or the
+    ///      guardian may release (emergency, risk-reducing), because an unexpired allocation is a commitment to its
+    ///      consumer. Releasing moves no assets; it only returns reserved capacity to free inventory.
     function release(uint256 allocationId) external {
         Allocation storage a = _getLiveAllocation(allocationId);
-        if (block.timestamp < a.expiry && msg.sender != owner) revert AllocationNotExpired(allocationId, a.expiry);
+        if (block.timestamp < a.expiry && msg.sender != owner && msg.sender != guardian) {
+            revert AllocationNotExpired(allocationId, a.expiry);
+        }
 
         uint256 unused = a.maxOut - a.consumed;
         a.released = true;
@@ -617,6 +661,17 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
         a = _allocations[allocationId];
         if (a.consumer == address(0)) revert UnknownAllocation(allocationId);
         if (a.released) revert AllocationAlreadyReleased(allocationId);
+    }
+
+    /// @dev Owner: always. Guardian: only when the change is `riskReducing`. msg.sender is never address(0), so an
+    ///      unset guardian authorizes nobody.
+    function _authorize(bool riskReducing) internal view {
+        if (msg.sender == owner) return;
+        if (msg.sender == guardian) {
+            if (riskReducing) return;
+            revert GuardianCannotIncreaseRisk();
+        }
+        revert NotOwner();
     }
 
     function _sub0(uint256 a, uint256 b) internal pure returns (uint256) {

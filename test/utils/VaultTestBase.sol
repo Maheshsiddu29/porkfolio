@@ -88,6 +88,7 @@ abstract contract VaultTestBase is Test {
         vm.startPrank(owner);
         vault.setConsumer(address(hookA), true);
         vault.setConsumer(address(hookB), true);
+        vault.setCurator(curator, true);
         vault.setCuratorCeiling(curator, c0, VAULT_FUNDING);
         vault.setCuratorCeiling(curator, c1, VAULT_FUNDING);
         vm.stopPrank();

@@ -113,6 +113,10 @@ contract VaultFundingTest is VaultTestBase {
         address newOwner = makeAddr("newOwner");
         vm.prank(owner);
         vault.transferOwnership(newOwner);
+        assertEq(vault.owner(), owner, "two-step: owner unchanged until accepted");
+        assertEq(vault.pendingOwner(), newOwner);
+        vm.prank(newOwner);
+        vault.acceptOwnership();
         assertEq(vault.owner(), newOwner);
     }
 

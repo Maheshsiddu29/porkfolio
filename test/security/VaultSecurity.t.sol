@@ -168,6 +168,13 @@ contract VaultSecurityTest is VaultTestBase {
 
     function test_unauthorisedCurator_hasZeroCeiling() public {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, 1);
+        // Phase 1B-1: an unregistered address is rejected before any ceiling is consulted...
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.CuratorNotRegistered.selector, attacker));
+        vault.allocate(req);
+        // ...and registration alone grants no capacity: the ceiling is still zero.
+        vm.prank(owner);
+        vault.setCurator(attacker, true);
         vm.prank(attacker);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.CuratorCeilingExceeded.selector, 1, 0));
         vault.allocate(req);
@@ -302,8 +309,10 @@ contract VaultSecurityTest is VaultTestBase {
 
     function test_nonce_isCuratorScoped() public {
         address curator2 = makeAddr("curator2");
-        vm.prank(owner);
+        vm.startPrank(owner);
+        vault.setCurator(curator2, true);
         vault.setCuratorCeiling(curator2, c1, QUOTA);
+        vm.stopPrank();
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, QUOTA);
         vm.prank(curator);
         vault.allocate(req);

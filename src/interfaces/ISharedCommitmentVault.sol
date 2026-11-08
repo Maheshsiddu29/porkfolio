@@ -76,6 +76,9 @@ interface ISharedCommitmentVault {
     // ------------------------------------------------------------------
 
     error NotOwner();
+    error NotPendingOwner();
+    error GuardianCannotIncreaseRisk();
+    error CuratorNotRegistered(address curator);
     error NotPoolManager();
     error ZeroAddress();
     error Paused();
@@ -121,7 +124,10 @@ interface ISharedCommitmentVault {
     // Events
     // ------------------------------------------------------------------
 
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event GuardianSet(address indexed previousGuardian, address indexed newGuardian);
+    event CuratorSet(address indexed curator, bool registered);
     event PausedSet(bool paused);
     event ConsumerSet(address indexed consumer, bool registered);
     event CuratorCeilingSet(address indexed curator, Currency indexed currency, uint256 ceiling);

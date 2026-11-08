@@ -64,6 +64,7 @@ contract InitializationTest is VaultTestBase {
         // A registered curator cannot commit capacity of an empty vault.
         vm.startPrank(owner);
         v.setConsumer(address(hookA), true);
+        v.setCurator(curator, true);
         v.setCuratorCeiling(curator, c1, type(uint256).max);
         vm.stopPrank();
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c1, 1);
@@ -118,6 +119,10 @@ contract InitializationTest is VaultTestBase {
     function test_ownershipTransfer_movesInitializationRight() public {
         vm.prank(owner);
         v.transferOwnership(lpA);
+        // Two-step: nothing moves until the nominee accepts.
+        assertEq(v.owner(), owner);
+        vm.prank(lpA);
+        v.acceptOwnership();
         vm.prank(owner);
         vm.expectRevert(ISharedCommitmentVault.NotOwner.selector);
         v.initialDeposit(1000 ether, 1000 ether, owner);
