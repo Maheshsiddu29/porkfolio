@@ -14,6 +14,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
@@ -70,6 +71,13 @@ contract VaultHandler is Test {
     bool public balanceMismatch; // an ERC-20 or ERC-6909 movement differed from the accounting change
     bool public claimableTouched; // W_a changed in an action that is not finalization or claim
     bool public admissionViolated; // an allocation larger than the admissible capacity succeeded
+    bool public priceViolated; // INV-P1: a successful swap moved claims below max(vault floor, curator floor)
+    bool public guardianLoosened; // INV-R1: a guardian call lowered a floor or resumed a direction
+
+    address public guardian;
+    uint256 public floorChangesOk;
+    uint256 public haltsOk;
+    uint256 public guardianRefusals;
 
     uint256 public swapsOk;
     uint256 public allocationsOk;
@@ -119,6 +127,11 @@ contract VaultHandler is Test {
         MockERC20(Currency.unwrap(c1)).approve(address(donor), type(uint256).max);
     }
 
+    /// @dev Called once by the invariant contract's setUp (not a fuzz target).
+    function setGuardian(address guardian_) external {
+        guardian = guardian_;
+    }
+
     function allocationCount() external view returns (uint256) {
         return allocationIds.length;
     }
@@ -163,6 +176,73 @@ contract VaultHandler is Test {
         if (id == 0) return;
         if (_swap(keyE, out == c1, q, id)) drainsOk++;
         if (vault.netAssets(c0) == 0 || vault.netAssets(c1) == 0) zeroAssetStatesSeen++;
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 1B-1 risk-policy actions
+    // ------------------------------------------------------------------
+
+    /// @notice Guardian raises one floor by 0.01%-2%. Must always succeed (raising keeps D14) and never lower it.
+    function guardianTighten(bool sellOne, uint256 bps) external {
+        Currency out = sellOne ? c1 : c0;
+        (uint160 f,) = vault.sellPolicy(out);
+        uint256 next = uint256(f) + uint256(f) * bound(bps, 1, 200) / 10_000;
+        if (next > type(uint160).max) return;
+        vm.prank(guardian);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        try vault.setSellFloor(out, uint160(next)) {
+            floorChangesOk++;
+        } catch {}
+        (uint160 g,) = vault.sellPolicy(out);
+        if (g < f) guardianLoosened = true;
+    }
+
+    /// @notice Guardian ATTEMPTS to lower a floor or resume a direction: must always be refused.
+    function guardianTryLoosen(bool sellOne, uint256 bps) external {
+        Currency out = sellOne ? c1 : c0;
+        (uint160 f, bool h) = vault.sellPolicy(out);
+        uint256 lower = uint256(f) - uint256(f) * bound(bps, 1, 5000) / 10_000;
+        vm.startPrank(guardian);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        try vault.setSellFloor(out, uint160(lower)) {
+            if (lower < f) guardianLoosened = true;
+        } catch {
+            guardianRefusals++;
+        }
+        if (h) {
+            try vault.setSellHalted(out, false) {
+                guardianLoosened = true;
+            } catch {
+                guardianRefusals++;
+            }
+        }
+        vm.stopPrank();
+    }
+
+    function guardianHalt(bool sellOne) external {
+        vm.prank(guardian);
+        vault.setSellHalted(sellOne ? c1 : c0, true);
+        haltsOk++;
+    }
+
+    function ownerResume(bool sellOne) external {
+        vm.prank(owner);
+        vault.setSellHalted(sellOne ? c1 : c0, false);
+    }
+
+    /// @notice Owner lowers one floor towards the D14 boundary ceil(2^192 / opposite floor), possibly below 1:1.
+    function ownerLoosen(bool sellOne, uint256 bps) external {
+        Currency out = sellOne ? c1 : c0;
+        (uint160 f,) = vault.sellPolicy(out);
+        (uint160 opp,) = vault.sellPolicy(sellOne ? c0 : c1);
+        uint256 boundary = FullMath.mulDivRoundingUp(FixedPoint96.Q96, FixedPoint96.Q96, opp);
+        uint256 lower = uint256(f) - uint256(f) * bound(bps, 1, 2000) / 10_000;
+        if (lower < boundary) lower = boundary;
+        vm.prank(owner);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        try vault.setSellFloor(out, uint160(lower)) {
+            floorChangesOk++;
+        } catch {}
     }
 
     function donate(bool zero, uint256 amount) external {
@@ -317,7 +397,7 @@ contract VaultHandler is Test {
                 currencyOut: out,
                 // forge-lint: disable-next-line(unsafe-typecast)
                 maxOut: uint128(maxOut),
-                minInPerOutX96: uint160(FixedPoint96.Q96), // >= vault floor (Phase 1B-1)
+                minInPerOutX96: _curatorFloor(out), // >= live vault floor (Phase 1B-1)
                 expiry: uint64(block.timestamp + lifetime),
                 nonce: nonce++,
                 deadline: uint64(block.timestamp)
@@ -335,9 +415,19 @@ contract VaultHandler is Test {
         } catch {}
     }
 
+    /// @dev Curator floor used by the handler: 1:1, or the live vault floor if that is stricter.
+    function _curatorFloor(Currency out) internal view returns (uint160) {
+        (uint160 f,) = vault.sellPolicy(out);
+        return f > uint160(FixedPoint96.Q96) ? f : uint160(FixedPoint96.Q96);
+    }
+
     function _swap(PoolKey memory key, bool zeroForOne, uint256 amountIn, uint256 id) internal returns (bool ok) {
         MockERC20(Currency.unwrap(zeroForOne ? c0 : c1)).mint(trader, amountIn);
         Currency cout = zeroForOne ? c1 : c0;
+        uint256 feff;
+        try vault.effectiveFloorX96(id) returns (uint256 f) {
+            feff = f;
+        } catch {}
         Snap memory p = _take();
         vm.prank(trader);
         try router.swap(
@@ -358,9 +448,31 @@ contract VaultHandler is Test {
             ghostBacking[cout] -= uint256(int256(outDelta));
             swapsOk++;
             ok = true;
+            _checkEffectiveFloor(p, zeroForOne, feff);
             _checkBalancesFollowBacking(p);
             _checkWUnchanged(p);
         } catch {}
+    }
+
+    /// @dev INV-P1 on MEASURED ERC-6909 deltas: dIn * 2^96 >= dOut * F_eff, compared in 512 bits.
+    function _checkEffectiveFloor(Snap memory p, bool zeroForOne, uint256 feff) internal {
+        Snap memory q = _take();
+        (uint256 dIn, uint256 dOut) = zeroForOne ? (q.pm0 - p.pm0, p.pm1 - q.pm1) : (q.pm1 - p.pm1, p.pm0 - q.pm0);
+        if (feff == 0) {
+            priceViolated = true; // a swap succeeded although the floor view reverted (unconfigured or halted)
+            return;
+        }
+        (uint256 h1, uint256 l1) = _mul512(dIn, FixedPoint96.Q96);
+        (uint256 h2, uint256 l2) = _mul512(dOut, feff);
+        if (h1 < h2 || (h1 == h2 && l1 < l2)) priceViolated = true;
+    }
+
+    function _mul512(uint256 a, uint256 b) internal pure returns (uint256 hi, uint256 lo) {
+        unchecked {
+            uint256 mm = mulmod(a, b, type(uint256).max);
+            lo = a * b;
+            hi = mm - lo - (mm < lo ? 1 : 0);
+        }
     }
 
     function _queueSnapshot()
@@ -429,6 +541,7 @@ contract VaultHandler is Test {
 contract VaultInvariantsTest is VaultTestBase {
     VaultHandler internal handler;
     PoolKey internal keyE;
+    address internal guardianAddr = makeAddr("guardian");
 
     function setUp() public override {
         super.setUp();
@@ -452,9 +565,11 @@ contract VaultInvariantsTest is VaultTestBase {
         vault.setBufferFloor(c0, 50_000 ether); // token0 can never be fully drained; token1 can
         vault.setCuratorCeiling(curator, c0, type(uint256).max);
         vault.setCuratorCeiling(curator, c1, type(uint256).max);
+        vault.setGuardian(guardianAddr);
         vm.stopPrank();
+        handler.setGuardian(guardianAddr);
 
-        bytes4[] memory selectors = new bytes4[](12);
+        bytes4[] memory selectors = new bytes4[](17);
         selectors[0] = VaultHandler.allocate.selector;
         selectors[1] = VaultHandler.swap.selector;
         selectors[2] = VaultHandler.warp.selector;
@@ -467,6 +582,11 @@ contract VaultInvariantsTest is VaultTestBase {
         selectors[9] = VaultHandler.redeem.selector; // redemption weighted x2
         selectors[10] = VaultHandler.donate.selector;
         selectors[11] = VaultHandler.drain.selector;
+        selectors[12] = VaultHandler.guardianTighten.selector;
+        selectors[13] = VaultHandler.guardianTryLoosen.selector;
+        selectors[14] = VaultHandler.guardianHalt.selector;
+        selectors[15] = VaultHandler.ownerResume.selector;
+        selectors[16] = VaultHandler.ownerLoosen.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -580,6 +700,25 @@ contract VaultInvariantsTest is VaultTestBase {
         assertFalse(handler.admissionViolated(), "allocation exceeded admissible capacity");
     }
 
+    /// INV-P1: every successful swap met max(live vault floor, curator floor) on measured claim deltas.
+    function invariant_everyExchangeMeetsEffectiveFloor() public view {
+        assertFalse(handler.priceViolated(), "a swap executed below the effective floor");
+    }
+
+    /// D14: whenever both directions are configured, F0 * F1 >= 2^192 (no profitable round trip at the floors).
+    function invariant_directionalFloorsConsistent() public view {
+        (uint160 f0,) = vault.sellPolicy(c0);
+        (uint160 f1,) = vault.sellPolicy(c1);
+        assertGt(f0, 0);
+        assertGt(f1, 0);
+        assertGe(f0, FullMath.mulDivRoundingUp(FixedPoint96.Q96, FixedPoint96.Q96, f1), "crossed floors");
+    }
+
+    /// INV-R1: no guardian call ever lowered a floor or resumed a halted direction.
+    function invariant_guardianOnlyTightens() public view {
+        assertFalse(handler.guardianLoosened(), "guardian loosened a risk limit");
+    }
+
     /// @dev Logged (not asserted) per run; only the final run's log is printed by forge.
     function afterInvariant() public view {
         console2.log("alloc/swap/release:", handler.allocationsOk(), handler.swapsOk(), handler.releasesOk());
@@ -587,6 +726,12 @@ contract VaultInvariantsTest is VaultTestBase {
         console2.log("finalize/claim/cancel:", handler.finalizedOk(), handler.claimsOk(), handler.cancelsOk());
         console2.log(
             "donate/drain/zeroAssetStates:", handler.donationsOk(), handler.drainsOk(), handler.zeroAssetStatesSeen()
+        );
+        console2.log(
+            "floorChanges/halts/guardianRefusals:",
+            handler.floorChangesOk(),
+            handler.haltsOk(),
+            handler.guardianRefusals()
         );
     }
 
@@ -639,5 +784,23 @@ contract VaultInvariantsTest is VaultTestBase {
         invariant_noDilutionByLpOperations();
         invariant_equationsFromRawSources();
         invariant_actualBalanceMovementsMatchAccounting();
+
+        // Phase 1B-1 policy actions: each path is exercised and the policy invariants hold.
+        handler.allocate(3, 10_000 ether, 1 days); // fresh hookB allocation, token1 out
+        uint256 swapsBefore = handler.swapsOk();
+        handler.guardianTighten(true, 200); // token1 floor +2%: above HookB's 1:1-minus-impact quote
+        handler.swap(handler.allocationCount() - 1, 100 ether);
+        assertEq(handler.swapsOk(), swapsBefore, "swap below the tightened floor must fail");
+        handler.guardianTryLoosen(true, 100);
+        handler.guardianHalt(false);
+        handler.guardianTryLoosen(false, 100); // includes a resume attempt
+        assertEq(handler.guardianRefusals(), 3);
+        handler.ownerResume(false);
+        handler.ownerLoosen(true, 2000); // back towards 1:1 (bounded by D14)
+        assertEq(handler.floorChangesOk(), 2);
+        assertEq(handler.haltsOk(), 1);
+        invariant_everyExchangeMeetsEffectiveFloor();
+        invariant_directionalFloorsConsistent();
+        invariant_guardianOnlyTightens();
     }
 }
