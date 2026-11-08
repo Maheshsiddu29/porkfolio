@@ -35,7 +35,7 @@ gas numbers, however, include a PoolManager and hooks that are not the productio
 |---|---|---|
 | `SharedCommitmentVault` | `vm.getCode("SharedCommitmentVault.sol:SharedCommitmentVault")`, the only vault artifact | the vault's restriction, or the default if there is none |
 | `HookA_DynamicFee`, `HookB_BoundedImpact` | `deployCodeTo` with the default-profile artifact | default (`optimizer_runs` in `foundry.toml`) |
-| `VaultLens` | `deployCode("VaultLens.sol:VaultLens")`, default-profile artifact (only sizes are measured) | default |
+| `VaultLens` | `deployCode("VaultLens.sol:VaultLens")`, default-profile artifact (size and deployment only) | default |
 | `PoolManager` | `new PoolManager`, compiled in this file | default, which matches pinned v4-core's own `foundry.toml` (via-IR, 44,444,444 runs) |
 | `PoolSwapTest`, `PoolModifyLiquidityTest` | compiled in this file | default; test routers, included in every swap number |
 
@@ -62,6 +62,7 @@ Each test starts from the same fixture as `test/utils/VaultTestBase.sol`:
 | Label | What is measured |
 |---|---|
 | `deploy vault (CREATE)` | CREATE of the vault init code with constructor arguments; the transaction would also pay 21,000 plus the logged calldata cost |
+| `deploy lens (CREATE)` | CREATE of the `VaultLens` init code, plus the logged calldata cost |
 | `initialDeposit` | first deposit into a freshly deployed vault, 1,000 + 1,000 tokens |
 | `deposit (new LP)` | 1,000 shares bought by an account with no shares |
 | `redeem instant` | 1,000 shares redeemed with enough free inventory |

@@ -173,6 +173,20 @@ contract ProductionArtifactGasTest is Test {
         console2.log("BENCH deploy vault init-code bytes:", initCode.length);
     }
 
+    /// @notice CREATE gas for VaultLens, which has no constructor arguments. Same accounting as the vault above.
+    function test_bench_deployLens() public {
+        bytes memory initCode = vm.getCode(LENS_ARTIFACT);
+        address deployed;
+        uint256 g = gasleft();
+        assembly ("memory-safe") {
+            deployed := create(0, add(initCode, 0x20), mload(initCode))
+        }
+        uint256 used = g - gasleft();
+        require(deployed != address(0), "deploy failed");
+        console2.log("BENCH deploy lens (CREATE):", used);
+        console2.log("BENCH deploy lens init-code calldata:", _calldataGas(initCode));
+    }
+
     // ------------------------------------------------------------------
     // LP paths
     // ------------------------------------------------------------------

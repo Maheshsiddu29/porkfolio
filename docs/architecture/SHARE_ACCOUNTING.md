@@ -19,12 +19,12 @@ All quantities are per asset `a ∈ {asset0, asset1}`, except the share counts.
 | `B_a` | Accounted backing: ERC-6909 claims the vault owns | `backing[a]` |
 | `Q_a` | Committed capacity: Σ (maxOut − consumed) over unreleased allocations | `reserved[a]` |
 | `W_a` | Claimable: assets finalized for queued requests, not yet claimed | `claimableAssets[a]` |
-| `N_a` | Net assets owned by outstanding shares: `B_a − W_a` | `netAssets(a)` |
-| `F_a` | Immediately deliverable inventory: `N_a − Q_a` | `freeInventory(a)` |
+| `N_a` | Net assets owned by outstanding shares: `B_a − W_a` | derived: vault `_netAssets(a)`; read with `VaultLens.netAssets(vault, a)` |
+| `F_a` | Immediately deliverable inventory: `N_a − Q_a` | derived; read with `VaultLens.freeInventory(vault, a)` |
 | `R_a` | Admission floor for new allocations | `bufferFloor[a]` |
 | `S` | Outstanding shares, **including** escrowed pending shares and the locked `M` | `totalShares` |
 | `P` | Shares escrowed in the queue that are not yet finalized | `pendingShares` |
-| `D_a` | Pending demand `⌈P · N_a / S⌉` (0 when `P = 0`) | `pendingDemand(a)` |
+| `D_a` | Pending demand `⌈P · N_a / S⌉` (0 when `P = 0`) | derived: vault `_pendingDemand(a)`; read with `VaultLens.pendingDemand(vault, a)` |
 | `M` | `MIN_SHARES = 1000`, held by `address(0)` forever | `sharesOf[address(0)]` |
 | `s_i` | Free (un-escrowed) shares of account `i` | `sharesOf[i]` |
 
@@ -152,7 +152,7 @@ Evidence:
 2. **Queue.** Strict FIFO by request id. Partial fills happen only at the head. Escrowed shares keep their full economic
    exposure (fees, trades) until the moment they are finalized. At that point they are converted at
    `⌊s · N_a / S⌋`, which is the same rate every other share would get in that block.
-3. **States** (`requestStatus`):
+3. **States** (`VaultLens.requestStatus(vault, id)`, derived from `getRequest`):
 
    | State | Condition |
    |---|---|
@@ -319,7 +319,7 @@ So at most one asset can be at zero at a time, and only because of a trade. Both
 | A whole pending request rounds to 0 | Finalized at zero, status `Completed`. Not trapped, and it does not block the queue. | `test_dustPendingRequest_finalizesAtZero_notTrapped` |
 | Near-total depletion (e.g. `N = (0, 1 wei)`) | Accounting identities still hold, and shares are worth under 1 wei. New deposits are fully backed, but the `int128` share cap limits new value to a tiny amount: the vault is terminal in practice. | same test |
 | Emptied vault (only `M` remain) | Normal re-entry at a basket of about `N/M`; round trip is exact. | `test_emptiedVault_reentry` |
-| Uninitialized vault | `previewDeposit` → `NotInitialized` (was `NoAssets`); `deliverableShares` = 0 (was `type(uint256).max`); `previewRedeem` = (0, 0); every other view = 0; `processQueue` is a no-op. | `test_uninitializedVault_viewsAndCallsNeverDivideByZero` |
+| Uninitialized vault | `previewDeposit` → `NotInitialized` (was `NoAssets`); `deliverableShares` = 0 (was `type(uint256).max`); `previewRedeem` = (0, 0); every other view = 0 (these previews are `VaultLens` functions since Phase 1B-2 step 1); `processQueue` is a no-op. | `test_uninitializedVault_viewsAndCallsNeverDivideByZero` |
 
 ### 10.3 Economic loss vs accounting error
 
