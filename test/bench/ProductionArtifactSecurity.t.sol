@@ -25,6 +25,7 @@ import {ScriptedHook} from "../utils/ScriptedHook.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
 import {Mock1271Wallet} from "../utils/Mock1271Wallet.sol";
 import {MaliciousAuthModule} from "../utils/MaliciousAuthModule.sol";
+import {ModuleCandidate} from "../utils/ModuleCandidate.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 /// @title Production-artifact security tests
@@ -44,7 +45,8 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 ///      `./out` in foundry.toml.
 ///
 ///      Test-only contracts used here (the router, `ScriptedHook`, `ReentrantToken`, `ReentryAgent`, `Mock1271Wallet`,
-///      `MaliciousAuthModule`) are not deployed by the project; their build settings do not matter.
+///      `MaliciousAuthModule`, `ModuleCandidate`) are not deployed by the project; their build settings do not
+///      matter.
 contract ProductionArtifactSecurityTest is Test {
     using TransientStateLibrary for IPoolManager;
 
@@ -693,6 +695,110 @@ contract ProductionArtifactSecurityTest is Test {
         _assertAccounting();
     }
 
+    /// @notice The vault's installation check on the production builds. Refused with `InvalidAuthModule`, changing
+    ///         nothing: the production module built for another production vault, an address without code, the
+    ///         PoolManager, the vault itself, and candidates whose `vault()` reverts, returns 31 bytes, or returns this
+    ///         address with dirty upper bits. Installing the installed module again is refused with
+    ///         `AuthModuleRetired`. Accepted: the production HookA, whose `vault()` getter names this vault. It
+    ///         creates nothing as a module, its consumer role is unaffected, and installing a real module retires it
+    ///         as a module only. The check is a guard against mistakes, not a proof that the candidate is a module.
+    function test_PA_auth_moduleInstallCheck() public {
+        IBenchVault v2 = IBenchVault(deployCode(VAULT_JSON, abi.encode(manager, owner, c0, c1)));
+        ModuleCandidate cand = new ModuleCandidate();
+        bytes32 self = bytes32(uint256(uint160(address(vault))));
+        address[5] memory fixed_ =
+            [address(_deployAuth(v2)), makeAddr("no code"), address(manager), address(vault), address(cand)];
+        cand.set(ModuleCandidate.Mode.Revert, self);
+        for (uint256 i; i < fixed_.length; ++i) {
+            _installRefused(fixed_[i]);
+        }
+        cand.set(ModuleCandidate.Mode.Short, self);
+        _installRefused(address(cand));
+        cand.set(ModuleCandidate.Mode.Answer, self | bytes32(uint256(1) << 160));
+        _installRefused(address(cand));
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.AuthModuleRetired.selector, address(auth)));
+        vault.setAuthModule(address(auth));
+        assertEq(vault.authModule(), address(auth));
+
+        uint256 id = _allocate(curator, keyA, c1, 50_000 ether);
+        vm.prank(owner);
+        vault.setAuthModule(hookA);
+        ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c1, 1000 ether);
+        vm.prank(curator);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.NotAuthModule.selector, address(auth)));
+        auth.activateDirect(r);
+        _swap(keyA, true, 1000 ether, id);
+        ICuratorAuthorization m2 = _deployAuth(vault);
+        vm.prank(owner);
+        vault.setAuthModule(address(m2));
+        assertTrue(vault.isConsumer(hookA));
+        vm.prank(curator);
+        uint256 id2 = m2.activateDirect(r);
+        _swap(keyA, true, 500 ether, id2);
+        _assertAccounting();
+    }
+
+    /// @notice Time rules of the production module: MAX_VALIDITY_WINDOW is one day; a one-day window activates at its
+    ///         last second and a window one second longer is refused; validAfter after deadline and expiry not after
+    ///         the deadline are refused on the signed path, and expiry not after the deadline on the direct path; a
+    ///         future-dated instruction waits for its window and then activates. Nothing refused spends a nonce.
+    function test_PA_auth_signatureTimeRules() public {
+        assertEq(auth.MAX_VALIDITY_WINDOW(), 1 days);
+        uint256 k = _curatorKey();
+        uint64 t = uint64(block.timestamp);
+
+        ICuratorAuthorization.AllocationAuthorization memory a = _authz(curator, keyA, c1, 1000 ether);
+        (a.validAfter, a.deadline, a.expiry) = (t, t + 1 days + 1, t + 2 days);
+        _activateReverts(
+            a,
+            keyA,
+            _signAuth(k, a),
+            abi.encodeWithSelector(ICuratorAuthorization.ValidityWindowTooLong.selector, t, t + 1 days + 1)
+        );
+        (a.validAfter, a.deadline) = (t + 1, t);
+        _activateReverts(
+            a,
+            keyA,
+            _signAuth(k, a),
+            abi.encodeWithSelector(ICuratorAuthorization.InvalidValidityWindow.selector, t + 1, t)
+        );
+        (a.validAfter, a.deadline, a.expiry) = (t, t + 1 hours, t + 1 hours);
+        _activateReverts(
+            a,
+            keyA,
+            _signAuth(k, a),
+            abi.encodeWithSelector(ICuratorAuthorization.ExpiryNotAfterDeadline.selector, t + 1 hours, t + 1 hours)
+        );
+        assertFalse(auth.isNonceUsed(curator, a.nonce));
+
+        ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c1, 1000 ether);
+        r.expiry = r.deadline;
+        vm.prank(curator);
+        vm.expectRevert(
+            abi.encodeWithSelector(ICuratorAuthorization.ExpiryNotAfterDeadline.selector, r.expiry, r.deadline)
+        );
+        auth.activateDirect(r);
+
+        (a.validAfter, a.deadline, a.expiry) = (t, t + 1 days, t + 2 days);
+        bytes memory sig = _signAuth(k, a);
+        vm.warp(t + 1 days);
+        _activateSigned(a, keyA, sig);
+
+        ICuratorAuthorization.AllocationAuthorization memory f = _authz(curator, keyA, c1, 1000 ether);
+        uint64 opens = t + 200 days;
+        (f.validAfter, f.deadline, f.expiry) = (opens, opens + 1 hours, opens + 1 days);
+        bytes memory fSig = _signAuth(k, f);
+        _activateReverts(
+            f, keyA, fSig, abi.encodeWithSelector(ICuratorAuthorization.AuthorizationNotYetValid.selector, opens)
+        );
+        vm.warp(opens + 1 hours);
+        _activateSigned(f, keyA, fSig);
+        _activateReverts(
+            f, keyA, fSig, abi.encodeWithSelector(ICuratorAuthorization.NonceAlreadyUsed.selector, curator, f.nonce)
+        );
+    }
+
     /// @notice The same request through the signed and the direct path gives the same allocation and reservation
     ///         changes. Two instructions competing for the last backing: the first wins, the second fails admission
     ///         and keeps its nonce. A signature does not lift the exposure cap or the flow cap.
@@ -927,6 +1033,14 @@ contract ProductionArtifactSecurityTest is Test {
         assertTrue(vm.parseJsonBool(json, ".metadata.settings.viaIR"), string.concat(artifact, ": viaIR"));
         assertEq(vm.parseJsonString(json, ".metadata.settings.evmVersion"), "cancun", string.concat(artifact, ": evm"));
         assertEq(deployed.code.length, vm.getDeployedCode(artifact).length, string.concat(artifact, ": code"));
+    }
+
+    function _installRefused(address m) internal {
+        address before = vault.authModule();
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InvalidAuthModule.selector, m));
+        vault.setAuthModule(m);
+        assertEq(vault.authModule(), before);
     }
 
     function _curatorKey() internal returns (uint256 k) {

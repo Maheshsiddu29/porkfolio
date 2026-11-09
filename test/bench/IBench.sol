@@ -39,6 +39,7 @@ interface IBenchVault is IVaultState {
     function admissibleCapacity(Currency currency) external view returns (uint256);
     function curatorReserved(address curator, Currency currency) external view returns (uint256);
     function sharesOf(address account) external view returns (uint256);
+    function isConsumer(address consumer) external view returns (bool);
 }
 
 /// @notice `configurePool` has the same parameter types on both hooks (price, then two pip values).

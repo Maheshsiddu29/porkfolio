@@ -737,6 +737,8 @@ contract VaultHandler is Test {
     bool public moduleActionMovedState; // INV-M8: installing or disabling a module changed anything else
     bool public retiredRevived; // a retired module was installed again
     bool public guardianInstalledModule; // the guardian installed a module
+    bool public invalidModuleInstalled; // a candidate that is not a fresh module for this vault was installed
+    bool public timeRuleBroken; // a signed activation succeeded although its time fields broke a rule
     uint256 public signedOk;
     uint256 public signedRefusals;
     uint256 public staleRefusals;
@@ -744,6 +746,9 @@ contract VaultHandler is Test {
     uint256 public moduleInstallsOk;
     uint256 public moduleDisablesOk;
     uint256 public moduleRefusals;
+    uint256 public invalidModuleRefusals;
+    uint256 public timedOk; // signed activations with drawn time fields that succeeded
+    uint256 public timedRefusals; // ... and that were refused
 
     function moduleCount() external view returns (uint256) {
         return modules.length;
@@ -762,7 +767,9 @@ contract VaultHandler is Test {
     ///         invalidations, and one in four goes to a module chosen at random from every module ever installed
     ///         (retired ones included). Checks at the moment of activation: the generation was current (INV-C3), the
     ///         nonce was unused (INV-C6), the module was the installed one, plus the admission, exposure and
-    ///         restriction checks of the direct path.
+    ///         restriction checks of the direct path. One in four (seed bits 16-17 equal to 3) draws all three time
+    ///         fields around the current time instead (`_drawTimes`); a success must then satisfy every time rule
+    ///         (INV-T1).
     function activateSigned(uint256 seed, uint256 maxOut, uint256 lifetime, uint256 nonceSeed) external {
         PoolKey memory key = seed % 2 == 0 ? keyA : keyB;
         Currency out = (seed >> 1) % 2 == 0 ? c0 : c1;
@@ -792,6 +799,8 @@ contract VaultHandler is Test {
             deadline: uint64(block.timestamp),
             nonce: n
         });
+        bool timed = (seed >> 16) % 4 == 3;
+        if (timed) (a.validAfter, a.deadline, a.expiry) = _drawTimes(seed, nonceSeed);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey[who], m.hashAuthorization(a));
         bool installed = address(m) == vault.authModule();
         bool usedBefore = m.isNonceUsed(who, n);
@@ -805,6 +814,12 @@ contract VaultHandler is Test {
             allocationIds.push(id);
             if (gen != current) staleActivation = true;
             if (!installed) moduleBypass = true;
+            if (timed) timedOk++;
+            if (
+                a.validAfter > block.timestamp || block.timestamp > a.deadline
+                    || a.deadline - a.validAfter > m.MAX_VALIDITY_WINDOW() || a.expiry <= a.deadline
+                    || a.expiry > block.timestamp + vault.MAX_HORIZON()
+            ) timeRuleBroken = true;
             if (usedBefore || ghostNonceUsed[_nonceKey(address(m), who, n)]) nonceReused = true;
             _markNonce(address(m), who, n);
             if (!rec.registered || rec.restriction != ISharedCommitmentVault.CuratorRestriction.None) {
@@ -816,6 +831,7 @@ contract VaultHandler is Test {
             _checkWUnchanged(p);
         } catch (bytes memory err) {
             signedRefusals++;
+            if (timed) timedRefusals++;
             if (bytes4(err) == ISharedCommitmentVault.StaleGeneration.selector) staleRefusals++;
             // A reverted activation spends nothing.
             if (!usedBefore && m.isNonceUsed(who, n)) nonceReused = true;
@@ -869,6 +885,39 @@ contract VaultHandler is Test {
         } catch {
             moduleRefusals++;
         }
+    }
+
+    /// @notice The owner offers a candidate that must be refused: a production-build module bound to another vault
+    ///         address, an address without code, the vault itself, the PoolManager, or the module installed now
+    ///         (installing it again). Every attempt must revert and change nothing (INV-M9).
+    function moduleTryInstallInvalid(uint256 seed) external {
+        uint256 kind = seed % 5;
+        address installed = vault.authModule();
+        if (kind == 4 && installed == address(0)) kind = 0;
+        address cand;
+        if (kind == 0) cand = deployCode(ProductionArtifacts.authModule(), abi.encode(address(uint160(seed | 1))));
+        else if (kind == 1) cand = address(uint160(uint256(keccak256(abi.encode("no code", seed)))));
+        else if (kind == 2) cand = address(vault);
+        else if (kind == 3) cand = address(manager);
+        else cand = installed;
+        bytes32 before = _moduleSnap();
+        vm.prank(owner);
+        try vault.setAuthModule(cand) {
+            invalidModuleInstalled = true;
+        } catch {
+            invalidModuleRefusals++;
+        }
+        if (_moduleSnap() != before || vault.authModule() != installed) moduleActionMovedState = true;
+    }
+
+    /// @dev Time fields drawn around now: validAfter from two days before to one day after, a window from one hour
+    ///      negative to two days, and an expiry from one hour before the deadline to 31 days after it. Roughly a
+    ///      third of draws satisfy every rule; the rest exercise each refusal.
+    function _drawTimes(uint256 seed, uint256 nonceSeed) internal view returns (uint64 va, uint64 dl, uint64 ex) {
+        uint256 r = uint256(keccak256(abi.encode(seed, nonceSeed)));
+        va = uint64(block.timestamp - 2 days + r % 3 days);
+        dl = uint64(va - 1 hours + (r >> 64) % (2 days + 1 hours));
+        ex = uint64(dl - 1 hours + (r >> 128) % (31 days + 1 hours));
     }
 
     /// @dev The installed module, or the most recent one while the vault has none (calls through it must fail).
@@ -1298,7 +1347,7 @@ contract VaultInvariantsTest is VaultTestBase {
         handler.setAuth(auth, cs, keys);
         handler.setLifecycle(cs, makeAddr("owner2"), makeAddr("guardian2"));
 
-        bytes4[] memory selectors = new bytes4[](38);
+        bytes4[] memory selectors = new bytes4[](39);
         selectors[0] = VaultHandler.allocate.selector;
         selectors[1] = VaultHandler.swap.selector;
         selectors[2] = VaultHandler.warp.selector;
@@ -1337,6 +1386,7 @@ contract VaultInvariantsTest is VaultTestBase {
         selectors[35] = VaultHandler.moduleReplace.selector; // so that a disable does not starve activation
         selectors[36] = VaultHandler.moduleDisable.selector;
         selectors[37] = VaultHandler.moduleTryReinstall.selector;
+        selectors[38] = VaultHandler.moduleTryInstallInvalid.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -1696,6 +1746,21 @@ contract VaultInvariantsTest is VaultTestBase {
         }
     }
 
+    /// INV-T1: every signed activation that succeeded met every time rule at that moment: validAfter <= now <=
+    /// deadline, deadline - validAfter <= MAX_VALIDITY_WINDOW, deadline < expiry <= now + MAX_HORIZON.
+    function invariant_signedActivationTimeRules() public view {
+        assertFalse(handler.timeRuleBroken());
+    }
+
+    /// INV-M9: the installed module, if any, reports this vault from `vault()`, and no candidate that is not a fresh
+    /// module for this vault was ever accepted (another vault's module, no code, the vault, the PoolManager, or the
+    /// installed module a second time).
+    function invariant_installedModuleReportsVault() public view {
+        assertFalse(handler.invalidModuleInstalled());
+        address m = vault.authModule();
+        if (m != address(0)) assertEq(address(CuratorAuthorization(m).vault()), address(vault));
+    }
+
     function afterInvariant() public view {
         console2.log("signed ok/refused/stale:", handler.signedOk(), handler.signedRefusals(), handler.staleRefusals());
         console2.log(
@@ -1704,7 +1769,8 @@ contract VaultInvariantsTest is VaultTestBase {
             handler.moduleInstallsOk(),
             handler.moduleDisablesOk()
         );
-        console2.log("moduleRefusals:", handler.moduleRefusals());
+        console2.log("moduleRefusals/invalidModuleRefusals:", handler.moduleRefusals(), handler.invalidModuleRefusals());
+        console2.log("timed signed ok/refused:", handler.timedOk(), handler.timedRefusals());
         console2.log("alloc/swap/release:", handler.allocationsOk(), handler.swapsOk(), handler.releasesOk());
         console2.log("deposit/instant/queued:", handler.depositsOk(), handler.instantOk(), handler.queuedOk());
         console2.log("finalize/claim/cancel:", handler.finalizedOk(), handler.claimsOk(), handler.cancelsOk());
@@ -1931,6 +1997,20 @@ contract VaultInvariantsTest is VaultTestBase {
         handler.allocate(0, 10_000 ether, 1 days);
         assertEq(handler.allocationsOk(), okBefore + 1);
         assertGe(handler.signedOk(), 3);
+
+        // Invalid module candidates: another vault's module, no code, the vault, the PoolManager, the installed one.
+        for (uint256 k; k < 5; ++k) {
+            handler.moduleTryInstallInvalid(k);
+        }
+        assertEq(handler.invalidModuleRefusals(), 5);
+        // Signed activations with drawn time fields (seed bits 16-17 = 3): some must succeed and some be refused.
+        for (uint256 i; i < 24; ++i) {
+            handler.activateSigned(s | 3 << 16, 1000 ether, 1 days, 100 + i);
+        }
+        assertGt(handler.timedOk(), 0, "a drawn window activated");
+        assertGt(handler.timedRefusals(), 0, "a drawn window was refused");
+        invariant_signedActivationTimeRules();
+        invariant_installedModuleReportsVault();
         invariant_signedActivationUsesCurrentGeneration();
         invariant_noncesSingleUse();
         invariant_onlyInstalledModuleCreatesAllocations();
