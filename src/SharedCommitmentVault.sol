@@ -77,7 +77,7 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 /// declared in `IVaultState`. Nothing in this contract calls the lens; every check here uses its own internal copy
 /// of those formulas.
 ///
-/// Not implemented here: signed (EIP-712) allocation instructions, curator cancellation of its own allocations,
+/// Not implemented here: signed (EIP-712) allocation instructions and their verification, flow limits,
 /// epoch-based expiry, transferable share tokens, and any protocol, curator or performance fee.
 contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCallback {
     /// @notice Largest amount accepted for any single asset amount, per-asset backing, or the share supply:
@@ -129,7 +129,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///         allocations. Zero means the curator can allocate nothing in that currency.
     mapping(address curator => mapping(Currency currency => uint256)) public curatorCeiling;
     /// @notice Unused capacity currently held by a curator's unreleased allocations, in raw units of `currency`.
-    /// @dev Moves in lockstep with `reserved`: raised by `allocate`, lowered by `exchange` and `release`.
+    /// @dev Moves in lockstep with `reserved`: raised by `allocate`, lowered by `exchange`, `release` and
+    ///      `cancelAllocation`.
     mapping(address curator => mapping(Currency currency => uint256)) public curatorReserved;
     /// @notice Allocation nonces a curator has already used. A nonce is spent only when `allocate` succeeds.
     mapping(address curator => mapping(uint256 nonce => bool)) public nonceUsed;
@@ -245,8 +246,9 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     }
 
     /// @notice Pause or unpause deposits, new allocations and all hook consumption.
-    /// @dev Redemption, queue processing, cancellation, claims and `release` stay available while paused, so a
-    ///      pause can never trap LP assets. Owner may pause and unpause; the guardian may only pause.
+    /// @dev Redemption, queue processing, request cancellation, claims, `release` and `cancelAllocation` stay
+    ///      available while paused, so a pause can never trap LP assets or stop a curator reducing its exposure.
+    ///      Owner may pause and unpause; the guardian may only pause.
     /// @param paused_ True to pause, false to unpause.
     function setPaused(bool paused_) external {
         _authorize(paused_);
@@ -256,8 +258,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
 
     /// @notice Register or revoke a hook as a consumer.
     /// @dev Revocation takes effect immediately: the hook's next `exchange` reverts. Its allocations stay
-    ///      reserved until they are released (by anyone after expiry, or early by the owner or guardian).
-    ///      Owner may register and revoke; the guardian may only revoke.
+    ///      reserved until they are released (by anyone after expiry, or early by the owner or guardian) or
+    ///      canceled by their curator. Owner may register and revoke; the guardian may only revoke.
     /// @param consumer Hook address. Must be non-zero.
     /// @param registered True to register, false to revoke.
     function setConsumer(address consumer, bool registered) external {
@@ -861,25 +863,39 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///        - anyone, if its curator is revoked (permissionless cleanup: nobody can consume it any more);
     ///        - otherwise only the owner or the guardian, as an emergency measure, because an unexpired allocation
     ///          of a curator in good standing is a commitment to its consumer.
-    ///      Works while paused and whatever the curator's state.
-    ///      Releasing moves no assets. It lowers Q_a and the curator's reserved total by maxOut - consumed, which
-    ///      raises F_a and can let queued redemptions progress. Capacity already consumed is never returned.
-    /// @param allocationId Allocation to release. Must exist and not already be released.
+    ///      Works while paused and whatever the curator's state. The reason recorded in `AllocationReleased` is, in
+    ///      this order of precedence: Expired, CuratorRevoked, Emergency.
+    ///      Accounting is `_close`: no assets move, Q_a and the curator's reserved total fall by maxOut - consumed,
+    ///      which raises F_a and can let queued redemptions progress. Capacity already consumed is never returned.
+    /// @param allocationId Allocation to release. Must exist and not already be closed.
     function release(uint256 allocationId) external {
         Allocation storage a = _getLiveAllocation(allocationId);
-        if (
-            block.timestamp < a.expiry && _curators[a.curator].restriction != CuratorRestriction.Revoked
-                && msg.sender != owner && msg.sender != guardian
-        ) {
+        CloseReason reason;
+        if (block.timestamp >= a.expiry) {
+            reason = CloseReason.Expired;
+        } else if (_curators[a.curator].restriction == CuratorRestriction.Revoked) {
+            reason = CloseReason.CuratorRevoked;
+        } else if (msg.sender == owner || msg.sender == guardian) {
+            reason = CloseReason.Emergency;
+        } else {
             revert AllocationNotExpired(allocationId, a.expiry);
         }
+        _close(allocationId, a, reason);
+    }
 
-        uint256 unused = a.maxOut - a.consumed;
-        a.released = true;
-        reserved[a.currencyOut] -= unused;
-        curatorReserved[a.curator][a.currencyOut] -= unused;
-
-        emit AllocationReleased(allocationId, msg.sender, unused);
+    /// @notice Cancel one of the caller's own allocations and return its unused capacity to free inventory.
+    /// @dev Only the allocation's curator may call, in any state: registered or not, frozen or revoked, while the
+    ///      vault is paused or a direction is halted, and before or after expiry. A curator can therefore always
+    ///      reduce its own exposure, and nobody can cancel another curator's allocation. Cancellation is permanent:
+    ///      the allocation is closed and can never be consumed or reopened, and its id is never reused.
+    ///      Accounting is `_close`: only the unconsumed remainder maxOut - consumed is released; output already
+    ///      consumed was exchanged for input that belongs to all shares and is not touched. No assets move.
+    ///      Example: maxOut 10,000, consumed 3,500: Q_a and curatorReserved fall by 6,500 and `consumed` stays 3,500.
+    /// @param allocationId Allocation to cancel. Must exist and not already be closed.
+    function cancelAllocation(uint256 allocationId) external {
+        Allocation storage a = _getLiveAllocation(allocationId);
+        if (msg.sender != a.curator) revert NotAllocationCurator(allocationId, msg.sender);
+        _close(allocationId, a, CloseReason.Canceled);
     }
 
     // ==================================================================
@@ -1095,6 +1111,24 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         if (amount == 0) return;
         poolManager.burn(address(this), currency.toId(), amount);
         poolManager.take(currency, to, amount);
+    }
+
+    /// @dev The one place an allocation is closed; used by `release` (expiry, emergency, revoked-curator cleanup)
+    ///      and `cancelAllocation`. Precondition: `a` was loaded with `_getLiveAllocation`, which reverts for an
+    ///      unknown or already closed id, so each allocation passes through here at most once.
+    ///
+    ///      Effects, in one step: `released` is set, then Q_out and curatorReserved[curator][out] both fall by
+    ///      unused = maxOut - consumed. These are exactly this allocation's contribution to both sums (both are
+    ///      maintained as the sum of maxOut - consumed over unreleased allocations), so neither can underflow and
+    ///      no other allocation's share is touched. `consumed` is not changed, and no claims, B_a, W_a, shares or
+    ///      queue entries move.
+    function _close(uint256 allocationId, Allocation storage a, CloseReason reason) internal {
+        uint256 unused = a.maxOut - a.consumed;
+        a.released = true;
+        Currency out = a.currencyOut;
+        reserved[out] -= unused;
+        curatorReserved[a.curator][out] -= unused;
+        emit AllocationReleased(allocationId, msg.sender, unused, reason);
     }
 
     /// @dev Loads an allocation that exists and has not been released. Expiry is checked by the caller where it

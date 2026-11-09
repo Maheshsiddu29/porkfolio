@@ -44,7 +44,8 @@ interface ISharedCommitmentVault {
     /// @param curator        Curator that created the allocation; its reserved total tracks this allocation.
     /// @param consumer       The only hook that may consume it. Zero means the id does not exist.
     /// @param expiry         Consumable while block.timestamp < expiry; releasable by anyone from then on.
-    /// @param released       Set by `release`. A released allocation can never be consumed again.
+    /// @param released       Set when the allocation is closed (`release` or `cancelAllocation`). Never cleared: a
+    ///                       closed allocation can never be consumed, released or canceled again.
     /// @param poolId         Pool the hook must be swapping on.
     /// @param currencyIn     Currency the vault receives.
     /// @param currencyOut    Currency the vault pays out.
@@ -116,6 +117,17 @@ interface ISharedCommitmentVault {
         None,
         Frozen,
         Revoked
+    }
+
+    /// @notice Why an allocation was closed, as reported in `AllocationReleased`. Every reason goes through the same
+    ///         accounting: the allocation is marked released and its unused capacity leaves Q_a.
+    /// @dev Expired: closed after its expiry (anyone). Emergency: closed early by the owner or guardian. Canceled:
+    ///      closed by its own curator. CuratorRevoked: closed early by anyone because its curator is revoked.
+    enum CloseReason {
+        Expired,
+        Emergency,
+        Canceled,
+        CuratorRevoked
     }
 
     /// @notice A curator's stored state. All three fields share one storage slot.
@@ -242,6 +254,8 @@ interface ISharedCommitmentVault {
     error AllocationExpired(uint256 allocationId, uint64 expiry);
     /// @notice Before expiry, only the owner or guardian may release an allocation, unless its curator is revoked.
     error AllocationNotExpired(uint256 allocationId, uint64 expiry);
+    /// @notice Only the curator that created an allocation may cancel it.
+    error NotAllocationCurator(uint256 allocationId, address caller);
     /// @notice The swap's pool is not the pool the allocation is bound to.
     error PoolMismatch();
     /// @notice The swap direction would make the vault pay out the allocation's input currency.
@@ -317,8 +331,11 @@ interface ISharedCommitmentVault {
     event AllocationConsumed(
         uint256 indexed allocationId, address indexed consumer, uint256 amountIn, uint256 amountOut, uint128 consumed
     );
-    /// @notice An allocation was closed. `by` is the caller; `unusedCapacity` returned to free inventory.
-    event AllocationReleased(uint256 indexed allocationId, address indexed by, uint256 unusedCapacity);
+    /// @notice An allocation was closed. `by` is the caller; `unusedCapacity` (maxOut - consumed) returned to free
+    ///         inventory; `reason` says which close path was used.
+    event AllocationReleased(
+        uint256 indexed allocationId, address indexed by, uint256 unusedCapacity, CloseReason reason
+    );
 
     // ------------------------------------------------------------------
     // Consumer entry point
