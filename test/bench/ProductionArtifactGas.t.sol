@@ -17,32 +17,7 @@ import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 import {PoolModifyLiquidityTest} from "@uniswap/v4-core/src/test/PoolModifyLiquidityTest.sol";
 
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
-
-/// @notice The vault entry points this benchmark calls. Declared locally so that this file never imports the vault
-///         source (see the contract comment for why). Only functions whose ABI is stable across the size refactor
-///         are listed.
-interface IBenchVault is ISharedCommitmentVault {
-    function initialDeposit(uint256 amount0, uint256 amount1, address receiver) external returns (uint256);
-    function deposit(uint256 shares, uint256 maxAmount0, uint256 maxAmount1, address receiver)
-        external
-        returns (uint256, uint256);
-    function redeem(uint256 shares, uint256 minAmount0, uint256 minAmount1, address receiver, bool queueRemainder)
-        external
-        returns (uint256, uint256, uint256, uint256);
-    function processQueue(uint256 maxSteps) external returns (uint256);
-    function claim(uint256 requestId) external returns (uint256, uint256);
-    function allocate(AllocationRequest calldata req) external returns (uint256);
-    function release(uint256 allocationId) external;
-    function setConsumer(address consumer, bool registered) external;
-    function setCurator(address curator, bool registered) external;
-    function setCuratorCeiling(address curator, Currency currency, uint256 ceiling) external;
-    function setSellFloor(Currency currencyOut, uint160 minInPerOutX96) external;
-}
-
-/// @notice `configurePool` has the same parameter types on both hooks (price, then two pip values).
-interface IBenchHook {
-    function configurePool(PoolKey calldata key, uint160 priceX96, uint24 a, uint24 b) external;
-}
+import {IBenchVault, IBenchHook} from "./IBench.sol";
 
 /// @title Production-artifact gas and size benchmark
 /// @notice Measures size and gas on the bytecode that would be deployed, not on copies compiled for tests.
@@ -282,6 +257,63 @@ contract ProductionArtifactGasTest is Test {
         uint256 g = gasleft();
         vault.release(id);
         console2.log("BENCH release (owner, before expiry):", g - gasleft());
+    }
+
+    // ------------------------------------------------------------------
+    // Curator lifecycle
+    // ------------------------------------------------------------------
+
+    /// @notice Owner freezes a curator that holds one live allocation. One storage write, independent of how many
+    ///         allocations the curator has.
+    function test_bench_freezeCurator() public {
+        _allocate(curator, keyA, c1, 100_000 ether);
+        vm.prank(owner);
+        uint256 g = gasleft();
+        vault.freezeCurator(curator);
+        console2.log("BENCH freezeCurator:", g - gasleft());
+    }
+
+    function test_bench_unfreezeCurator() public {
+        _allocate(curator, keyA, c1, 100_000 ether);
+        vm.prank(owner);
+        vault.freezeCurator(curator);
+        vm.prank(owner);
+        uint256 g = gasleft();
+        vault.unfreezeCurator(curator);
+        console2.log("BENCH unfreezeCurator:", g - gasleft());
+    }
+
+    /// @notice Revocation of a curator with ten live allocations: the cost does not depend on that number.
+    function test_bench_revokeCurator() public {
+        for (uint256 i; i < 10; ++i) {
+            _allocate(curator, keyA, c1, 1000 ether);
+        }
+        vm.prank(owner);
+        uint256 g = gasleft();
+        vault.revokeCurator(curator);
+        console2.log("BENCH revokeCurator (10 live allocations):", g - gasleft());
+    }
+
+    /// @notice Permissionless cleanup of one partially consumed allocation of a revoked curator, by a stranger.
+    function test_bench_release_revokedCleanup() public {
+        uint256 id = _allocate(curator, keyA, c1, 100_000 ether);
+        _swap(keyA, true, -1000 ether, abi.encode(id));
+        vm.prank(owner);
+        vault.revokeCurator(curator);
+        vm.prank(trader);
+        uint256 g = gasleft();
+        vault.release(id);
+        console2.log("BENCH release (revoked curator, stranger, per allocation):", g - gasleft());
+    }
+
+    /// @notice The curator cancels its own partially consumed allocation.
+    function test_bench_cancelAllocation() public {
+        uint256 id = _allocate(curator, keyA, c1, 100_000 ether);
+        _swap(keyA, true, -1000 ether, abi.encode(id));
+        vm.prank(curator);
+        uint256 g = gasleft();
+        vault.cancelAllocation(id);
+        console2.log("BENCH cancelAllocation (after partial consumption):", g - gasleft());
     }
 
     /// @notice Router + PoolManager + HookA + vault `exchange`, 1,000 tokens exact input, asset0 -> asset1.

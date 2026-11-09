@@ -72,8 +72,32 @@ Each test starts from the same fixture as `test/utils/VaultTestBase.sol`:
 | `allocate (first in vault)` | the vault's first allocation; every aggregate slot goes from zero to non-zero |
 | `allocate (steady state, new curator)` | an allocation after another one exists, by a curator that has not allocated before |
 | `release (owner, before expiry)` | owner closes an unconsumed allocation early |
+| `freezeCurator` / `unfreezeCurator` | owner freezes a curator holding one live allocation / lifts the freeze |
+| `revokeCurator (10 live allocations)` | owner revokes a curator with ten live allocations; the cost does not depend on that number |
+| `release (revoked curator, stranger, per allocation)` | permissionless cleanup of one partially consumed allocation of a revoked curator |
+| `cancelAllocation (after partial consumption)` | the curator cancels its own partially consumed allocation |
 | `swap hookA` / `swap hookB` | router + PoolManager + hook + vault `exchange`; 1,000 tokens exact input |
 | `swap native v4` | the same router and amount on a hookless concentrated-liquidity pool; a control that contains no project code |
+
+## Security tests on production builds
+
+`ProductionArtifactSecurity.t.sol` runs security-relevant paths on production bytecode. Unlike the gas benchmark, it
+deploys every project contract and the PoolManager from an explicit artifact file, for example
+`out/HookA_DynamicFee.sol/HookA_DynamicFee.json`, so the build under test does not depend on the profile the test file
+is compiled under. `test_PA_deployedCodeIsProductionArtifacts` checks each deployed code length against its production
+artifact and against the 2,000-run build of the same contract. Reading `out/` needs the read-only `fs_permissions`
+entry in `foundry.toml`.
+
+| Test | What runs on production builds |
+|---|---|
+| `test_PA_hookA_hookB_settlementConservation` | HookA and HookB swaps in both directions; trader, PoolManager and vault balances move by exactly the swap amounts; all PoolManager currency deltas are zero afterwards |
+| `test_PA_frozenCurator_executionRejected` | a frozen curator's allocations are rejected on both hooks; unfreeze restores them |
+| `test_PA_revokedCurator_executionRejected_thenCleanup` | a revoked curator's allocations are rejected; a stranger releases each one for exactly its remainder; re-registration fails |
+| `test_PA_partialConsumptionThenCancellation` | cancel after a partial HookB fill; exact remainder; no asset moves; double cancel and later swaps fail |
+| `test_PA_maliciousHookAndTokenReentrancy` | a registered hook cancels between two fills (swap reverts atomically) and redeems mid-swap (`AlreadyUnlocked`); a pair-token callback cannot re-enter the vault during a deposit (`ReentrantCall`) |
+| `test_PA_lpWithdrawalDuringRestrictedTrading` | LP exits while paused, halted, frozen and then revoked: queueing, permissionless cleanup, finalization, claim, instant exit |
+
+These tests run in the ordinary `forge test` suite; `run.sh` runs only the gas benchmark.
 
 Gas is the `gasleft()` difference around one external call made from the test contract, so it includes the call
 overhead of that call but not the 21,000 base cost of a transaction. Compare numbers only between runs made with the

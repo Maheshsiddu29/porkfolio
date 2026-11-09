@@ -354,6 +354,32 @@ contract CuratorLifecycleTest is VaultTestBase {
         _assertEquations();
     }
 
+    /// @notice Permissionless early release is only for revoked curators. A frozen or deregistered curator's
+    ///         unexpired allocation stays a commitment: a stranger cannot release it (the owner, the guardian or
+    ///         the curator itself can), because a freeze may be lifted.
+    function test_CL_frozenOrDeregisteredAllocationNotReleasableByStranger() public {
+        uint256 id = _allocate(keyA, c1, 10_000 ether);
+        uint256 id2 = _allocateAs(curator2, keyA, c1, 10_000 ether);
+        vm.prank(guardian);
+        vault.freezeCurator(curator);
+        vm.prank(guardian);
+        vault.setCurator(curator2, false);
+        uint64 expiry = vault.getAllocation(id).expiry;
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.AllocationNotExpired.selector, id, expiry));
+        vault.release(id);
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.AllocationNotExpired.selector, id2, expiry));
+        vault.release(id2);
+        vm.prank(guardian);
+        vault.release(id);
+        vm.warp(expiry);
+        vm.prank(attacker);
+        vault.release(id2); // after expiry anyone may
+        assertEq(vault.reserved(c1), 0);
+        _assertEquations();
+    }
+
     /// @notice Revocation is terminal across owner and guardian changes: a new owner cannot re-register or
     ///         unfreeze the curator, and none of its allocations become executable again.
     function test_CL_revocationSurvivesOwnerAndGuardianChanges() public {
