@@ -689,6 +689,154 @@ contract VaultHandler is Test {
 
     bool public revokedEscaped; // INV-C2: a revoked curator became unrevoked or registered
 
+    // ------------------------------------------------------------------
+    // Risk limits: flow ghosts, exposure, configuration
+    // ------------------------------------------------------------------
+
+    /// Ghost flow model, per record key(scope, account, currency): the window of the last successful swap that paid
+    /// under it and the total MEASURED output (the vault's ERC-6909 balance drop) paid in that window. Built only from
+    /// swaps the handler saw succeed, never from the vault's records, so `invariant_flowUsageMatchesGhost` catches any
+    /// path other than a successful swap that changes usage (an LP operation, a close, a curator action, a
+    /// configuration change, a reverted swap that left a write behind).
+    mapping(bytes32 => uint256) internal ghostFlowWindow;
+    mapping(bytes32 => uint256) internal ghostFlowUsed;
+    bool public flowOverCap; // after a successful swap some record's usage was above its cap
+    bool public exposureViolated; // after a successful allocate some scope held more than bps * E / 10,000
+    bool public guardianLoosenedRisk; // the guardian raised a cap or bps, or configured a new record
+    uint256 public flowRefusals;
+    uint256 public riskSetsOk;
+    uint256 public riskTightensOk;
+    uint256 public riskRefusals;
+
+    /// @dev The 14 records the campaign uses: 7 (scope, account) pairs times 2 assets. idx % 2 picks the asset.
+    function riskRecord(uint256 idx)
+        public
+        view
+        returns (ISharedCommitmentVault.RiskScope scope, address account, Currency currency)
+    {
+        idx %= 14;
+        currency = idx % 2 == 0 ? c0 : c1;
+        uint256 r = idx / 2;
+        if (r == 0) return (ISharedCommitmentVault.RiskScope.Vault, address(0), currency);
+        if (r <= 3) {
+            address h = r == 1 ? address(keyA.hooks) : r == 2 ? address(keyB.hooks) : address(keyE.hooks);
+            return (ISharedCommitmentVault.RiskScope.Hook, h, currency);
+        }
+        return (ISharedCommitmentVault.RiskScope.Curator, curators[r - 4], currency);
+    }
+
+    /// @dev Expected current-window usage of a record according to the ghost model.
+    function ghostFlow(ISharedCommitmentVault.RiskScope scope, address account, Currency currency)
+        public
+        view
+        returns (uint256)
+    {
+        bytes32 k = keccak256(abi.encode(scope, account, currency));
+        return ghostFlowWindow[k] == vm.getBlockTimestamp() / vault.FLOW_WINDOW() ? ghostFlowUsed[k] : 0;
+    }
+
+    /// @notice Owner sets one record. One call in four sets small values so that limits actually bind; the rest
+    ///         keep paths open enough for the other properties to be exercised.
+    function riskOwnerSet(uint256 idx, uint256 cap, uint256 bps) external {
+        (ISharedCommitmentVault.RiskScope scope, address account, Currency c) = riskRecord(idx);
+        bool tight = (idx >> 8) % 4 == 0;
+        cap = tight ? bound(cap, 0, 300_000 ether) : bound(cap, 300_000 ether, type(uint104).max);
+        bps = tight ? bound(bps, 0, 5000) : bound(bps, 5000, 10_000);
+        vm.prank(owner);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        vault.setRiskLimit(scope, account, c, cap, uint16(bps));
+        riskSetsOk++;
+    }
+
+    /// @notice Guardian lowers a configured record. Neither value may rise and usage may not change.
+    function riskGuardianTighten(uint256 idx, uint256 capBps, uint256 bpsBps) external {
+        (ISharedCommitmentVault.RiskScope scope, address account, Currency c) = riskRecord(idx);
+        ISharedCommitmentVault.RiskLimit memory r = vault.getRiskLimit(scope, account, c);
+        uint256 cap = uint256(r.flowCap) * bound(capBps, 5000, 10_000) / 10_000;
+        uint256 bps = uint256(r.maxReservedBps) * bound(bpsBps, 5000, 10_000) / 10_000;
+        vm.prank(guardian);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        try vault.setRiskLimit(scope, account, c, cap, uint16(bps)) {
+            riskTightensOk++;
+        } catch {
+            riskRefusals++;
+        }
+        ISharedCommitmentVault.RiskLimit memory q = vault.getRiskLimit(scope, account, c);
+        if (q.flowCap > r.flowCap || q.maxReservedBps > r.maxReservedBps) guardianLoosenedRisk = true;
+    }
+
+    /// @notice Guardian ATTEMPTS to raise a cap or bps, or to configure a record that was never set: always refused.
+    function riskGuardianTryLoosen(uint256 idx, bool fresh) external {
+        (ISharedCommitmentVault.RiskScope scope, address account, Currency c) = riskRecord(idx);
+        if (fresh) {
+            scope = ISharedCommitmentVault.RiskScope.Hook;
+            account = address(uint160(uint256(keccak256(abi.encode(idx)))) | 1);
+        }
+        ISharedCommitmentVault.RiskLimit memory r = vault.getRiskLimit(scope, account, c);
+        bool raiseCap = r.flowCap < type(uint104).max && (idx % 2 == 0 || r.maxReservedBps == 10_000);
+        uint256 cap = raiseCap ? uint256(r.flowCap) + 1 : r.flowCap;
+        uint16 bps = !raiseCap && r.maxReservedBps < 10_000 ? r.maxReservedBps + 1 : r.maxReservedBps;
+        if (r.configured && cap == r.flowCap && bps == r.maxReservedBps) return; // nothing to loosen
+        vm.prank(guardian);
+        try vault.setRiskLimit(scope, account, c, cap, bps) {
+            guardianLoosenedRisk = true;
+        } catch {
+            riskRefusals++;
+        }
+    }
+
+    /// @dev Adds a measured output to the ghost model of the three records the swap paid under, then compares each
+    ///      with the vault and checks usage <= cap.
+    function _recordFlow(address hook, address allocCurator, Currency cout, uint256 out) internal {
+        uint256 w = vm.getBlockTimestamp() / vault.FLOW_WINDOW();
+        ISharedCommitmentVault.RiskScope[3] memory scopes = [
+            ISharedCommitmentVault.RiskScope.Hook,
+            ISharedCommitmentVault.RiskScope.Curator,
+            ISharedCommitmentVault.RiskScope.Vault
+        ];
+        address[3] memory accounts = [hook, allocCurator, address(0)];
+        for (uint256 i; i < 3; ++i) {
+            bytes32 k = keccak256(abi.encode(scopes[i], accounts[i], cout));
+            if (ghostFlowWindow[k] != w) {
+                ghostFlowWindow[k] = w;
+                ghostFlowUsed[k] = 0;
+            }
+            ghostFlowUsed[k] += out;
+            ISharedCommitmentVault.RiskLimit memory r = vault.getRiskLimit(scopes[i], accounts[i], cout);
+            if (r.flowUsed > r.flowCap) flowOverCap = true;
+        }
+    }
+
+    /// @dev Exposure after a successful allocate: for each scope, held * 10,000 <= bps * E_a. E_a is unchanged by
+    ///      `allocate`, so reading it afterwards gives the value the vault used.
+    function _checkExposure(address hook, address who, Currency out) internal {
+        uint256 e = lens.eligibleBacking(vault, out);
+        uint256[3] memory held = [vault.hookReserved(hook, out), vault.curatorReserved(who, out), vault.reserved(out)];
+        ISharedCommitmentVault.RiskScope[3] memory scopes = [
+            ISharedCommitmentVault.RiskScope.Hook,
+            ISharedCommitmentVault.RiskScope.Curator,
+            ISharedCommitmentVault.RiskScope.Vault
+        ];
+        address[3] memory accounts = [hook, who, address(0)];
+        for (uint256 i; i < 3; ++i) {
+            ISharedCommitmentVault.RiskLimit memory r = vault.getRiskLimit(scopes[i], accounts[i], out);
+            if (!r.configured || held[i] * 10_000 > uint256(r.maxReservedBps) * e) exposureViolated = true;
+        }
+    }
+
+    function _isFlowRefusal(bytes memory err) internal pure returns (bool) {
+        // The PoolManager wraps the hook's revert; the vault's selector appears inside the wrapped reason.
+        bytes4 sel = ISharedCommitmentVault.FlowLimitExceeded.selector;
+        for (uint256 i; i + 4 <= err.length; ++i) {
+            if (err[i] == sel[0] && err[i + 1] == sel[1] && err[i + 2] == sel[2] && err[i + 3] == sel[3]) return true;
+        }
+        return false;
+    }
+
+    function _claimsOf(Currency c) internal view returns (uint256) {
+        return manager.balanceOf(address(vault), c.toId());
+    }
+
     function _allocate(address who, PoolKey memory key, Currency out, uint256 maxOut, uint256 lifetime)
         internal
         returns (uint256 id)
@@ -716,6 +864,7 @@ contract VaultHandler is Test {
                 restrictedCreation = true;
             }
             if (maxOut > admissible) admissionViolated = true;
+            _checkExposure(address(key.hooks), who, out);
             if (vault.backing(c0) != p.b0 || vault.backing(c1) != p.b1) balanceMismatch = true;
             _checkWUnchanged(p);
         } catch {}
@@ -751,6 +900,9 @@ contract VaultHandler is Test {
             BalanceDelta d
         ) {
             int128 outDelta = zeroForOne ? d.amount1() : d.amount0();
+            _recordFlow(
+                address(key.hooks), allocCurator, cout, zeroForOne ? p.pm1 - _claimsOf(c1) : p.pm0 - _claimsOf(c0)
+            );
             ghostBacking[zeroForOne ? c0 : c1] += amountIn;
             // forge-lint: disable-next-line(unsafe-typecast)
             ghostBacking[cout] -= uint256(int256(outDelta));
@@ -761,8 +913,9 @@ contract VaultHandler is Test {
             _checkEffectiveFloor(p, zeroForOne, feff);
             _checkBalancesFollowBacking(p);
             _checkWUnchanged(p);
-        } catch {
+        } catch (bytes memory err) {
             if (restricted) restrictedSwapsRejected++;
+            if (_isFlowRefusal(err)) flowRefusals++;
         }
     }
 
@@ -908,7 +1061,7 @@ contract VaultInvariantsTest is VaultTestBase {
         cs[2] = curator3;
         handler.setLifecycle(cs, makeAddr("owner2"), makeAddr("guardian2"));
 
-        bytes4[] memory selectors = new bytes4[](28);
+        bytes4[] memory selectors = new bytes4[](31);
         selectors[0] = VaultHandler.allocate.selector;
         selectors[1] = VaultHandler.swap.selector;
         selectors[2] = VaultHandler.warp.selector;
@@ -937,6 +1090,9 @@ contract VaultInvariantsTest is VaultTestBase {
         selectors[25] = VaultHandler.cancelAllocation.selector;
         selectors[26] = VaultHandler.rotateOwner.selector;
         selectors[27] = VaultHandler.rotateGuardian.selector;
+        selectors[28] = VaultHandler.riskOwnerSet.selector;
+        selectors[29] = VaultHandler.riskGuardianTighten.selector;
+        selectors[30] = VaultHandler.riskGuardianTryLoosen.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -1205,6 +1361,60 @@ contract VaultInvariantsTest is VaultTestBase {
         }
     }
 
+    /// INV-F1: every flow record's current-window usage equals the ghost model built from measured swap outputs.
+    /// Only a successful swap changes usage; a new window restarts it at zero.
+    function invariant_flowUsageMatchesGhost() public view {
+        for (uint256 i; i < 14; ++i) {
+            (ISharedCommitmentVault.RiskScope scope, address account, Currency c) = handler.riskRecord(i);
+            assertEq(lens.flowUsed(vault, scope, account, c), handler.ghostFlow(scope, account, c), "usage != ghost");
+        }
+        assertFalse(handler.flowOverCap(), "a successful swap left usage above its cap");
+    }
+
+    /// INV-F2: hierarchy. Every swap adds the same output to one hook, one curator and the vault, so in the current
+    /// window, per asset, the hooks' usages and the curators' usages each sum to the vault's.
+    function invariant_flowHierarchyConsistent() public view {
+        Currency[2] memory cs = [c0, c1];
+        address[3] memory hooks = [address(keyA.hooks), address(keyB.hooks), address(keyE.hooks)];
+        for (uint256 k; k < 2; ++k) {
+            uint256 total = lens.flowUsed(vault, ISharedCommitmentVault.RiskScope.Vault, address(0), cs[k]);
+            uint256 byHook;
+            uint256 byCurator;
+            for (uint256 i; i < 3; ++i) {
+                byHook += lens.flowUsed(vault, ISharedCommitmentVault.RiskScope.Hook, hooks[i], cs[k]);
+                byCurator += lens.flowUsed(vault, ISharedCommitmentVault.RiskScope.Curator, handler.curators(i), cs[k]);
+            }
+            assertEq(byHook, total, "sum over hooks != vault");
+            assertEq(byCurator, total, "sum over curators != vault");
+        }
+    }
+
+    /// INV-E1: hookReserved is exact per hook and sums to Q_a; every successful allocation respected all three
+    /// exposure caps at the moment it was made; the guardian never loosened a risk limit.
+    function invariant_exposureAndHookReserved() public view {
+        address[3] memory hooks = [address(keyA.hooks), address(keyB.hooks), address(keyE.hooks)];
+        uint256[2][3] memory perHook;
+        uint256 n = handler.allocationCount();
+        for (uint256 i; i < n; ++i) {
+            ISharedCommitmentVault.Allocation memory a = vault.getAllocation(handler.allocationIds(i));
+            if (a.released) continue;
+            for (uint256 j; j < 3; ++j) {
+                if (a.consumer == hooks[j]) perHook[j][a.currencyOut == c0 ? 0 : 1] += a.maxOut - a.consumed;
+            }
+        }
+        for (uint256 k; k < 2; ++k) {
+            Currency c = k == 0 ? c0 : c1;
+            uint256 sum;
+            for (uint256 j; j < 3; ++j) {
+                assertEq(vault.hookReserved(hooks[j], c), perHook[j][k], "hookReserved != sum of allocations");
+                sum += perHook[j][k];
+            }
+            assertEq(sum, vault.reserved(c), "sum of hookReserved != Q");
+        }
+        assertFalse(handler.exposureViolated(), "allocation exceeded an exposure cap");
+        assertFalse(handler.guardianLoosenedRisk(), "guardian loosened a risk limit");
+    }
+
     /// @dev Logged (not asserted) per run; only the final run's log is printed by forge.
     function afterInvariant() public view {
         console2.log("alloc/swap/release:", handler.allocationsOk(), handler.swapsOk(), handler.releasesOk());
@@ -1220,6 +1430,13 @@ contract VaultInvariantsTest is VaultTestBase {
             handler.guardianRefusals()
         );
         console2.log("bufferChanges:", handler.bufferChangesOk());
+        console2.log(
+            "riskSets/riskTightens/riskRefusals:",
+            handler.riskSetsOk(),
+            handler.riskTightensOk(),
+            handler.riskRefusals()
+        );
+        console2.log("flowRefusals:", handler.flowRefusals());
         console2.log(
             "register/deregister/freeze:", handler.registrationsOk(), handler.deregistrationsOk(), handler.freezesOk()
         );
@@ -1358,5 +1575,34 @@ contract VaultInvariantsTest is VaultTestBase {
         invariant_actualBalanceMovementsMatchAccounting();
         invariant_backingEqualsRealClaims();
         invariant_ghostLedgerConservation();
+    }
+
+    /// @notice The risk-limit actions are not vacuous: a tight vault cap refuses a swap, the next window accepts it,
+    ///         the guardian tightens but cannot loosen or configure, and every risk invariant holds along the way.
+    function test_handler_riskLimitsProgress() public {
+        handler.allocate(3, 100_000 ether, 10 days); // hookB, out token1, curators[0]
+        handler.swap(0, 1000 ether);
+        assertEq(handler.swapsOk(), 1);
+        // Record 1 is (Vault, token1). idx >> 8 == 0 selects tight values: cap bound(1, 0, 300,000 ether) = 1.
+        handler.riskOwnerSet(1, 1, 10_000);
+        assertEq(vault.getRiskLimit(ISharedCommitmentVault.RiskScope.Vault, address(0), c1).flowCap, 1);
+        handler.swap(0, 1000 ether);
+        assertEq(handler.flowRefusals(), 1, "cap below the window's usage refuses the swap");
+        handler.riskOwnerSet(267, 0, 10_000); // 267 % 14 == 1 (same record), 267 >> 8 == 1: wide, cap 300,000 ether
+        handler.swap(0, 1000 ether);
+        assertEq(handler.swapsOk(), 2);
+        handler.riskGuardianTighten(1, 5000, 10_000);
+        assertEq(handler.riskTightensOk(), 1);
+        handler.riskGuardianTryLoosen(1, false);
+        handler.riskGuardianTryLoosen(1, true);
+        assertEq(handler.riskRefusals(), 2);
+        handler.warp(1 days);
+        handler.swap(0, 1000 ether);
+        assertEq(handler.swapsOk(), 3);
+        handler.release(0, true);
+        invariant_flowUsageMatchesGhost();
+        invariant_flowHierarchyConsistent();
+        invariant_exposureAndHookReserved();
+        invariant_reservedIsExactAndBacked();
     }
 }
