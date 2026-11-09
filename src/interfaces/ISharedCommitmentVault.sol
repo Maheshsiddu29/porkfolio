@@ -173,6 +173,9 @@ interface ISharedCommitmentVault {
     error GenerationExhausted(address curator);
     /// @notice `unlockCallback` was called by something other than the PoolManager.
     error NotPoolManager();
+    /// @notice A state-changing entry point was called while another one was still executing in the same
+    ///         transaction (for example from a token callback during a deposit or payout).
+    error ReentrantCall();
     /// @notice A required address argument was zero.
     error ZeroAddress();
     /// @notice The vault is paused; deposits, allocations and consumption are blocked.

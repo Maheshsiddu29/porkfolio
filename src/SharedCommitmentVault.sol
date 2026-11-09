@@ -71,6 +71,19 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 /// is unrestricted, whether or not it is still registered. Freezing and revoking move no assets and keep every
 /// reservation in place; the reserved capacity is returned only when each allocation is released.
 ///
+/// Reentrancy. The vault calls three kinds of external code: the PoolManager (trusted, canonical v4), the two pair
+/// ERC-20s and nothing else. ERC-6909 claim transfers make no external calls, and `exchange` performs only claim
+/// transfers, so no foreign code runs inside it. Foreign code can run only inside an ERC-20 transfer: the deposit's
+/// `transferFrom` (from `unlockCallback`, through `_settleIn`) and the payout's `transfer` (made by the PoolManager
+/// inside `take`, through `_payOut`). In the deposit window B_a has already been raised but the matching claims
+/// are not minted yet, so B_a briefly exceeds the real claim balance. Every entry point that reads or changes
+/// share, queue or commitment accounting therefore holds a transaction-scoped lock (`nonReentrant`), and a call to
+/// any of them from inside such a window reverts with `ReentrantCall`. `unlockCallback` deliberately does not take
+/// the lock: it only ever runs inside the vault's own `unlock`, while the lock is already held. Configuration setters
+/// and `bumpGeneration` do not take it: they make no external calls and read no accounting. Nested `unlock` is
+/// separately impossible: the PoolManager reverts with `AlreadyUnlocked`. Hooks that call `exchange` inside
+/// `beforeSwap` are not affected: the lock is only held while a vault entry point is executing.
+///
 /// Read-only helpers. This contract serves its stored records (public getters, `getAllocation`, `getRequest`) and
 /// the admission limit `admissibleCapacity`. Previews, request status, N_a, F_a, D_a, deliverable shares and an
 /// allocation's effective floor are computed by `VaultLens`, a separate stateless contract that reads the getters
@@ -169,6 +182,11 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///         canceled, so queue processing starts here.
     uint256 public queueHead = 1;
 
+    /// @dev Transient-storage (EIP-1153) slot of the reentrancy lock: keccak256 of
+    ///      "porkfolio.SharedCommitmentVault.reentrancyLock". Transient storage is cleared at the end of every
+    ///      transaction and rolled back with a revert, so the lock can never stay set by mistake.
+    bytes32 private constant _REENTRANCY_LOCK_SLOT = 0xbc86ec4092e271d217b22411f5f8c1533dd8caf0c495b30a01b8a9361c37fd9e;
+
     /// @notice Which leg `unlockCallback` should run.
     enum CallbackAction {
         Deposit,
@@ -185,6 +203,15 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     modifier whenNotPaused() {
         if (paused) revert Paused();
         _;
+    }
+
+    /// @dev Transaction-scoped lock shared by every entry point that touches share, queue or commitment accounting
+    ///      (see "Reentrancy" in the contract documentation). Listed first on each function, so a reentrant call
+    ///      fails with `ReentrantCall` before any other check runs.
+    modifier nonReentrant() {
+        _enterLock();
+        _;
+        _exitLock();
     }
 
     /// @notice Fixes the PoolManager and the asset pair for the lifetime of the vault.
@@ -479,6 +506,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     /// @return shares Shares credited to `receiver` (total minted minus MIN_SHARES).
     function initialDeposit(uint256 amount0, uint256 amount1, address receiver)
         external
+        nonReentrant
         onlyOwner
         whenNotPaused
         returns (uint256 shares)
@@ -524,6 +552,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     /// @return amount1 Raw asset1 paid.
     function deposit(uint256 shares, uint256 maxAmount0, uint256 maxAmount1, address receiver)
         external
+        nonReentrant
         whenNotPaused
         returns (uint256 amount0, uint256 amount1)
     {
@@ -582,6 +611,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     /// @return requestId Id of the new queue entry, or 0 if nothing was queued.
     function redeem(uint256 shares, uint256 minAmount0, uint256 minAmount1, address receiver, bool queueRemainder)
         external
+        nonReentrant
         returns (uint256 instantShares, uint256 amount0, uint256 amount1, uint256 requestId)
     {
         if (shares == 0) revert ZeroAmount();
@@ -661,7 +691,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      that rounds to zero is finalized at zero so it cannot block the queue forever.
     /// @param maxSteps Most queue entries to visit in this call, to bound gas. Zero does nothing.
     /// @return sharesFinalized Total shares converted into claimable assets in this call.
-    function processQueue(uint256 maxSteps) external returns (uint256 sharesFinalized) {
+    function processQueue(uint256 maxSteps) external nonReentrant returns (uint256 sharesFinalized) {
         return _processQueue(maxSteps);
     }
 
@@ -716,7 +746,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      Cancelling lowers P, which lowers pending demand D_a and can make more capacity admissible for curators.
     /// @param requestId Request to cancel.
     /// @return sharesReturned Shares moved back to the LP's balance.
-    function cancelRequest(uint256 requestId) external returns (uint256 sharesReturned) {
+    function cancelRequest(uint256 requestId) external nonReentrant returns (uint256 sharesReturned) {
         WithdrawalRequest storage r = _requests[requestId];
         if (r.lp != msg.sender) revert NotRequestOwner(requestId);
         sharesReturned = r.sharesPending;
@@ -735,7 +765,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     /// @param requestId Request to claim.
     /// @return amount0 Raw asset0 paid to the receiver.
     /// @return amount1 Raw asset1 paid to the receiver.
-    function claim(uint256 requestId) external returns (uint256 amount0, uint256 amount1) {
+    function claim(uint256 requestId) external nonReentrant returns (uint256 amount0, uint256 amount1) {
         WithdrawalRequest storage r = _requests[requestId];
         if (r.lp != msg.sender) revert NotRequestOwner(requestId);
         amount0 = r.claimable0;
@@ -759,7 +789,9 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      `account` always originates from this contract: the depositor (msg.sender) or a redemption receiver.
     ///      Deposit: pull ERC-20 into the PoolManager and mint the matching claims to the vault. Withdraw: burn the
     ///      vault's claims and send the ERC-20 to `account`. Each leg leaves the vault's PoolManager delta at zero,
-    ///      which `unlock` requires before it returns.
+    ///      which `unlock` requires before it returns. It does not take the reentrancy lock: the entry point that
+    ///      called `unlock` already holds it, and any vault entry point a token calls from inside these legs reverts
+    ///      with `ReentrantCall`.
     function unlockCallback(bytes calldata data) external returns (bytes memory) {
         if (msg.sender != address(poolManager)) revert NotPoolManager();
         (CallbackAction action, address account, uint256 amount0, uint256 amount1) =
@@ -799,7 +831,12 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      calls by the curator.
     /// @param req Allocation instruction; see `AllocationRequest` for the fields.
     /// @return allocationId Id of the new allocation. The swapper passes it to the hook as hookData.
-    function allocate(AllocationRequest calldata req) external whenNotPaused returns (uint256 allocationId) {
+    function allocate(AllocationRequest calldata req)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256 allocationId)
+    {
         address curator = msg.sender;
         CuratorRecord memory record = _curators[curator];
         if (record.restriction != CuratorRestriction.None) revert CuratorRestricted(curator, record.restriction);
@@ -868,7 +905,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      Accounting is `_close`: no assets move, Q_a and the curator's reserved total fall by maxOut - consumed,
     ///      which raises F_a and can let queued redemptions progress. Capacity already consumed is never returned.
     /// @param allocationId Allocation to release. Must exist and not already be closed.
-    function release(uint256 allocationId) external {
+    function release(uint256 allocationId) external nonReentrant {
         Allocation storage a = _getLiveAllocation(allocationId);
         CloseReason reason;
         if (block.timestamp >= a.expiry) {
@@ -892,7 +929,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      consumed was exchanged for input that belongs to all shares and is not touched. No assets move.
     ///      Example: maxOut 10,000, consumed 3,500: Q_a and curatorReserved fall by 6,500 and `consumed` stays 3,500.
     /// @param allocationId Allocation to cancel. Must exist and not already be closed.
-    function cancelAllocation(uint256 allocationId) external {
+    function cancelAllocation(uint256 allocationId) external nonReentrant {
         Allocation storage a = _getLiveAllocation(allocationId);
         if (msg.sender != a.curator) revert NotAllocationCurator(allocationId, msg.sender);
         _close(allocationId, a, CloseReason.Canceled);
@@ -931,6 +968,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      exactly the floor.
     function exchange(PoolKey calldata key, bool zeroForOne, uint256 allocationId, uint256 amountIn, uint256 amountOut)
         external
+        nonReentrant
         whenNotPaused
     {
         if (!isConsumer[msg.sender]) revert ConsumerNotRegistered(msg.sender);
@@ -1177,6 +1215,28 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
             revert GuardianCannotIncreaseRisk();
         }
         revert NotOwner();
+    }
+
+    /// @dev Takes the reentrancy lock, or reverts with `ReentrantCall` if it is already held in this transaction.
+    function _enterLock() internal {
+        bytes32 slot = _REENTRANCY_LOCK_SLOT;
+        bool locked;
+        assembly ("memory-safe") {
+            locked := tload(slot)
+        }
+        if (locked) revert ReentrantCall();
+        assembly ("memory-safe") {
+            tstore(slot, 1)
+        }
+    }
+
+    /// @dev Releases the reentrancy lock so that a later call in the same transaction (for example a second swap in
+    ///      one PoolManager unlock) can enter again.
+    function _exitLock() internal {
+        bytes32 slot = _REENTRANCY_LOCK_SLOT;
+        assembly ("memory-safe") {
+            tstore(slot, 0)
+        }
     }
 
     /// @dev Stores a curator record and emits it in full. Every change to a curator goes through here.
