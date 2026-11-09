@@ -23,10 +23,11 @@ import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {AuthModeHook} from "../utils/AuthModeHook.sol";
 import {ClaimDonor} from "../utils/ClaimDonor.sol";
 
-/// @notice Random action sequences against the real PoolManager: curator allocations, swaps through three hooks
-///         (HookA, HookB, a 1:1 test hook that can drain an asset to zero), time, releases, ERC-6909 donations,
-///         multi-LP deposits, instant/queued redemptions (with inline queue processing), queue processing,
-///         cancellations and claims. Each action may revert; the invariants must hold after every step, and each
+/// @notice Random action sequences against the real PoolManager: allocations by three curators, swaps through three
+///         hooks (HookA, HookB, a 1:1 test hook that can drain an asset to zero), time, releases, curator
+///         cancellations, curator registration, deregistration, freeze, unfreeze, revocation and generation bumps,
+///         owner and guardian rotation, ERC-6909 donations, multi-LP deposits, instant/queued redemptions (with
+///         inline queue processing), queue processing, request cancellations and claims. Each action may revert; the invariants must hold after every step, and each
 ///         successful action is checked against the ACTUAL balance movements it caused.
 /// @dev How the checks work. The fuzzer calls handler functions in random order with random arguments. Each
 ///      action wraps its vault call in try/catch: a revert is a legitimate outcome (for example a swap below the
@@ -89,6 +90,35 @@ contract VaultHandler is Test {
     bool public guardianLoosened; // INV-R1: a guardian call lowered a floor or buffer, or resumed a direction
     bool public capacityReverted; // admissibleCapacity reverted (e.g. Q + R + D overflowing 256 bits)
 
+    // Curator lifecycle. curators[0] is never revoked by the handler, so the campaign keeps a curator that can
+    // allocate; curators[1] and curators[2] can be revoked.
+    address[] public curators;
+    /// Highest generation observed per curator; the vault's value must never be below it (INV-C1).
+    mapping(address => uint32) public ghostGeneration;
+    /// Set once a curator is observed revoked; it must stay revoked and unregistered (INV-C2).
+    mapping(address => bool) public ghostRevoked;
+    /// Per allocation: closed by a handler action, and its `consumed` at that moment (INV-A3).
+    mapping(uint256 => bool) public ghostClosed;
+    mapping(uint256 => uint256) public ghostConsumedAtClose;
+    bool public generationDecreased; // a curator's generation went down
+    bool public restrictedConsumption; // INV-C4: a swap succeeded against a frozen or revoked curator's allocation
+    bool public restrictedCreation; // an allocation was created by an unregistered, frozen or revoked curator
+    bool public curatorActionMovedState; // INV-C5: a curator-state action changed assets, shares, queue or Q_a
+    bool public closeMismatch; // a close released != maxOut - consumed, closed twice, or was made by a wrong caller
+    bool public guardianRaisedAuthority; // the guardian registered or unfroze a curator
+    uint256 public registrationsOk;
+    uint256 public deregistrationsOk;
+    uint256 public freezesOk;
+    uint256 public unfreezesOk;
+    uint256 public revokesOk;
+    uint256 public bumpsOk;
+    uint256 public allocationCancelsOk;
+    uint256 public curatorRefusals;
+    uint256 public restrictedSwapsRejected;
+    uint256 public rotations;
+    address[2] internal owners;
+    address[2] internal guardians;
+
     address public guardian;
     uint256 public floorChangesOk;
     uint256 public bufferChangesOk;
@@ -148,6 +178,18 @@ contract VaultHandler is Test {
         guardian = guardian_;
     }
 
+    /// @dev Called once by the invariant contract's setUp (not a fuzz target). `owner2` and `guardian2` are the
+    ///      alternates that `rotateOwner` and `rotateGuardian` switch to and from.
+    function setLifecycle(address[] calldata curators_, address owner2, address guardian2) external {
+        curators = curators_;
+        owners = [owner, owner2];
+        guardians = [guardian, guardian2];
+    }
+
+    function curatorCount() external view returns (uint256) {
+        return curators.length;
+    }
+
     function allocationCount() external view returns (uint256) {
         return allocationIds.length;
     }
@@ -171,7 +213,23 @@ contract VaultHandler is Test {
     function allocate(uint256 seed, uint256 maxOut, uint256 lifetime) external {
         PoolKey memory key = seed % 2 == 0 ? keyA : keyB;
         Currency out = (seed >> 1) % 2 == 0 ? c0 : c1;
-        _allocate(key, out, bound(maxOut, 1 ether, 1_500_000 ether), bound(lifetime, 1, 30 days));
+        address who = curators.length == 0 ? curator : curators[(seed >> 2) % curators.length];
+        // Three in four calls use a curator that can currently allocate (if there is one), so that lifecycle
+        // actions do not starve the swap paths; the rest keep trying arbitrary curators, restricted ones included.
+        if (curators.length != 0 && (seed >> 4) % 4 != 0 && !_canAllocate(who)) {
+            for (uint256 i; i < curators.length; ++i) {
+                if (_canAllocate(curators[i])) {
+                    who = curators[i];
+                    break;
+                }
+            }
+        }
+        _allocate(who, key, out, bound(maxOut, 1 ether, 1_500_000 ether), bound(lifetime, 1, 30 days));
+    }
+
+    function _canAllocate(address c) internal view returns (bool) {
+        ISharedCommitmentVault.CuratorRecord memory r = vault.getCurator(c);
+        return r.registered && r.restriction == ISharedCommitmentVault.CuratorRestriction.None;
     }
 
     function swap(uint256 idSeed, uint256 amountIn) external {
@@ -190,7 +248,7 @@ contract VaultHandler is Test {
         Currency out = seed % 2 == 0 ? c0 : c1;
         uint256 q = vault.admissibleCapacity(out);
         if (q == 0) return;
-        uint256 id = _allocate(keyE, out, q, 1 days);
+        uint256 id = _allocate(curator, keyE, out, q, 1 days);
         if (id == 0) return;
         if (_swap(keyE, out == c1, q, id)) drainsOk++;
         if (lens.netAssets(vault, c0) == 0 || lens.netAssets(vault, c1) == 0) zeroAssetStatesSeen++;
@@ -318,14 +376,147 @@ contract VaultHandler is Test {
     function release(uint256 idSeed, bool asOwner) external {
         if (allocationIds.length == 0) return;
         uint256 id = allocationIds[idSeed % allocationIds.length];
+        ISharedCommitmentVault.Allocation memory a = vault.getAllocation(id);
+        bool revoked = vault.getCurator(a.curator).restriction == ISharedCommitmentVault.CuratorRestriction.Revoked;
+        uint256 q = vault.reserved(a.currencyOut);
+        uint256 cr = vault.curatorReserved(a.curator, a.currencyOut);
         Snap memory p = _take();
         vm.prank(asOwner ? owner : address(0xBEEF));
         try vault.release(id) {
             releasesOk++;
+            // A stranger may only release an expired allocation or one of a revoked curator.
+            if (!asOwner && block.timestamp < a.expiry && !revoked) closeMismatch = true;
+            _recordClose(id, a, q, cr);
             _checkBalancesFollowBacking(p);
             _checkWUnchanged(p);
             if (vault.backing(c0) != p.b0 || vault.backing(c1) != p.b1) balanceMismatch = true;
         } catch {}
+    }
+
+    // ------------------------------------------------------------------
+    // Curator lifecycle actions
+    // ------------------------------------------------------------------
+
+    /// @notice Owner registers a curator, or the guardian tries to (must always be refused).
+    function curatorRegister(uint256 seed, bool asGuardian) external {
+        address c = curators[seed % curators.length];
+        bytes32 before = _lifecycleSnap();
+        vm.prank(asGuardian ? guardian : owner);
+        try vault.setCurator(c, true) {
+            registrationsOk++;
+            if (asGuardian) guardianRaisedAuthority = true;
+        } catch {
+            curatorRefusals++;
+        }
+        _afterCuratorAction(before);
+    }
+
+    function curatorDeregister(uint256 seed, bool asGuardian) external {
+        address c = curators[seed % curators.length];
+        bytes32 before = _lifecycleSnap();
+        vm.prank(asGuardian ? guardian : owner);
+        try vault.setCurator(c, false) {
+            deregistrationsOk++;
+        } catch {
+            curatorRefusals++;
+        }
+        _afterCuratorAction(before);
+    }
+
+    function curatorFreeze(uint256 seed, bool asGuardian) external {
+        address c = curators[seed % curators.length];
+        bytes32 before = _lifecycleSnap();
+        vm.prank(asGuardian ? guardian : owner);
+        try vault.freezeCurator(c) {
+            freezesOk++;
+        } catch {
+            curatorRefusals++;
+        }
+        _afterCuratorAction(before);
+    }
+
+    /// @notice Owner lifts a freeze, or the guardian tries to (must always be refused).
+    function curatorUnfreeze(uint256 seed, bool asGuardian) external {
+        address c = curators[seed % curators.length];
+        bytes32 before = _lifecycleSnap();
+        vm.prank(asGuardian ? guardian : owner);
+        try vault.unfreezeCurator(c) {
+            unfreezesOk++;
+            if (asGuardian) guardianRaisedAuthority = true;
+        } catch {
+            curatorRefusals++;
+        }
+        _afterCuratorAction(before);
+    }
+
+    /// @notice Revokes curators[1] or curators[2] (never curators[0], so allocations stay possible).
+    function curatorRevoke(uint256 seed, bool asGuardian) external {
+        address c = curators[1 + seed % (curators.length - 1)];
+        bytes32 before = _lifecycleSnap();
+        vm.prank(asGuardian ? guardian : owner);
+        try vault.revokeCurator(c) {
+            revokesOk++;
+        } catch {
+            curatorRefusals++;
+        }
+        _afterCuratorAction(before);
+    }
+
+    function curatorBump(uint256 seed) external {
+        address c = curators[seed % curators.length];
+        bytes32 before = _lifecycleSnap();
+        vm.prank(c);
+        try vault.bumpGeneration() {
+            bumpsOk++;
+        } catch {
+            curatorRefusals++;
+        }
+        _afterCuratorAction(before);
+    }
+
+    /// @notice The allocation's curator cancels it, or another curator tries to (must always be refused).
+    function cancelAllocation(uint256 idSeed, bool byOther) external {
+        if (allocationIds.length == 0) return;
+        uint256 id = allocationIds[idSeed % allocationIds.length];
+        ISharedCommitmentVault.Allocation memory a = vault.getAllocation(id);
+        address caller = byOther ? (a.curator == curators[0] ? curators[1] : curators[0]) : a.curator;
+        uint256 q = vault.reserved(a.currencyOut);
+        uint256 cr = vault.curatorReserved(a.curator, a.currencyOut);
+        Snap memory p = _take();
+        vm.prank(caller);
+        try vault.cancelAllocation(id) {
+            allocationCancelsOk++;
+            if (caller != a.curator) closeMismatch = true;
+            _recordClose(id, a, q, cr);
+            if (vault.backing(c0) != p.b0 || vault.backing(c1) != p.b1) balanceMismatch = true;
+            _checkBalancesFollowBacking(p);
+            _checkWUnchanged(p);
+        } catch {}
+    }
+
+    /// @notice Two-step ownership transfer to the other owner address. Nothing about curators may change.
+    function rotateOwner() external {
+        address next = owner == owners[0] ? owners[1] : owners[0];
+        bytes32 before = _lifecycleSnap();
+        vm.prank(owner);
+        vault.transferOwnership(next);
+        vm.prank(next);
+        vault.acceptOwnership();
+        owner = next;
+        rotations++;
+        if (_lifecycleSnap() != before) curatorActionMovedState = true;
+        _checkCuratorGhosts();
+    }
+
+    function rotateGuardian() external {
+        address next = guardian == guardians[0] ? guardians[1] : guardians[0];
+        bytes32 before = _lifecycleSnap();
+        vm.prank(owner);
+        vault.setGuardian(next);
+        guardian = next;
+        rotations++;
+        if (_lifecycleSnap() != before) curatorActionMovedState = true;
+        _checkCuratorGhosts();
     }
 
     // ------------------------------------------------------------------
@@ -437,29 +628,93 @@ contract VaultHandler is Test {
     // Internals
     // ------------------------------------------------------------------
 
-    function _allocate(PoolKey memory key, Currency out, uint256 maxOut, uint256 lifetime)
+    /// @dev Checks one successful close against the values read just before it: the allocation was not closed
+    ///      before, and Q_out and the curator's reserved total fell by exactly maxOut - consumed.
+    function _recordClose(uint256 id, ISharedCommitmentVault.Allocation memory a, uint256 q, uint256 cr) internal {
+        if (ghostClosed[id] || a.released) closeMismatch = true;
+        uint256 unused = a.maxOut - a.consumed;
+        if (q - vault.reserved(a.currencyOut) != unused) closeMismatch = true;
+        if (cr - vault.curatorReserved(a.curator, a.currencyOut) != unused) closeMismatch = true;
+        if (!vault.getAllocation(id).released) closeMismatch = true;
+        ghostClosed[id] = true;
+        ghostConsumedAtClose[id] = a.consumed;
+    }
+
+    /// @dev Hash of everything a curator-state action must leave alone: real claim and ERC-20 balances, B_a, W_a,
+    ///      Q_a, every curator's reserved totals, S, P, the queue head and the number of allocations and requests.
+    function _lifecycleSnap() internal view returns (bytes32) {
+        bytes memory reservedTotals;
+        for (uint256 i; i < curators.length; ++i) {
+            reservedTotals = abi.encode(
+                reservedTotals, vault.curatorReserved(curators[i], c0), vault.curatorReserved(curators[i], c1)
+            );
+        }
+        return keccak256(
+            abi.encode(
+                _take(),
+                vault.reserved(c0),
+                vault.reserved(c1),
+                vault.pendingShares(),
+                vault.queueHead(),
+                vault.nextRequestId(),
+                vault.nextAllocationId(),
+                _erc20(c0, address(manager)),
+                _erc20(c1, address(manager)),
+                reservedTotals
+            )
+        );
+    }
+
+    function _afterCuratorAction(bytes32 before) internal {
+        if (_lifecycleSnap() != before) curatorActionMovedState = true;
+        _checkCuratorGhosts();
+    }
+
+    /// @dev INV-C1 and INV-C2 at the moment of each curator action, for every curator.
+    function _checkCuratorGhosts() internal {
+        for (uint256 i; i < curators.length; ++i) {
+            address c = curators[i];
+            ISharedCommitmentVault.CuratorRecord memory r = vault.getCurator(c);
+            if (r.generation < ghostGeneration[c]) generationDecreased = true;
+            ghostGeneration[c] = r.generation;
+            if (ghostRevoked[c]) {
+                if (r.restriction != ISharedCommitmentVault.CuratorRestriction.Revoked || r.registered) {
+                    ghostRevoked[c] = false; // record the escape; the invariant reads `revokedEscaped`
+                    revokedEscaped = true;
+                }
+            }
+            if (r.restriction == ISharedCommitmentVault.CuratorRestriction.Revoked) ghostRevoked[c] = true;
+        }
+    }
+
+    bool public revokedEscaped; // INV-C2: a revoked curator became unrevoked or registered
+
+    function _allocate(address who, PoolKey memory key, Currency out, uint256 maxOut, uint256 lifetime)
         internal
         returns (uint256 id)
     {
-        ISharedCommitmentVault.AllocationRequest memory req =
-            ISharedCommitmentVault.AllocationRequest({
-                consumer: address(key.hooks),
-                key: key,
-                currencyOut: out,
-                // forge-lint: disable-next-line(unsafe-typecast)
-                maxOut: uint128(maxOut),
-                minInPerOutX96: _curatorFloor(out), // must be >= the live vault floor or allocate reverts
-                expiry: uint64(block.timestamp + lifetime),
-                nonce: nonce++,
-                deadline: uint64(block.timestamp)
-            });
+        ISharedCommitmentVault.AllocationRequest memory req = ISharedCommitmentVault.AllocationRequest({
+            consumer: address(key.hooks),
+            key: key,
+            currencyOut: out,
+            // forge-lint: disable-next-line(unsafe-typecast)
+            maxOut: uint128(maxOut),
+            minInPerOutX96: _curatorFloor(out), // must be >= the live vault floor or allocate reverts
+            expiry: uint64(block.timestamp + lifetime),
+            nonce: nonce++,
+            deadline: uint64(block.timestamp)
+        });
         uint256 admissible = vault.admissibleCapacity(out);
+        ISharedCommitmentVault.CuratorRecord memory rec = vault.getCurator(who);
         Snap memory p = _take();
-        vm.prank(curator);
+        vm.prank(who);
         try vault.allocate(req) returns (uint256 newId) {
             id = newId;
             allocationIds.push(id);
             allocationsOk++;
+            if (!rec.registered || rec.restriction != ISharedCommitmentVault.CuratorRestriction.None) {
+                restrictedCreation = true;
+            }
             if (maxOut > admissible) admissionViolated = true;
             if (vault.backing(c0) != p.b0 || vault.backing(c1) != p.b1) balanceMismatch = true;
             _checkWUnchanged(p);
@@ -474,6 +729,8 @@ contract VaultHandler is Test {
 
     function _swap(PoolKey memory key, bool zeroForOne, uint256 amountIn, uint256 id) internal returns (bool ok) {
         MockERC20(Currency.unwrap(zeroForOne ? c0 : c1)).mint(trader, amountIn);
+        address allocCurator = vault.getAllocation(id).curator;
+        bool restricted = vault.getCurator(allocCurator).restriction != ISharedCommitmentVault.CuratorRestriction.None;
         Currency cout = zeroForOne ? c1 : c0;
         uint256 feff;
         try lens.effectiveFloorX96(vault, id) returns (uint256 f) {
@@ -499,10 +756,14 @@ contract VaultHandler is Test {
             ghostBacking[cout] -= uint256(int256(outDelta));
             swapsOk++;
             ok = true;
+            if (restricted) restrictedConsumption = true;
+            if (ghostClosed[id]) closeMismatch = true; // a closed allocation was consumed
             _checkEffectiveFloor(p, zeroForOne, feff);
             _checkBalancesFollowBacking(p);
             _checkWUnchanged(p);
-        } catch {}
+        } catch {
+            if (restricted) restrictedSwapsRejected++;
+        }
     }
 
     /// @dev INV-P1 on MEASURED ERC-6909 deltas: dIn * 2^96 >= dOut * F_eff, compared in 512 bits. Measuring the
@@ -604,6 +865,8 @@ contract VaultInvariantsTest is VaultTestBase {
     VaultHandler internal handler;
     PoolKey internal keyE;
     address internal guardianAddr = makeAddr("guardian");
+    address internal curator2 = makeAddr("curator2");
+    address internal curator3 = makeAddr("curator3");
 
     function setUp() public override {
         super.setUp();
@@ -628,10 +891,21 @@ contract VaultInvariantsTest is VaultTestBase {
         vault.setCuratorCeiling(curator, c0, type(uint256).max);
         vault.setCuratorCeiling(curator, c1, type(uint256).max);
         vault.setGuardian(guardianAddr);
+        vault.setCurator(curator2, true);
+        vault.setCurator(curator3, true);
+        vault.setCuratorCeiling(curator2, c0, type(uint256).max);
+        vault.setCuratorCeiling(curator2, c1, type(uint256).max);
+        vault.setCuratorCeiling(curator3, c0, 500_000 ether);
+        vault.setCuratorCeiling(curator3, c1, 500_000 ether);
         vm.stopPrank();
         handler.setGuardian(guardianAddr);
+        address[] memory cs = new address[](3);
+        cs[0] = curator;
+        cs[1] = curator2;
+        cs[2] = curator3;
+        handler.setLifecycle(cs, makeAddr("owner2"), makeAddr("guardian2"));
 
-        bytes4[] memory selectors = new bytes4[](18);
+        bytes4[] memory selectors = new bytes4[](28);
         selectors[0] = VaultHandler.allocate.selector;
         selectors[1] = VaultHandler.swap.selector;
         selectors[2] = VaultHandler.warp.selector;
@@ -650,6 +924,16 @@ contract VaultInvariantsTest is VaultTestBase {
         selectors[15] = VaultHandler.ownerResume.selector;
         selectors[16] = VaultHandler.ownerLoosen.selector;
         selectors[17] = VaultHandler.setBuffer.selector;
+        selectors[18] = VaultHandler.allocate.selector; // allocation weighted x2: lifecycle actions block some
+        selectors[19] = VaultHandler.curatorRegister.selector;
+        selectors[20] = VaultHandler.curatorDeregister.selector;
+        selectors[21] = VaultHandler.curatorFreeze.selector;
+        selectors[22] = VaultHandler.curatorUnfreeze.selector;
+        selectors[23] = VaultHandler.curatorRevoke.selector;
+        selectors[24] = VaultHandler.curatorBump.selector;
+        selectors[25] = VaultHandler.cancelAllocation.selector;
+        selectors[26] = VaultHandler.rotateOwner.selector;
+        selectors[27] = VaultHandler.rotateGuardian.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -666,22 +950,33 @@ contract VaultInvariantsTest is VaultTestBase {
         assertEq(vault.backing(c1), handler.ghostBacking(c1));
     }
 
-    /// Q_a == Σ over unreleased allocations of (maxOut - consumed), and Q_a + W_a <= B_a.
+    /// Q_a == Σ over unreleased allocations of (maxOut - consumed), each curator's reserved total is the same sum
+    /// over its own allocations (INV-A2), and Q_a + W_a <= B_a. Frozen and revoked curators' unreleased
+    /// allocations are included: their capacity stays reserved until each one is closed.
     function invariant_reservedIsExactAndBacked() public view {
         uint256 sum0;
         uint256 sum1;
+        uint256 nc = handler.curatorCount();
+        uint256[2][] memory perCurator = new uint256[2][](nc);
         uint256 n = handler.allocationCount();
         for (uint256 i; i < n; ++i) {
             ISharedCommitmentVault.Allocation memory a = vault.getAllocation(handler.allocationIds(i));
             assertLe(a.consumed, a.maxOut, "consumed > maxOut");
             if (a.released) continue;
-            if (a.currencyOut == c0) sum0 += a.maxOut - a.consumed;
-            else sum1 += a.maxOut - a.consumed;
+            uint256 unused = a.maxOut - a.consumed;
+            uint256 k = a.currencyOut == c0 ? 0 : 1;
+            if (k == 0) sum0 += unused;
+            else sum1 += unused;
+            for (uint256 j; j < nc; ++j) {
+                if (handler.curators(j) == a.curator) perCurator[j][k] += unused;
+            }
         }
         assertEq(vault.reserved(c0), sum0, "reserved0");
         assertEq(vault.reserved(c1), sum1, "reserved1");
-        assertEq(vault.curatorReserved(curator, c0), sum0, "curatorReserved0");
-        assertEq(vault.curatorReserved(curator, c1), sum1, "curatorReserved1");
+        for (uint256 j; j < nc; ++j) {
+            assertEq(vault.curatorReserved(handler.curators(j), c0), perCurator[j][0], "curatorReserved0");
+            assertEq(vault.curatorReserved(handler.curators(j), c1), perCurator[j][1], "curatorReserved1");
+        }
         assertLe(vault.reserved(c0) + vault.claimableAssets(c0), vault.backing(c0));
         assertLe(vault.reserved(c1) + vault.claimableAssets(c1), vault.backing(c1));
     }
@@ -857,6 +1152,56 @@ contract VaultInvariantsTest is VaultTestBase {
         assertFalse(handler.guardianLoosened(), "guardian loosened a risk limit");
     }
 
+    /// INV-C1: no curator's generation ever decreased, and each is at least the highest value the handler saw.
+    function invariant_generationMonotonic() public view {
+        assertFalse(handler.generationDecreased(), "generation decreased");
+        for (uint256 i; i < handler.curatorCount(); ++i) {
+            address c = handler.curators(i);
+            assertGe(vault.getCurator(c).generation, handler.ghostGeneration(c), "generation below ghost");
+        }
+    }
+
+    /// INV-C2: once revoked, a curator stays revoked and unregistered, across owner and guardian rotations.
+    function invariant_revokedIsTerminal() public view {
+        assertFalse(handler.revokedEscaped(), "revoked curator escaped");
+        for (uint256 i; i < handler.curatorCount(); ++i) {
+            address c = handler.curators(i);
+            if (!handler.ghostRevoked(c)) continue;
+            ISharedCommitmentVault.CuratorRecord memory r = vault.getCurator(c);
+            assertEq(uint8(r.restriction), uint8(ISharedCommitmentVault.CuratorRestriction.Revoked));
+            assertFalse(r.registered, "revoked curator registered");
+        }
+    }
+
+    /// INV-C4: no swap succeeded against a frozen or revoked curator's allocation, and no allocation was created
+    /// by a curator that was unregistered, frozen or revoked at that moment; the guardian never registered or
+    /// unfroze a curator.
+    function invariant_noConsumptionWhenFrozenOrRevoked() public view {
+        assertFalse(handler.restrictedConsumption(), "consumed while frozen or revoked");
+        assertFalse(handler.restrictedCreation(), "created while unregistered, frozen or revoked");
+        assertFalse(handler.guardianRaisedAuthority(), "guardian raised a curator's authority");
+    }
+
+    /// INV-C5: registration, deregistration, freeze, unfreeze, revocation, generation bumps and owner or guardian
+    /// rotation never changed assets, B_a, W_a, Q_a, any curator's reserved total, shares or the queue.
+    function invariant_curatorActionsMoveNothing() public view {
+        assertFalse(handler.curatorActionMovedState(), "a curator-state action moved accounting");
+    }
+
+    /// INV-A3: a closed allocation is terminal (still released, `consumed` unchanged since the close), every close
+    /// released exactly maxOut - consumed exactly once by an allowed caller, and every released allocation was
+    /// closed through an action the handler observed.
+    function invariant_closedIsTerminal() public view {
+        assertFalse(handler.closeMismatch(), "close accounting or authorization mismatch");
+        uint256 n = handler.allocationCount();
+        for (uint256 i; i < n; ++i) {
+            uint256 id = handler.allocationIds(i);
+            ISharedCommitmentVault.Allocation memory a = vault.getAllocation(id);
+            assertEq(a.released, handler.ghostClosed(id), "released flag != observed close");
+            if (a.released) assertEq(a.consumed, handler.ghostConsumedAtClose(id), "consumed changed after close");
+        }
+    }
+
     /// @dev Logged (not asserted) per run; only the final run's log is printed by forge.
     function afterInvariant() public view {
         console2.log("alloc/swap/release:", handler.allocationsOk(), handler.swapsOk(), handler.releasesOk());
@@ -872,6 +1217,16 @@ contract VaultInvariantsTest is VaultTestBase {
             handler.guardianRefusals()
         );
         console2.log("bufferChanges:", handler.bufferChangesOk());
+        console2.log(
+            "register/deregister/freeze:", handler.registrationsOk(), handler.deregistrationsOk(), handler.freezesOk()
+        );
+        console2.log("unfreeze/revoke/bump:", handler.unfreezesOk(), handler.revokesOk(), handler.bumpsOk());
+        console2.log(
+            "allocCancels/restrictedSwapsRejected/rotations:",
+            handler.allocationCancelsOk(),
+            handler.restrictedSwapsRejected(),
+            handler.rotations()
+        );
     }
 
     /// @notice Guards against a vacuous campaign: a fixed handler sequence must actually exercise every path,
@@ -941,5 +1296,64 @@ contract VaultInvariantsTest is VaultTestBase {
         invariant_everyExchangeMeetsEffectiveFloor();
         invariant_directionalFloorsConsistent();
         invariant_guardianOnlyTightens();
+    }
+
+    /// @notice Guards the curator-lifecycle actions against being vacuous: each one must succeed or be refused as
+    ///         intended at least once, a frozen and a revoked curator's swaps must be rejected, and cleanup and
+    ///         cancellation must close allocations.
+    function test_handler_curatorLifecycleProgress() public {
+        handler.allocate(0, 10_000 ether, 1 days); // curator0, hookA, token0 out (id index 0)
+        handler.allocate(4, 10_000 ether, 1 days); // seed>>2 = 1: curator2, hookA, token0 out (index 1)
+        handler.allocate(8, 10_000 ether, 1 days); // seed>>2 = 2: curator3, hookA, token0 out (index 2)
+        handler.allocate(4, 10_000 ether, 1 days); // curator2 again (index 3)
+        assertEq(handler.allocationsOk(), 4);
+        handler.swap(1, 100 ether); // curator2's allocation: partial consumption
+
+        handler.curatorFreeze(1, true); // guardian freezes curator2
+        assertEq(handler.freezesOk(), 1);
+        handler.swap(1, 100 ether);
+        assertEq(handler.restrictedSwapsRejected(), 1, "frozen curator's swap rejected");
+        handler.curatorUnfreeze(1, true); // guardian may not unfreeze
+        assertEq(handler.unfreezesOk(), 0);
+        handler.curatorRegister(1, true); // guardian may not register
+        assertEq(handler.registrationsOk(), 0);
+        handler.curatorUnfreeze(1, false); // owner may
+        assertEq(handler.unfreezesOk(), 1);
+        handler.swap(1, 100 ether);
+
+        handler.curatorRevoke(1, true); // guardian revokes curators[1 + 1 % 2] = curator3
+        assertEq(handler.revokesOk(), 1);
+        handler.swap(2, 100 ether);
+        assertEq(handler.restrictedSwapsRejected(), 2, "revoked curator's swap rejected");
+        handler.release(2, false); // stranger cleans up the revoked curator's allocation
+        assertEq(handler.releasesOk(), 1);
+        handler.curatorRegister(2, false); // owner tries to re-register curator3: refused
+        assertEq(handler.registrationsOk(), 0);
+
+        handler.cancelAllocation(3, true); // another curator tries to cancel curator2's allocation: refused
+        assertEq(handler.allocationCancelsOk(), 0);
+        handler.cancelAllocation(3, false); // curator2 cancels its own
+        assertEq(handler.allocationCancelsOk(), 1);
+        handler.curatorDeregister(1, false);
+        handler.curatorBump(0);
+        assertEq(handler.deregistrationsOk(), 1);
+        assertEq(handler.bumpsOk(), 1);
+        handler.rotateOwner();
+        handler.rotateGuardian();
+        handler.curatorRegister(2, false); // the new owner cannot re-register the revoked curator either
+        assertEq(handler.registrationsOk(), 0);
+        handler.curatorRegister(1, false); // but can re-register the deregistered one
+        assertEq(handler.registrationsOk(), 1);
+
+        invariant_reservedIsExactAndBacked();
+        invariant_generationMonotonic();
+        invariant_revokedIsTerminal();
+        invariant_noConsumptionWhenFrozenOrRevoked();
+        invariant_curatorActionsMoveNothing();
+        invariant_closedIsTerminal();
+        invariant_equationsFromRawSources();
+        invariant_actualBalanceMovementsMatchAccounting();
+        invariant_backingEqualsRealClaims();
+        invariant_ghostLedgerConservation();
     }
 }
