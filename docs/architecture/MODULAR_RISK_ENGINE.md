@@ -1,8 +1,10 @@
 # Porkfolio — Modular Risk Engine: Architecture, Trust Boundaries and Measurements
 
 **Status: ARCHITECTURE (Phase 1B-2A). The owner approved option B (D17) and `optimizer_runs = 2,000` for the vault
-(D19). Implemented so far: step 1B-2.0 only, the vault's optimizer profile and `VaultLens` (§8.3,
-`PHASE1B2_STEP1_REPORT.md`). Everything else here is still a proposal.** Labels: SOURCE (read from the code at
+(D19), D18 (fail closed) and D21 (exposure cap). Implemented so far: step 1B-2.0, the vault's optimizer profile and
+`VaultLens` (§8.3, `PHASE1B2_STEP1_REPORT.md`); step 1B-2.1, curator states, cancellation and the reentrancy lock
+(`PHASE1B2_1_REPORT.md`); step 1B-2.2, flow limits and exposure caps (§7 note, `PHASE1B2_2_REPORT.md`). The
+authorization module and everything after it are still proposals.** Labels: SOURCE (read from the code at
 `4b5e514`), OBSERVED (measured in this milestone; method in §9), ESTIMATE (derived, not measured; how to measure it is
 stated), PROPOSAL, DECISION (needs the owner's approval).
 
@@ -238,7 +240,24 @@ The freeze, revoke, cancel and LP-redeem sequences are single-contract calls int
 - **DECISION D17:** confirm B. If the owner prefers minimum moving parts, A at `optimizer_runs ≤ 2,000` with a lens is
   a measured, viable fallback, with a 2.8–5.3 kB margin.
 
-## 7. Hierarchical risk limits (PROPOSAL)
+## 7. Hierarchical risk limits (PROPOSAL; L2–L5 built in 1B-2.2 with the changes below)
+
+**As built in step 1B-2.2** (`PHASE1B2_2_REPORT.md`). L2, L3 and L4 exist as gross-outflow records and L5 as an
+exposure cap, with these differences from the proposal in §7.1–§7.2:
+
+- **Fixed epochs, not a leaky bucket.** Each record counts gross output in the current window
+  `floor(block.timestamp / FLOW_WINDOW)` (`FLOW_WINDOW = 1 day`, full timestamps, epoch stored in 40 bits). Reasons:
+  exact integer accounting with no decay rounding; a cap change cannot retroactively change past usage (with a bucket
+  the decay rate is the cap, so raising the cap also speeds up decay of usage already recorded); and a fixed epoch is
+  the one-slot case of the ring buffer planned for later. Cost: the boundary burst in §7.2 is real here (up to 2 × cap
+  across two seconds at a window boundary); the bucket's short-interval bound is **not** claimed.
+- **Exposure cap at three scopes.** `maxReservedBps` exists per hook, per curator and vault-wide, against eligible
+  backing `E_a = N_a − D_a` (not `N_a`). The hook scope needs a new counter, `hookReserved`.
+- **One record per (scope, account, asset)** holds both the flow cap and the exposure cap; both are configured by one
+  call, `setRiskLimit`. Unconfigured records fail closed for both (D18).
+- **Packed curator bucket (plan row 8) not attempted**: the curator's flow record already shares one slot with its
+  cap, usage and window; folding it into the curator record would need `uint96` amounts and a different key.
+
 
 ### 7.1 Levels
 

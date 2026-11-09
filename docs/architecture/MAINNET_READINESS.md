@@ -18,7 +18,7 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 |---|---|---|---|
 | D-1 | v4-periphery, v4-core, forge-std and OZ pinned by commit (submodules plus `foundry.lock`) | Partial | Submodules pinned (`v4-periphery c6e4754`, `forge-std v1.9.7`); OZ 5.0.2 vendored through v4-core. No record yet of why these commits were chosen or of a check for known advisories. |
 | D-2 | Compiler `0.8.26`, via-IR, `cancun`, `bytecode_hash = none`, optimizer setting per contract recorded | Done (local) | `foundry.toml`: vault 2,000 runs through `compilation_restrictions`; hooks and `VaultLens` 44,444,444. `test/bench/run.sh` reads the settings back from each artifact's metadata and fails on a mismatch (`PHASE1B2_STEP1_REPORT.md` §2). The authorization module's setting is chosen when it is built. |
-| D-6 | Tests exercise the bytecode that will be deployed | Partial | The vault under test is the production artifact (one artifact only). Functional test files that import the vault compile the hooks and PoolManager at 2,000 runs, not their production settings. Production builds of every contract run in `test/bench/`: the gas benchmark (all swap, LP and lifecycle paths) and, since 1B-2.1, `ProductionArtifactSecurity.t.sol` (7 security tests that deploy each contract from its production artifact file by path; `PHASE1B2_1_REPORT.md` §7). The rest of the functional suite still runs on 2,000-run hooks and PoolManager. |
+| D-6 | Tests exercise the bytecode that will be deployed | Done (local) | Since 1B-2.2 the shared fixture (`VaultTestBase`) deploys the PoolManager, hooks and lens from their production artifact files, so every unit, integration, security, fuzz and invariant test runs on production builds; each is checked against its artifact's recorded settings and masked runtime-code hash (`ProductionBuilds.t.sol`). `ProductionArtifactSecurity.t.sol` (12 tests, ABI only) and the gas benchmark also use production artifacts. Command: `test/bench/security.sh` (`PHASE1B2_2_REPORT.md` §6). Not covered: comparison with an independently reproduced build or with deployed bytecode (X-2). |
 | D-3 | Unichain supports every opcode used (`TSTORE`/`TLOAD`, `MCOPY`, `PUSH0`) | Not started | Verify on a fork against the live chain, not from documentation alone. |
 | D-4 | Canonical Unichain PoolManager address and bytecode confirmed against Uniswap's published deployment | Not started | — |
 | D-5 | No unreviewed dependency added; OZ used only for EIP-712 and signature checks (D12) | Partial | Policy written; enforce in review. |
@@ -29,7 +29,7 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 |---|---|---|---|
 | I-1 | Existing 13 vault invariants pass at 256 runs × depth 128 | Done (current code) | `PRE1B2_CLEANUP_REPORT.md` §4 |
 | I-2 | Phase 1B invariants INV-P1 … INV-R1 | Partial | INV-P1 and INV-R1 implemented; INV-A1 … A4 wait for 1B-2 |
-| I-3 | Architecture invariants INV-M1 … M8 and curator invariants INV-C1 … C6 | Partial | INV-C1, C2, C4, C5 and INV-A2, A3 implemented in 1B-2.1 (`PHASE1B2_1_REPORT.md` §6). INV-C3, C6 and INV-M* wait for the module and flow limits. |
+| I-3 | Architecture invariants INV-M1 … M8 and curator invariants INV-C1 … C6 | Partial | INV-C1, C2, C4, C5 and INV-A2, A3 (1B-2.1); flow and exposure invariants INV-F1, F2, E1 (1B-2.2; the fixed-epoch form of INV-M5 and M7, `PHASE1B2_2_REPORT.md` §5.2). INV-C3, C6, M2 and M8 wait for the module. |
 | I-4 | Real ERC-6909 balance = `B_a` + donations; ghost ledger equals backing | Done | `invariant_backingEqualsRealClaims`, `invariant_ghostLedgerConservation` |
 | I-5 | 10,000-run fuzz profile on every fuzz test, plus a longer campaign (≥ 1,000 runs × 256 depth) before Gate 2 | Partial | CI profile exists; long campaign not run |
 
@@ -39,7 +39,7 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 |---|---|---|---|
 | H-1 | Registered hook that misprices, over-requests, pulls without funding, or passes a foreign key | Done | `VaultSecurity` compromised-hook section, `MaliciousConsumerHook` |
 | H-2 | Curator at maximum ceiling with a malicious hook; loss ≤ bound | Partial | Bound documented (T-01); test listed, not written |
-| H-3 | Curator volume over time is bounded (L3 flow cap) | Not started | Gap identified in `MODULAR_RISK_ENGINE.md` §7.1 |
+| H-3 | Curator volume over time is bounded (L3 flow cap) | Done (local) | Per-hook, per-curator and vault-wide gross-outflow caps per fixed one-day window, fail closed when unconfigured (`PHASE1B2_2_REPORT.md` §1–2). Boundary burst up to 2 × cap documented, not removed. |
 | H-4 | Freeze and revocation stop consumption in the same block | Done (local) | `exchange` checks the curator restriction on every call. `CuratorLifecycle.t.sol`, `invariant_noConsumptionWhenFrozenOrRevoked`, production-artifact tests; mutant C1 killed |
 
 ## 4. Malicious module and reentrancy
@@ -75,7 +75,7 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 | ID | Item | Status | Evidence or gap |
 |---|---|---|---|
 | W-1 | FIFO queue, partial fills, cancel, claim, dust, zero-asset states, donations | Done | `QueueGriefing`, `ZeroAssetStates`, `MultiLpAccounting`, invariants |
-| W-2 | Flow limits and freeze never block LP exit paths (INV-M6, INV-C5) | Partial | Freeze and revocation: done (`test_CL_lpExitsWhileFrozenThenRevoked`, `test_PA_lpWithdrawalDuringRestrictedTrading`, INV-C5). Flow limits: not built. |
+| W-2 | Flow limits and freeze never block LP exit paths (INV-M6, INV-C5) | Done (local) | Freeze and revocation: `test_CL_lpExitsWhileFrozenThenRevoked`, `test_PA_lpWithdrawalDuringRestrictedTrading`, INV-C5. Flow limits: never read on LP paths (SOURCE); `test_FL_lpPathsIgnoreFlowLimits_atHighUtilization`, `test_PA_flowUsageSurvivesLifecycle_lpExitsUnaffected`, INV-F1 (no LP action changes usage); mutant F21 (flow applied to `redeem`) killed. |
 | W-3 | Bank-run scenario: every LP redeems while the maximum capacity is committed, frozen or revoked; time to full exit ≤ `MAX_HORIZON` plus queue processing | Not started | — |
 | W-4 | One asset driven to zero by trading; deposits and exits stay defined | Done | `ZeroAssetStates.t.sol` |
 | W-5 | Rounding never lowers `N_a / S` for remaining holders | Done | `invariant_noDilutionByLpOperations` |
@@ -86,7 +86,7 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 |---|---|---|---|
 | F-1 | Fork tests against the live Unichain PoolManager: deposit, swap through both hooks, redeem, queue | Not started | Needs an RPC URL with no secrets committed; owner approval |
 | F-2 | Gas on Unichain (L2 execution plus L1 data cost) for swap, activation and redeem | Not started | — |
-| F-3 | `block.timestamp` behaviour on Unichain (block time, flashblocks) checked against flow windows and expiry | Not started | — |
+| F-3 | `block.timestamp` behaviour on Unichain (block time, flashblocks) checked against flow windows and expiry | Not started | Flow windows are fixed one-day epochs of `block.timestamp` (1B-2.2). |
 | F-4 | Testnet run with test tokens covering every emergency action (pause, halt, freeze, revoke, module disable, emergency release) | Not started | Gate 2 |
 
 ## 9. Deployment and source verification
@@ -114,8 +114,8 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 |---|---|---|---|
 | C-1 | Vault TVL cap (`B_a` cap per asset, checked in `deposit` and `initialDeposit`) | Not started | **Not in the current design; must be added before Gate 3.** |
 | C-2 | Per-transaction cap on `amountOut` per `exchange` | Not started | Partly covered by L1 `maxOut`; add a vault-wide per-swap maximum |
-| C-3 | Vault-wide, per-curator and per-hook flow caps configured conservatively | Not started | `MODULAR_RISK_ENGINE.md` §7 |
-| C-4 | Exposure cap `maxReservedBps` set low (for example ≤ 50%) | Not started | — |
+| C-3 | Vault-wide, per-curator and per-hook flow caps configured conservatively | Partial | Mechanism built (1B-2.2); values not chosen. Size caps for the documented boundary burst (2 × cap). |
+| C-4 | Exposure cap `maxReservedBps` set low (for example ≤ 50%) | Partial | Mechanism built at hook, curator and vault scope (1B-2.2); values not chosen. |
 | C-5 | Allow-listed depositors during Gate 3 (optional) | Not started | Decision for the owner |
 
 ## 12. Independent review

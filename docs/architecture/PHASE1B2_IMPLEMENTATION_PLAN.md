@@ -1,8 +1,8 @@
 # Porkfolio — Phase 1B-2 Implementation Plan
 
-**Status: IN PROGRESS.** D17 (architecture B) and D19 (vault at 2,000 runs) are approved. Steps 1B-2.0
-(`PHASE1B2_STEP1_REPORT.md`) and 1B-2.1 (`PHASE1B2_1_REPORT.md`, waiting for review) are done; later steps have not
-started. This plan replaces the 1B-2 rows of
+**Status: IN PROGRESS.** D17 (architecture B), D18 (fail closed), D19 (vault at 2,000 runs) and D21 (exposure cap)
+are approved. Steps 1B-2.0 (`PHASE1B2_STEP1_REPORT.md`), 1B-2.1 (`PHASE1B2_1_REPORT.md`) and 1B-2.2
+(`PHASE1B2_2_REPORT.md`, waiting for review) are done; later steps have not started. This plan replaces the 1B-2 rows of
 `PHASE1B_THREATS_AND_PLAN.md` §3. Every step follows `CLAUDE.md`:
 
 - 2–4 coherent commits;
@@ -61,7 +61,7 @@ Measured vault runtime at 2,000 runs: 17,035 B (prediction 16,682 B).
 
 **Stop for review.**
 
-## 1B-2.1 Curator state, freeze, revocation, cancellation (DONE, waiting for review)
+## 1B-2.1 Curator state, freeze, revocation, cancellation (DONE)
 
 As built: `889d714` (curator record, freeze, revoke, generation), `7777745` (cancellation, `_close`), `989417e`
 (transient lock), `f7ca627` (invariants), `f78d2c5` (production-artifact security tests, lifecycle gas), `f288326` (production-build check reads artifact metadata). Deviations from
@@ -85,7 +85,21 @@ Measured vault runtime at 2,000 runs: 19,520 B (margin 5,056 B).
 
 **Stop for review.**
 
-## 1B-2.2 Hierarchical flow limits and exposure cap
+## 1B-2.2 Hierarchical flow limits and exposure cap (DONE, waiting for review)
+
+As built: `eaf44d8` (functional fixture on production builds), `7e96529` (risk-limit records, flow checks, exposure
+checks, `hookReserved`, `setRiskLimit`), `5a8c688` (invariants), `ef29ff9` (production-artifact tests, window gas,
+`security.sh`), `c299e5c` (exposure test closing mutant F15). Deviations from the rows below, explained in `PHASE1B2_2_REPORT.md` §10:
+
+- **Fixed one-day epochs, not leaky buckets.** Exact integer accounting; a cap change never alters recorded usage; the
+  boundary burst (2 × cap across a boundary) is documented, and no rolling-window bound is claimed.
+- **One record per (scope, account, asset)** with `{configured, epoch (40 bits), flowCap, flowUsed (104 bits)}` in one
+  slot and `maxReservedBps` in a second; one setter, `setRiskLimit`.
+- **Exposure cap at three scopes** (hook, curator, vault) against `E_a = N_a − D_a`; a new `hookReserved` counter.
+- **Row 8 (packed curator bucket) not attempted.**
+- **The functional suite runs on production builds** (task requirement).
+
+Measured vault runtime at 2,000 runs: 22,361 B (margin 2,215 B).
 
 | # | Commit | Content | Tests |
 |---|---|---|---|

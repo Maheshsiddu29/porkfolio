@@ -143,3 +143,25 @@ test/bench/run.sh
 - **Size.** Vault runtime 19,520 B (EIP-170 margin 5,056 B).
 
 Docs: `docs/architecture/PHASE1B2_1_REPORT.md`.
+
+## Phase 1B-2.2 — hierarchical flow limits and exposure caps
+
+```bash
+forge test --match-contract "FlowLimitsTest|ExposureCapsTest" -vv
+test/bench/security.sh       # production-build security suite: forced rebuild, artifact checks, full suite (CI fuzz)
+FOUNDRY_INVARIANT_RUNS=256 FOUNDRY_INVARIANT_DEPTH=128 forge test --match-contract VaultInvariants
+test/bench/run.sh
+```
+
+- **Flow limits.** Per asset sold, gross output is capped per consumer hook, per curator and vault-wide in fixed
+  one-day windows. Every swap is charged at all three levels and refused if any is full; inflows are never netted.
+  A fixed window allows up to twice a cap across a window boundary; no rolling-window bound is claimed.
+- **Exposure caps.** A new allocation must keep the hook's, the curator's and the vault's unused reserved capacity
+  within a configured share of eligible backing (`N_a − D_a`), rounded down. Checked at creation only.
+- **Fail closed.** A path whose hook, curator or vault record was never configured can neither reserve nor trade. The
+  owner configures; the guardian can only tighten. Nothing resets usage before the window ends.
+- **Production builds.** The functional suite (including fuzz and invariants) now runs on the production PoolManager,
+  hooks and lens, checked against each artifact's settings and masked runtime hash.
+- **Size.** Vault runtime 22,361 B (EIP-170 margin 2,215 B).
+
+Docs: `docs/architecture/PHASE1B2_2_REPORT.md`.
