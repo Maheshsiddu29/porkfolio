@@ -31,10 +31,10 @@ import {ScriptedHook} from "../utils/ScriptedHook.sol";
 ///
 ///      How production builds are guaranteed here. Contracts are deployed from explicit artifact paths
 ///      (`out/<File>.sol/<Name>.json`), not by name, so the result does not depend on the profile this file is
-///      compiled under. `test_PA_deployedCodeIsProductionArtifacts` checks that each deployed code length equals its
-///      production artifact and differs from the 2,000-run build of the same contract. `test/bench/run.sh` checks the
-///      optimizer settings recorded in those same artifact files. Reading artifacts needs the read-only
-///      `fs_permissions` entry for `./out` in foundry.toml.
+///      compiled under. `test_PA_deployedCodeIsProductionArtifacts` reads the optimizer settings recorded in each of
+///      those artifact files and checks that each deployed code length equals its artifact's. It does not rely on the
+///      2,000-run test builds being present in `out/`: other tools (for example Slither's `forge build --skip test`)
+///      can remove them. Reading artifacts needs the read-only `fs_permissions` entry for `./out` in foundry.toml.
 ///
 ///      Test-only contracts used here (the router, `ScriptedHook`, `ReentrantToken`, `ReentryAgent`) are not
 ///      deployed by the project; their build settings do not matter.
@@ -45,10 +45,9 @@ contract ProductionArtifactSecurityTest is Test {
     string internal constant HOOK_A_JSON = "out/HookA_DynamicFee.sol/HookA_DynamicFee.json";
     string internal constant HOOK_B_JSON = "out/HookB_BoundedImpact.sol/HookB_BoundedImpact.json";
     string internal constant PM_JSON = "out/PoolManager.sol/PoolManager.default.json";
-    // 2,000-run builds of the same contracts, used only to show the deployed code is not them.
-    string internal constant HOOK_A_TEST_JSON = "out/HookA_DynamicFee.sol/HookA_DynamicFee.vault.json";
-    string internal constant HOOK_B_TEST_JSON = "out/HookB_BoundedImpact.sol/HookB_BoundedImpact.vault.json";
-    string internal constant PM_TEST_JSON = "out/PoolManager.sol/PoolManager.vault.json";
+    /// @dev Production optimizer settings from foundry.toml: the vault's compilation restriction and the default.
+    uint256 internal constant VAULT_RUNS = 2000;
+    uint256 internal constant DEFAULT_RUNS = 44_444_444;
 
     uint160 internal constant HOOK_FLAGS =
         Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG;
@@ -136,14 +135,13 @@ contract ProductionArtifactSecurityTest is Test {
     // The code under test is the production code
     // ------------------------------------------------------------------
 
+    /// @notice Each contract under test came from an artifact compiled with its production settings (via-IR,
+    ///         cancun, no metadata hash, and the production optimizer runs), and the deployed code is that artifact's.
     function test_PA_deployedCodeIsProductionArtifacts() public view {
-        assertEq(address(vault).code.length, vm.getDeployedCode(VAULT_JSON).length, "vault");
-        assertEq(hookA.code.length, vm.getDeployedCode(HOOK_A_JSON).length, "hookA");
-        assertEq(hookB.code.length, vm.getDeployedCode(HOOK_B_JSON).length, "hookB");
-        assertEq(address(manager).code.length, vm.getDeployedCode(PM_JSON).length, "PoolManager");
-        assertTrue(hookA.code.length != vm.getDeployedCode(HOOK_A_TEST_JSON).length, "hookA is the test build");
-        assertTrue(hookB.code.length != vm.getDeployedCode(HOOK_B_TEST_JSON).length, "hookB is the test build");
-        assertTrue(address(manager).code.length != vm.getDeployedCode(PM_TEST_JSON).length, "PM is the test build");
+        _assertProduction(address(vault), VAULT_JSON, VAULT_RUNS);
+        _assertProduction(hookA, HOOK_A_JSON, DEFAULT_RUNS);
+        _assertProduction(hookB, HOOK_B_JSON, DEFAULT_RUNS);
+        _assertProduction(address(manager), PM_JSON, DEFAULT_RUNS);
     }
 
     // ------------------------------------------------------------------
@@ -333,6 +331,14 @@ contract ProductionArtifactSecurityTest is Test {
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
+
+    function _assertProduction(address deployed, string memory artifact, uint256 runs) internal view {
+        string memory json = vm.readFile(artifact);
+        assertEq(vm.parseJsonUint(json, ".metadata.settings.optimizer.runs"), runs, string.concat(artifact, ": runs"));
+        assertTrue(vm.parseJsonBool(json, ".metadata.settings.viaIR"), string.concat(artifact, ": viaIR"));
+        assertEq(vm.parseJsonString(json, ".metadata.settings.evmVersion"), "cancun", string.concat(artifact, ": evm"));
+        assertEq(deployed.code.length, vm.getDeployedCode(artifact).length, string.concat(artifact, ": code"));
+    }
 
     function _fund(address who, address spender, uint256 amount) internal {
         t0.mint(who, amount);
