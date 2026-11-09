@@ -1,7 +1,8 @@
 # Porkfolio — Phase 1B-2 Implementation Plan
 
-**Status: IN PROGRESS.** D17 (architecture B) and D19 (vault at 2,000 runs) are approved. Step 1B-2.0 is done
-(`PHASE1B2_STEP1_REPORT.md`); later steps have not started. This plan replaces the 1B-2 rows of
+**Status: IN PROGRESS.** D17 (architecture B) and D19 (vault at 2,000 runs) are approved. Steps 1B-2.0
+(`PHASE1B2_STEP1_REPORT.md`) and 1B-2.1 (`PHASE1B2_1_REPORT.md`, waiting for review) are done; later steps have not
+started. This plan replaces the 1B-2 rows of
 `PHASE1B_THREATS_AND_PLAN.md` §3. Every step follows `CLAUDE.md`:
 
 - 2–4 coherent commits;
@@ -60,7 +61,21 @@ Measured vault runtime at 2,000 runs: 17,035 B (prediction 16,682 B).
 
 **Stop for review.**
 
-## 1B-2.1 Curator state, freeze, revocation, cancellation
+## 1B-2.1 Curator state, freeze, revocation, cancellation (DONE, waiting for review)
+
+As built: `889d714` (curator record, freeze, revoke, generation), `7777745` (cancellation, `_close`), `989417e`
+(transient lock), `f7ca627` (invariants), `f78d2c5` (production-artifact security tests, lifecycle gas), `f288326` (production-build check reads artifact metadata). Deviations from
+the rows below, explained in `PHASE1B2_1_REPORT.md` §1 and §10:
+
+- **Two fields, not one status.** `registered` and `restriction` (None/Frozen/Revoked) are stored separately, because a
+  single status cannot keep deregistration and freeze independent.
+- **`release` stays the single entry for expiry, emergency and revoked cleanup**; there is no separate
+  `emergencyRelease`. `cancelAllocation` is the curator's entry. Both go through `_close`.
+- **`revokeCurator` does not bump the generation**, so revocation can never fail; it deregisters instead.
+- **Lock scope.** Ten accounting entry points; setters and `bumpGeneration` are not locked.
+- **Production-artifact security tests** were added (task 7), with read-only `fs_permissions` on `./out`.
+
+Measured vault runtime at 2,000 runs: 19,520 B (margin 5,056 B).
 
 | # | Commit | Content | Tests |
 |---|---|---|---|

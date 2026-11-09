@@ -1,6 +1,9 @@
 # Porkfolio — Curator Security Model (Signed Permissions, Freeze, Revocation)
 
-**Status: SPECIFICATION FOR REVIEW (Phase 1B-2A). Nothing here is implemented.** It assumes architecture B from
+**Status: PARTLY IMPLEMENTED.** Step 1B-2.1 implemented the curator record, freeze, revocation, generation,
+cancellation and the shared close path in the vault (`PHASE1B2_1_REPORT.md`), with the differences listed in §1.1.
+Signed authorizations, nonces, `reserveFor` and the authorization module (§2, §5, and the module rows of §3 and §4) are
+**not implemented**. It assumes architecture B from
 `MODULAR_RISK_ENGINE.md` (vault + `CuratorAuthorization` module). It refines `PHASE1B_CURATOR_AUTH.md` and
 `CURATOR_REVOCATION.md`, and where they differ this document wins. Changes to earlier decisions are listed in §9.
 
@@ -13,7 +16,7 @@
 | Curator record: `status` and `generation` | vault | one slot per curator: `uint8 status`, `uint32 generation` (room left for a packed outflow bucket, `MODULAR_RISK_ENGINE.md` §8.2) |
 | Allocation (commitment) | vault | as today, with the curator's address |
 
-Status values:
+Status values (as proposed; see §1.1 for what was built):
 
 | Status | Activate? | Consume existing allocations? | Re-enter `Active`? |
 |---|---|---|---|
@@ -21,6 +24,56 @@ Status values:
 | `Active` | yes | yes | — |
 | `Frozen` | no | **no** | yes, by owner `unfreezeCurator`, which **bumps the generation** |
 | `Revoked` | no | **no** | **never** (terminal) |
+
+### 1.1 As built in 1B-2.1 (SOURCE)
+
+One enum cannot hold both "may this curator create?" and "may its allocations execute?" without one action silently
+changing the other. With a single `status`:
+
+- deregistering a frozen curator would set `None`, which **re-enables consumption** of its allocations;
+- `unfreezeCurator` would set `Active`, which **re-registers** a curator that was deregistered while frozen;
+- re-registering a frozen curator (`setCurator(c, true)`) would have to either fail or lift the freeze.
+
+The vault therefore stores two independent controls and the counter in one slot:
+
+```
+struct CuratorRecord { bool registered; CuratorRestriction restriction; uint32 generation; }   // 6 bytes, one slot
+enum CuratorRestriction { None, Frozen, Revoked }
+```
+
+| State in the task's terms | `registered` | `restriction` | Create allocations | Consume its allocations | How it is left |
+|---|---|---|---|---|---|
+| Active | true | None | yes | yes | deregister, freeze, revoke |
+| Deregistered | false | None | no | **yes** | owner re-registers; freeze; revoke |
+| Frozen | true or false | Frozen | no | **no** | owner `unfreezeCurator` (registration unchanged); revoke |
+| Revoked | false (forced) | Revoked | no | **no** | never |
+
+Rules (all OBSERVED in `test/security/CuratorLifecycle.t.sol`):
+
+- `setCurator(c, true)`: owner only; reverts `InvalidCuratorTransition` for a revoked curator; leaves a freeze in place.
+- `setCurator(c, false)`: owner or guardian; `generation += 1` (also when already deregistered); restriction unchanged.
+- `freezeCurator`: owner or guardian; only from `None`; registration and generation unchanged; no reservation moves.
+- `unfreezeCurator`: owner only; only from `Frozen`; `generation += 1`; registration unchanged.
+- `revokeCurator`: owner or guardian; from `None` or `Frozen`; sets `registered = false`; **does not** change the
+  generation, so it can never fail on `GenerationExhausted`.
+- `bumpGeneration()`: any caller, for its own record, in any state.
+- `generation` is `uint32` and never wraps: every increment reverts with `GenerationExhausted` at `type(uint32).max`.
+  At that point deregistration and unfreeze revert; freeze and revoke still work.
+
+**One generation is enough; no second counter for execution rights.** The task asked whether one counter can both
+invalidate unactivated instructions and permanently invalidate existing allocations. It cannot do both without
+breaking an approved rule: if `exchange` compared an allocation's stored generation with the curator's current one,
+then deregistration and unfreeze, which must raise the generation to kill outstanding instructions, would also kill
+live allocations, contrary to "deregistration leaves allocations consumable" (`CURATOR_REVOCATION.md` §2) and
+"unfreeze resumes consumption" (§4 below). The two jobs are therefore done by different mechanisms:
+
+- **Unactivated instructions:** `generation`, which only rises. Example: a curator signs at generation 7; the guardian
+  deregisters it (8); the owner re-registers it (still 8). An instruction tagged 7 can never match again. No signed
+  path exists yet, so nothing on-chain reads the generation in this step; 1B-2.3's `reserveFor` will compare it.
+- **Existing allocations:** the terminal `Revoked` restriction, checked by `exchange` on every call. Because `Revoked`
+  never changes and `released` is never cleared, a revoked curator's allocations can never execute again, and no
+  allocation id can be reopened (ids only increase). An execution generation stored per allocation would add a field
+  and a comparison on every swap and would protect nothing that terminal revocation does not already protect.
 
 ## 2. EIP-712 authorization
 
@@ -103,6 +156,11 @@ check for unsigned requests, because the curator is present.
 | `revokeCurator(c)` | owner or guardian | `status = Revoked` (terminal); activation and consumption stop | allocations stay reserved **until released**; anyone may release them at once (`MODULAR_RISK_ENGINE.md` §4.1) |
 | `cancelAllocation(id)` | the allocation's curator, in **any** status | closes it; `Q_a −= remaining` | the nonce stays used |
 | `release(id)` | anyone after expiry or if the curator is Revoked; owner or guardian at any time | closes it; `Q_a −= remaining` | — |
+
+As built (1B-2.1): both close entry points call one internal `_close`; `AllocationReleased` carries a `CloseReason`
+(`Expired`, `Emergency`, `Canceled`, `CuratorRevoked`; `release` picks them in that order of precedence). A frozen or
+deregistered curator's unexpired allocation is **not** releasable by a stranger, because a freeze may be lifted.
+`revokeCurator` also deregisters. The `setAuthModule` and `invalidateNonces` rows are not implemented.
 | `setAuthModule(0)` | owner or guardian | all activation stops | everything already reserved |
 
 **How frozen allocations stay backed.**
@@ -154,14 +212,14 @@ check for unsigned requests, because the curator is present.
 
 ## 7. Invariants and required tests
 
-| ID | Invariant | Test |
-|---|---|---|
-| INV-C1 | `generation[c]` never decreases | handler ghost; `invariant_generationMonotonic` |
-| INV-C2 | `Revoked` never changes | `invariant_revokedIsTerminal` |
-| INV-C3 | No allocation is created with a signed generation ≠ current | `invariant_activationRequiresRegisteredCurator` (extends R6) |
-| INV-C4 | No consumption while Frozen or Revoked | `invariant_noConsumptionWhenFrozenOrRevoked` |
-| INV-C5 | Freeze and unfreeze never change `Q_a`, `curatorReserved`, `B_a`, `W_a`, shares or the queue | differential |
-| INV-C6 | Each `(curator, nonce)` is used at most once, across both paths | `invariant_noncesSingleUse` |
+| ID | Invariant | Test | 1B-2.1 |
+|---|---|---|---|
+| INV-C1 | `generation[c]` never decreases | handler ghost; `invariant_generationMonotonic` | implemented |
+| INV-C2 | `Revoked` never changes | `invariant_revokedIsTerminal` | implemented (also: stays unregistered) |
+| INV-C3 | No allocation is created with a signed generation ≠ current | `invariant_activationRequiresRegisteredCurator` (extends R6) | not yet (no signed path) |
+| INV-C4 | No consumption while Frozen or Revoked | `invariant_noConsumptionWhenFrozenOrRevoked` | implemented (also: no creation unless registered and unrestricted) |
+| INV-C5 | Freeze and unfreeze never change `Q_a`, `curatorReserved`, `B_a`, `W_a`, shares or the queue | differential | implemented as `invariant_curatorActionsMoveNothing`, for every curator action and owner/guardian rotation |
+| INV-C6 | Each `(curator, nonce)` is used at most once, across both paths | `invariant_noncesSingleUse` | not yet (module) |
 
 Negative and adversarial tests (`test/security/CuratorAuth.t.sol`, `AuthLifecycle.t.sol`):
 

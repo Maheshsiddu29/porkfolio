@@ -18,7 +18,7 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 |---|---|---|---|
 | D-1 | v4-periphery, v4-core, forge-std and OZ pinned by commit (submodules plus `foundry.lock`) | Partial | Submodules pinned (`v4-periphery c6e4754`, `forge-std v1.9.7`); OZ 5.0.2 vendored through v4-core. No record yet of why these commits were chosen or of a check for known advisories. |
 | D-2 | Compiler `0.8.26`, via-IR, `cancun`, `bytecode_hash = none`, optimizer setting per contract recorded | Done (local) | `foundry.toml`: vault 2,000 runs through `compilation_restrictions`; hooks and `VaultLens` 44,444,444. `test/bench/run.sh` reads the settings back from each artifact's metadata and fails on a mismatch (`PHASE1B2_STEP1_REPORT.md` §2). The authorization module's setting is chosen when it is built. |
-| D-6 | Tests exercise the bytecode that will be deployed | Partial | The vault under test is the production artifact (one artifact only). Functional test files that import the vault compile the hooks and PoolManager at 2,000 runs, not their production settings. Production builds of every contract run only in `test/bench/` (all swap and LP paths, as a smoke test). Before Gate 2, either deploy production artifacts in the functional suite or run it against them on a fork. |
+| D-6 | Tests exercise the bytecode that will be deployed | Partial | The vault under test is the production artifact (one artifact only). Functional test files that import the vault compile the hooks and PoolManager at 2,000 runs, not their production settings. Production builds of every contract run in `test/bench/`: the gas benchmark (all swap, LP and lifecycle paths) and, since 1B-2.1, `ProductionArtifactSecurity.t.sol` (7 security tests that deploy each contract from its production artifact file by path; `PHASE1B2_1_REPORT.md` §7). The rest of the functional suite still runs on 2,000-run hooks and PoolManager. |
 | D-3 | Unichain supports every opcode used (`TSTORE`/`TLOAD`, `MCOPY`, `PUSH0`) | Not started | Verify on a fork against the live chain, not from documentation alone. |
 | D-4 | Canonical Unichain PoolManager address and bytecode confirmed against Uniswap's published deployment | Not started | — |
 | D-5 | No unreviewed dependency added; OZ used only for EIP-712 and signature checks (D12) | Partial | Policy written; enforce in review. |
@@ -29,7 +29,7 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 |---|---|---|---|
 | I-1 | Existing 13 vault invariants pass at 256 runs × depth 128 | Done (current code) | `PRE1B2_CLEANUP_REPORT.md` §4 |
 | I-2 | Phase 1B invariants INV-P1 … INV-R1 | Partial | INV-P1 and INV-R1 implemented; INV-A1 … A4 wait for 1B-2 |
-| I-3 | Architecture invariants INV-M1 … M8 and curator invariants INV-C1 … C6 | Not started | `MODULAR_RISK_ENGINE.md` §9, `CURATOR_SECURITY_MODEL.md` §7 |
+| I-3 | Architecture invariants INV-M1 … M8 and curator invariants INV-C1 … C6 | Partial | INV-C1, C2, C4, C5 and INV-A2, A3 implemented in 1B-2.1 (`PHASE1B2_1_REPORT.md` §6). INV-C3, C6 and INV-M* wait for the module and flow limits. |
 | I-4 | Real ERC-6909 balance = `B_a` + donations; ghost ledger equals backing | Done | `invariant_backingEqualsRealClaims`, `invariant_ghostLedgerConservation` |
 | I-5 | 10,000-run fuzz profile on every fuzz test, plus a longer campaign (≥ 1,000 runs × 256 depth) before Gate 2 | Partial | CI profile exists; long campaign not run |
 
@@ -40,7 +40,7 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 | H-1 | Registered hook that misprices, over-requests, pulls without funding, or passes a foreign key | Done | `VaultSecurity` compromised-hook section, `MaliciousConsumerHook` |
 | H-2 | Curator at maximum ceiling with a malicious hook; loss ≤ bound | Partial | Bound documented (T-01); test listed, not written |
 | H-3 | Curator volume over time is bounded (L3 flow cap) | Not started | Gap identified in `MODULAR_RISK_ENGINE.md` §7.1 |
-| H-4 | Freeze and revocation stop consumption in the same block | Not started | `CURATOR_SECURITY_MODEL.md` §7 |
+| H-4 | Freeze and revocation stop consumption in the same block | Done (local) | `exchange` checks the curator restriction on every call. `CuratorLifecycle.t.sol`, `invariant_noConsumptionWhenFrozenOrRevoked`, production-artifact tests; mutant C1 killed |
 
 ## 4. Malicious module and reentrancy
 
@@ -49,7 +49,7 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 | M-1 | A compromised authorization module cannot move assets, unfreeze, un-revoke, or exceed ceilings, floors or flow caps | Not started | Requires a test module that calls `reserveFor` with arbitrary inputs |
 | M-2 | Guardian disables the module in one call; allocations unchanged (INV-M8) | Not started | — |
 | M-3 | ERC-1271 wallet: reentrant, gas burner, return bomb, signer change | Not started | `Mock1271Wallet` modes listed in `PHASE1B_THREATS_AND_PLAN.md` |
-| M-4 | Vault transient reentrancy lock on every state-changing entry point except `unlockCallback`; token-callback reentry test | Not started | `MODULAR_RISK_ENGINE.md` §4.5 |
+| M-4 | Vault transient reentrancy lock on every state-changing entry point except `unlockCallback`; token-callback reentry test | Done (local) | Lock on the ten accounting entry points; configuration setters and `bumpGeneration` deliberately unlocked (`PHASE1B2_1_REPORT.md` §5). `Reentrancy.t.sol` with a callback token; mutants C15, C16 killed |
 | M-5 | No call cycle between contracts (static review plus a test that the vault never calls the module) | Not started | — |
 
 ## 5. Signatures, replay and revocation
@@ -57,7 +57,7 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 | ID | Item | Status | Evidence or gap |
 |---|---|---|---|
 | S-1 | Replay: same signature, same nonce, other chain, other vault, other module, outside the window | Not started | `CURATOR_SECURITY_MODEL.md` §3 |
-| S-2 | Revival: after unfreeze, deregister and re-register, revocation, generation bump | Not started | same |
+| S-2 | Revival: after unfreeze, deregister and re-register, revocation, generation bump | Partial | The generation rules and terminal revocation are implemented and tested (`CuratorLifecycle.t.sol`, INV-C1, C2). The signature-level revival tests need the signed path (1B-2.3). |
 | S-3 | Nonce single use across direct and signed paths (INV-C6) | Not started | — |
 | S-4 | Domain separator rebuilt after a chain-id change (fork test with `vm.chainId`) | Not started | — |
 
@@ -75,7 +75,7 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 | ID | Item | Status | Evidence or gap |
 |---|---|---|---|
 | W-1 | FIFO queue, partial fills, cancel, claim, dust, zero-asset states, donations | Done | `QueueGriefing`, `ZeroAssetStates`, `MultiLpAccounting`, invariants |
-| W-2 | Flow limits and freeze never block LP exit paths (INV-M6, INV-C5) | Not started | — |
+| W-2 | Flow limits and freeze never block LP exit paths (INV-M6, INV-C5) | Partial | Freeze and revocation: done (`test_CL_lpExitsWhileFrozenThenRevoked`, `test_PA_lpWithdrawalDuringRestrictedTrading`, INV-C5). Flow limits: not built. |
 | W-3 | Bank-run scenario: every LP redeems while the maximum capacity is committed, frozen or revoked; time to full exit ≤ `MAX_HORIZON` plus queue processing | Not started | — |
 | W-4 | One asset driven to zero by trading; deposits and exits stay defined | Done | `ZeroAssetStates.t.sol` |
 | W-5 | Rounding never lowers `N_a / S` for remaining holders | Done | `invariant_noDilutionByLpOperations` |

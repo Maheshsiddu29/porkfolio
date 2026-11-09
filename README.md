@@ -123,3 +123,23 @@ FOUNDRY_INVARIANT_RUNS=256 FOUNDRY_INVARIANT_DEPTH=128 forge test --match-contra
   `lens.previewDeposit(vault, shares)`.
 
 Docs: `docs/architecture/PHASE1B2_STEP1_REPORT.md`.
+
+## Phase 1B-2.1 — curator state, revocation, cancellation and reentrancy lock
+
+```bash
+forge test --match-contract "CuratorLifecycleTest|CuratorCancellationTest|ReentrancyTest" -vv
+forge test --match-path test/bench/ProductionArtifactSecurity.t.sol -vv   # security paths on production artifacts
+FOUNDRY_INVARIANT_RUNS=256 FOUNDRY_INVARIANT_DEPTH=128 forge test --match-contract VaultInvariants
+test/bench/run.sh
+```
+
+- **Curators.** Registration (may create) and restriction (None, Frozen, Revoked: may its allocations execute) are
+  separate. The guardian can freeze and revoke; only the owner unfreezes; revocation is permanent. A `uint32`
+  generation, raised by deregistration, unfreeze and `bumpGeneration`, invalidates instructions not yet turned into
+  allocations; it never wraps.
+- **Closing allocations.** `cancelAllocation` (the curator, in any state) and `release` (anyone after expiry or once
+  the curator is revoked; owner or guardian otherwise) share one `_close` that releases exactly `maxOut − consumed`.
+- **Reentrancy.** A transient lock on the ten accounting entry points.
+- **Size.** Vault runtime 19,520 B (EIP-170 margin 5,056 B).
+
+Docs: `docs/architecture/PHASE1B2_1_REPORT.md`.

@@ -1,6 +1,9 @@
 # Porkfolio — Curator Revocation (Specification)
 
-**Status: SPECIFICATION FOR REVIEW. Only the behaviour marked SOURCE/OBSERVED exists today.** It extends
+**Status: SPECIFICATION, PARTLY SUPERSEDED.** `CURATOR_SECURITY_MODEL.md` replaces §3 and D16, and step 1B-2.1
+(`PHASE1B2_1_REPORT.md`) implemented R2 (as a vault-side generation), R3 (cancel in any state), R4 (one `_close` with a
+reason) and a freeze/revoke check in `exchange`. R1, R5's signature wording and R6 wait for the signed path (1B-2.3).
+The SOURCE/OBSERVED labels below describe the code before 1B-2.1. It extends
 `PHASE1B_CURATOR_AUTH.md` (§7 lifecycle, §7.5 races, §9 roles) and adds requirements to the Phase 1B-2 plan in
 `PHASE1B_THREATS_AND_PLAN.md` §3. Labels: SOURCE (read from code), OBSERVED (asserted by a test), PROPOSAL, DECISION
 (needs the owner's approval).
