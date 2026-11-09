@@ -62,6 +62,15 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 ///   Consumer  Registered hook that calls `exchange` against allocations made out to it.
 ///   LP        Anyone, after initialization: deposits, redeems, cancels and claims its own requests.
 ///
+/// Curator lifecycle. Each curator has a `CuratorRecord` with two independent controls and a counter:
+///   registered   whether it may create new allocations (owner registers; owner or guardian deregisters);
+///   restriction  None, Frozen or Revoked: whether its existing allocations may be consumed. Frozen is imposed by
+///                the owner or guardian and lifted only by the owner. Revoked is permanent.
+///   generation   counter that invalidates curator instructions not yet turned into allocations. It only rises.
+/// A curator may create allocations only while registered and unrestricted. Its allocations may be consumed while it
+/// is unrestricted, whether or not it is still registered. Freezing and revoking move no assets and keep every
+/// reservation in place; the reserved capacity is returned only when each allocation is released.
+///
 /// Read-only helpers. This contract serves its stored records (public getters, `getAllocation`, `getRequest`) and
 /// the admission limit `admissibleCapacity`. Previews, request status, N_a, F_a, D_a, deliverable shares and an
 /// allocation's effective floor are computed by `VaultLens`, a separate stateless contract that reads the getters
@@ -113,8 +122,9 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
 
     /// @notice Hooks allowed to call `exchange` and to be named as an allocation's consumer.
     mapping(address consumer => bool) public isConsumer;
-    /// @notice Addresses allowed to call `allocate`.
-    mapping(address curator => bool) public isCurator;
+    /// @dev Curator records (registration, restriction, generation), one storage slot each. Read with
+    ///      `getCurator`. See `CuratorRecord` for the states they encode.
+    mapping(address curator => CuratorRecord) internal _curators;
     /// @notice Most unused capacity, in raw units of `currency`, that a curator may hold across its unreleased
     ///         allocations. Zero means the curator can allocate nothing in that currency.
     mapping(address curator => mapping(Currency currency => uint256)) public curatorCeiling;
@@ -201,8 +211,9 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     // Administration (no function here moves assets)
     //
     // Owner: every configuration change. Guardian: only changes that REDUCE risk (pause, deregister,
-    // lower a ceiling, raise a buffer floor, raise a price floor, halt a direction, emergency release);
-    // it can never loosen, register, unpause, resume, or touch ownership or the guardian slot.
+    // freeze or revoke a curator, lower a ceiling, raise a buffer floor, raise a price floor, halt a direction,
+    // emergency release); it can never loosen, register, unfreeze, unpause, resume, or touch ownership or the
+    // guardian slot.
     // Anyone else: nothing.
     // ==================================================================
 
@@ -256,18 +267,103 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         emit ConsumerSet(consumer, registered);
     }
 
-    /// @notice Register or revoke a curator.
-    /// @dev Revocation only blocks new allocations. Allocations the curator already made remain consumable until
-    ///      they expire or are released early by the owner or guardian. Registration alone grants no capacity: the
-    ///      curator also needs a non-zero `curatorCeiling`. Owner may register and revoke; the guardian may only
-    ///      revoke.
+    /// @notice Register a curator, or deregister it.
+    /// @dev Registration controls only whether the curator may create new allocations. It does not touch the
+    ///      curator's restriction, so registering a frozen curator leaves it frozen, and a revoked curator can never
+    ///      be registered again (`InvalidCuratorTransition`). Registration alone grants no capacity: the curator also
+    ///      needs a non-zero `curatorCeiling`. Owner may register and deregister; the guardian may only deregister.
+    ///
+    ///      Deregistration stops new allocations at once and raises the curator's generation by one, so any
+    ///      instruction the curator issued earlier but that was never turned into an allocation is dead, and
+    ///      registering the curator again later does not bring it back. Example: a curator at generation 4 is
+    ///      deregistered (generation 5) and registered again (still 5); an instruction tagged 4 stays invalid.
+    ///      Allocations the curator already made are commitments to their hooks and stay consumable; to stop them,
+    ///      freeze or revoke the curator, or release the allocations. Deregistering also raises the generation when
+    ///      the curator is already deregistered. Reverts with `GenerationExhausted` if the generation is already
+    ///      type(uint32).max; `freezeCurator` and `revokeCurator` never touch the generation and still work then.
     /// @param curator Curator address. Must be non-zero.
-    /// @param registered True to register, false to revoke.
+    /// @param registered True to register, false to deregister.
     function setCurator(address curator, bool registered) external {
         if (curator == address(0)) revert ZeroAddress();
         _authorize(!registered);
-        isCurator[curator] = registered;
-        emit CuratorSet(curator, registered);
+        CuratorRecord memory r = _curators[curator];
+        if (registered) {
+            if (r.restriction == CuratorRestriction.Revoked) revert InvalidCuratorTransition(curator, r.restriction);
+        } else {
+            r.generation = _nextGeneration(curator, r.generation);
+        }
+        r.registered = registered;
+        _writeCurator(curator, r);
+    }
+
+    /// @notice Temporarily suspend a curator: it can create nothing, and none of its allocations can be consumed.
+    /// @dev Owner or guardian. Takes effect in the same transaction: the next `exchange` against any of the
+    ///      curator's allocations reverts with `CuratorRestricted`, however many allocations there are, because
+    ///      `exchange` reads the curator's restriction on every call. Nothing else changes: no assets move, the
+    ///      curator's allocations keep their reservations in Q_a and `curatorReserved`, and registration and
+    ///      generation are untouched. Keeping the reservations means an unfreeze can never leave an allocation
+    ///      without backing; the cost is that LP exits treat that capacity as committed until the allocations are
+    ///      canceled, released by the owner or guardian, or expire (at most MAX_HORIZON). Reverts with
+    ///      `InvalidCuratorTransition` unless the curator is currently unrestricted. Works while paused.
+    /// @param curator Curator to freeze. Must be non-zero; it need not be registered.
+    function freezeCurator(address curator) external {
+        if (curator == address(0)) revert ZeroAddress();
+        _authorize(true);
+        CuratorRecord memory r = _curators[curator];
+        if (r.restriction != CuratorRestriction.None) revert InvalidCuratorTransition(curator, r.restriction);
+        r.restriction = CuratorRestriction.Frozen;
+        _writeCurator(curator, r);
+    }
+
+    /// @notice Lift a freeze. The curator's existing allocations become consumable again.
+    /// @dev Owner only: the guardian can impose a freeze but never lift one. Raises the generation by one, so
+    ///      instructions issued before or during the freeze cannot be turned into allocations afterwards. Does not
+    ///      change registration: a curator deregistered while frozen comes back deregistered. Reverts with
+    ///      `InvalidCuratorTransition` unless the curator is frozen (a revoked curator can never be unfrozen), and
+    ///      with `GenerationExhausted` if the generation cannot be raised, in which case the curator stays frozen.
+    /// @param curator Frozen curator.
+    function unfreezeCurator(address curator) external onlyOwner {
+        CuratorRecord memory r = _curators[curator];
+        if (r.restriction != CuratorRestriction.Frozen) revert InvalidCuratorTransition(curator, r.restriction);
+        r.restriction = CuratorRestriction.None;
+        r.generation = _nextGeneration(curator, r.generation);
+        _writeCurator(curator, r);
+    }
+
+    /// @notice Permanently revoke a curator: it can never create or execute again, and anyone may release its
+    ///         allocations.
+    /// @dev Owner or guardian. One storage write whatever the number of allocations: `exchange` rejects every
+    ///      allocation of a revoked curator from this transaction on. The reservations stay in Q_a and
+    ///      `curatorReserved` until each allocation is closed; `release` accepts a call from anyone for an
+    ///      allocation of a revoked curator, so keepers, LPs or the guardian can clean up one allocation per call.
+    ///      Until then that capacity cannot be consumed by anyone and is not available to LP exits; it is never
+    ///      double counted, because each allocation can be closed only once. Also deregisters the curator.
+    ///      Revocation is terminal: `setCurator(c, true)` and `unfreezeCurator` revert for a revoked curator, even
+    ///      after the owner or guardian changes. The generation is not changed (revocation must never fail); a
+    ///      revoked curator cannot create allocations whatever its generation. Reverts with
+    ///      `InvalidCuratorTransition` if the curator is already revoked. Works while paused.
+    /// @param curator Curator to revoke. Must be non-zero; it need not be registered.
+    function revokeCurator(address curator) external {
+        if (curator == address(0)) revert ZeroAddress();
+        _authorize(true);
+        CuratorRecord memory r = _curators[curator];
+        if (r.restriction == CuratorRestriction.Revoked) revert InvalidCuratorTransition(curator, r.restriction);
+        r.registered = false;
+        r.restriction = CuratorRestriction.Revoked;
+        _writeCurator(curator, r);
+    }
+
+    /// @notice Raise the caller's own generation by one, invalidating every instruction it issued that has not
+    ///         been turned into an allocation yet.
+    /// @dev Anyone may call; it only changes the caller's own record. Works in every state and while paused, so a
+    ///      deregistered, frozen or revoked curator can still invalidate its outstanding instructions. Allocations
+    ///      that already exist are not affected. Reverts with `GenerationExhausted` at type(uint32).max.
+    /// @return generation The caller's new generation.
+    function bumpGeneration() external returns (uint32 generation) {
+        CuratorRecord memory r = _curators[msg.sender];
+        generation = _nextGeneration(msg.sender, r.generation);
+        r.generation = generation;
+        _writeCurator(msg.sender, r);
     }
 
     /// @notice Set the most unused capacity `curator` may hold in `currency` across its unreleased allocations.
@@ -686,7 +782,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      available for the named hook until `req.expiry`, at no worse than `req.minInPerOutX96`. No assets move;
     ///      Q_a and the curator's reserved total rise by `maxOut`.
     ///
-    ///      Checks, in order: registered curator; deadline not passed; nonce unused; consumer registered and equal to
+    ///      Checks, in order: curator neither frozen nor revoked; registered curator; deadline not passed; nonce unused; consumer registered and equal to
     ///      `key.hooks`; pool currencies equal the vault's pair; `currencyOut` is one of them; direction configured
     ///      and not halted; curator floor >= vault floor; non-zero `maxOut` within MAX_AMOUNT; expiry in the future
     ///      and within MAX_HORIZON; curator ceiling; and the admission rule Q_a + maxOut + R_a + D_a <= N_a.
@@ -703,7 +799,9 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     /// @return allocationId Id of the new allocation. The swapper passes it to the hook as hookData.
     function allocate(AllocationRequest calldata req) external whenNotPaused returns (uint256 allocationId) {
         address curator = msg.sender;
-        if (!isCurator[curator]) revert CuratorNotRegistered(curator);
+        CuratorRecord memory record = _curators[curator];
+        if (record.restriction != CuratorRestriction.None) revert CuratorRestricted(curator, record.restriction);
+        if (!record.registered) revert CuratorNotRegistered(curator);
 
         if (req.deadline < block.timestamp) revert InstructionExpired(req.deadline);
         if (nonceUsed[curator][req.nonce]) revert NonceAlreadyUsed(curator, req.nonce);
@@ -758,16 +856,21 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
 
     /// @notice Close an allocation and return its unused capacity to free inventory.
     /// @dev Expiry is lazy: time passing does not change any storage. An expired allocation can no longer be
-    ///      consumed, but its unused capacity stays in Q_a until someone calls this function. After `expiry` anyone
-    ///      may call it. Before expiry only the owner or the guardian may, as an emergency measure, because an
-    ///      unexpired allocation is a commitment to its consumer. Its curator cannot release it early.
-    ///      (Curator cancellation of its own allocations is not implemented.)
+    ///      consumed, but its unused capacity stays in Q_a until someone calls this function. Who may call:
+    ///        - anyone, once the allocation has expired;
+    ///        - anyone, if its curator is revoked (permissionless cleanup: nobody can consume it any more);
+    ///        - otherwise only the owner or the guardian, as an emergency measure, because an unexpired allocation
+    ///          of a curator in good standing is a commitment to its consumer.
+    ///      Works while paused and whatever the curator's state.
     ///      Releasing moves no assets. It lowers Q_a and the curator's reserved total by maxOut - consumed, which
-    ///      raises F_a and can let queued redemptions progress.
+    ///      raises F_a and can let queued redemptions progress. Capacity already consumed is never returned.
     /// @param allocationId Allocation to release. Must exist and not already be released.
     function release(uint256 allocationId) external {
         Allocation storage a = _getLiveAllocation(allocationId);
-        if (block.timestamp < a.expiry && msg.sender != owner && msg.sender != guardian) {
+        if (
+            block.timestamp < a.expiry && _curators[a.curator].restriction != CuratorRestriction.Revoked
+                && msg.sender != owner && msg.sender != guardian
+        ) {
             revert AllocationNotExpired(allocationId, a.expiry);
         }
 
@@ -784,7 +887,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     // ==================================================================
 
     /// @inheritdoc ISharedCommitmentVault
-    /// @dev The caller must be a registered consumer and the allocation's named consumer, and `key` must be the
+    /// @dev The caller must be a registered consumer and the allocation's named consumer, the allocation's curator
+    ///      must be neither frozen nor revoked (its registration does not matter), and `key` must be the
     ///      allocation's pool with `key.hooks` equal to the caller. The trade must be in the allocation's direction,
     ///      before its expiry, within its remaining capacity, and at or above the effective price floor:
     ///
@@ -817,6 +921,10 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
 
         Allocation storage a = _getLiveAllocation(allocationId);
         if (a.consumer != msg.sender) revert ConsumerMismatch(a.consumer, msg.sender);
+        // A frozen or revoked curator's allocations stop here, in the same block as the freeze or revocation.
+        address curator = a.curator;
+        CuratorRestriction restriction = _curators[curator].restriction;
+        if (restriction != CuratorRestriction.None) revert CuratorRestricted(curator, restriction);
         if (address(key.hooks) != msg.sender) revert ConsumerMismatch(msg.sender, address(key.hooks));
         if (PoolId.unwrap(key.toId()) != PoolId.unwrap(a.poolId)) revert PoolMismatch();
         if (block.timestamp >= a.expiry) revert AllocationExpired(allocationId, a.expiry);
@@ -846,7 +954,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         // forge-lint: disable-next-line(unsafe-typecast) amountOut <= remaining <= maxOut (a uint128).
         a.consumed += uint128(amountOut);
         reserved[cout] -= amountOut;
-        curatorReserved[a.curator][cout] -= amountOut;
+        curatorReserved[curator][cout] -= amountOut;
         backing[cout] -= amountOut;
         backing[cin] = backingIn + amountIn;
 
@@ -866,6 +974,13 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     /// @return The allocation record.
     function getAllocation(uint256 allocationId) external view returns (Allocation memory) {
         return _allocations[allocationId];
+    }
+
+    /// @notice Stored record of a curator. All-zero for an address that was never touched.
+    /// @param curator Curator to read.
+    /// @return The curator record.
+    function getCurator(address curator) external view returns (CuratorRecord memory) {
+        return _curators[curator];
     }
 
     /// @notice Stored state of a withdrawal request. Returns an all-zero struct for an unknown id.
@@ -1028,6 +1143,20 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
             revert GuardianCannotIncreaseRisk();
         }
         revert NotOwner();
+    }
+
+    /// @dev Stores a curator record and emits it in full. Every change to a curator goes through here.
+    function _writeCurator(address curator, CuratorRecord memory r) internal {
+        _curators[curator] = r;
+        emit CuratorUpdated(curator, r.registered, r.restriction, r.generation, msg.sender);
+    }
+
+    /// @dev generation + 1, or `GenerationExhausted` at type(uint32).max. Never wraps to 0, so a generation value is
+    ///      never used twice for the same curator. Reaching the maximum takes 2^32 - 1 increments, each a separate
+    ///      call by the owner, the guardian or the curator itself.
+    function _nextGeneration(address curator, uint32 generation) internal pure returns (uint32) {
+        if (generation == type(uint32).max) revert GenerationExhausted(curator);
+        return generation + 1;
     }
 
     /// @dev a - b, or 0 if b > a.

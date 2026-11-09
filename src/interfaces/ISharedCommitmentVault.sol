@@ -106,6 +106,38 @@ interface ISharedCommitmentVault {
         Canceled
     }
 
+    /// @notice Emergency restriction on a curator's execution authority. It is separate from registration, which
+    ///         only controls whether the curator may create new allocations.
+    /// @dev None: no restriction; the curator's live allocations can be consumed. Frozen: temporary; nothing the
+    ///      curator created can be consumed and it cannot create anything, but its reservations stay in place. Only
+    ///      the owner can lift a freeze. Revoked: permanent; like Frozen, but it can never be lifted, and anyone may
+    ///      release the curator's allocations.
+    enum CuratorRestriction {
+        None,
+        Frozen,
+        Revoked
+    }
+
+    /// @notice A curator's stored state. All three fields share one storage slot.
+    /// @dev The four states the vault distinguishes:
+    ///        Active        registered, restriction None      creates allocations; its allocations are consumable
+    ///        Deregistered  not registered, restriction None  creates nothing; existing allocations stay consumable
+    ///        Frozen        restriction Frozen (either registration value)  creates nothing; nothing consumable
+    ///        Revoked       restriction Revoked, never registered again     creates nothing; nothing consumable, ever
+    ///      Registration and restriction are independent, so deregistering a frozen curator keeps it frozen, and
+    ///      re-registering a frozen curator does not lift the freeze.
+    /// @param registered  True if the owner registered the curator and it has not been deregistered since.
+    /// @param restriction Emergency restriction on execution; see `CuratorRestriction`.
+    /// @param generation  Counter for curator instructions that have not been turned into allocations yet. It
+    ///                    rises by one on every deregistration, on every unfreeze and when the curator calls
+    ///                    `bumpGeneration`, and never falls. An instruction tagged with an older generation is no
+    ///                    longer valid. No signed-instruction path exists yet, so nothing in this contract reads it.
+    struct CuratorRecord {
+        bool registered;
+        CuratorRestriction restriction;
+        uint32 generation;
+    }
+
     // ------------------------------------------------------------------
     // Errors: roles and generic input
     // ------------------------------------------------------------------
@@ -118,6 +150,15 @@ interface ISharedCommitmentVault {
     error GuardianCannotIncreaseRisk();
     /// @notice `allocate` was called by an address that is not a registered curator.
     error CuratorNotRegistered(address curator);
+    /// @notice The curator is frozen or revoked, so it cannot create allocations and its allocations cannot be
+    ///         consumed.
+    error CuratorRestricted(address curator, CuratorRestriction restriction);
+    /// @notice The requested curator state change is not allowed from the curator's current restriction. Examples:
+    ///         freezing a curator that is already frozen or revoked, lifting a freeze that is not in place, or
+    ///         registering a revoked curator.
+    error InvalidCuratorTransition(address curator, CuratorRestriction restriction);
+    /// @notice The curator's generation is already type(uint32).max and cannot be raised again. It never wraps.
+    error GenerationExhausted(address curator);
     /// @notice `unlockCallback` was called by something other than the PoolManager.
     error NotPoolManager();
     /// @notice A required address argument was zero.
@@ -199,7 +240,7 @@ interface ISharedCommitmentVault {
     error AllocationAlreadyReleased(uint256 allocationId);
     /// @notice The allocation's expiry has been reached; it can only be released now.
     error AllocationExpired(uint256 allocationId, uint64 expiry);
-    /// @notice Only the owner or guardian may release an allocation before its expiry.
+    /// @notice Before expiry, only the owner or guardian may release an allocation, unless its curator is revoked.
     error AllocationNotExpired(uint256 allocationId, uint64 expiry);
     /// @notice The swap's pool is not the pool the allocation is bound to.
     error PoolMismatch();
@@ -231,8 +272,11 @@ interface ISharedCommitmentVault {
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     /// @notice The guardian was appointed, replaced or removed (`newGuardian` = 0).
     event GuardianSet(address indexed previousGuardian, address indexed newGuardian);
-    /// @notice A curator was registered or revoked.
-    event CuratorSet(address indexed curator, bool registered);
+    /// @notice A curator's record changed: registration, restriction or generation. Carries the full new record.
+    ///         `by` is the caller (owner, guardian, or the curator itself for `bumpGeneration`).
+    event CuratorUpdated(
+        address indexed curator, bool registered, CuratorRestriction restriction, uint32 generation, address indexed by
+    );
     /// @notice The vault was paused or unpaused.
     event PausedSet(bool paused);
     /// @notice A consumer hook was registered or revoked.

@@ -39,6 +39,12 @@ interface IVaultState is ISharedCommitmentVault {
     /// @return halted True while the direction is halted.
     function sellPolicy(Currency currencyOut) external view returns (uint160 minInPerOutX96, bool halted);
 
+    /// @notice Stored record of a curator: registration, restriction and generation. All-zero for an address that
+    ///         was never touched (not registered, no restriction, generation 0).
+    /// @param curator Curator to read.
+    /// @return The curator record.
+    function getCurator(address curator) external view returns (CuratorRecord memory);
+
     /// @notice Stored state of a withdrawal request; an all-zero struct if the id does not exist.
     /// @param requestId Request to read.
     /// @return The request record.
