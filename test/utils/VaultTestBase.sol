@@ -24,9 +24,16 @@ import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVaul
 import {HookA_DynamicFee} from "../../src/hooks/HookA_DynamicFee.sol";
 import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
 import {BatchSwapRouter} from "./BatchSwapRouter.sol";
+import {ProductionArtifacts} from "./ProductionArtifacts.sol";
 
 /// @notice Shared fixture: REAL v4-core PoolManager (pinned), two distinct hooks on two distinct pools that
 ///         share one vault, and a funded vault. No PoolManager behaviour is mocked.
+/// @dev Production builds. The PoolManager and both hooks are deployed from their production artifact files
+///      (`ProductionArtifacts`), not compiled into this file: a file that imports the vault is compiled under the
+///      vault's 2,000-run profile, and a `new PoolManager` or a by-name `deployCode` here would deploy 2,000-run
+///      builds. The vault has a single artifact, so `new SharedCommitmentVault` is already its production build.
+///      `test/unit/ProductionBuilds.t.sol` checks every one of them against its artifact's recorded settings and
+///      runtime-code hash. Test-only contracts (routers, malicious hooks) are compiled here; they are never deployed.
 abstract contract VaultTestBase is Test {
     uint160 internal constant HOOK_FLAGS =
         Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG;
@@ -62,7 +69,7 @@ abstract contract VaultTestBase is Test {
     function setUp() public virtual {
         vm.warp(T0);
 
-        manager = new PoolManager(address(this));
+        manager = PoolManager(deployCode(ProductionArtifacts.poolManager(), abi.encode(address(this))));
         swapRouter = new PoolSwapTest(manager);
 
         MockERC20 ta = new MockERC20("Stable A", "STA", 18);
@@ -72,11 +79,11 @@ abstract contract VaultTestBase is Test {
         c1 = Currency.wrap(address(token1));
 
         vault = new SharedCommitmentVault(manager, owner, c0, c1);
-        lens = new VaultLens();
+        lens = VaultLens(deployCode(ProductionArtifacts.LENS));
         batchRouter = new BatchSwapRouter(manager, address(vault));
 
-        hookA = HookA_DynamicFee(_deployHook("HookA_DynamicFee.sol:HookA_DynamicFee", 0xA11CE));
-        hookB = HookB_BoundedImpact(_deployHook("HookB_BoundedImpact.sol:HookB_BoundedImpact", 0xB0B));
+        hookA = HookA_DynamicFee(_deployHook(ProductionArtifacts.HOOK_A, 0xA11CE));
+        hookB = HookB_BoundedImpact(_deployHook(ProductionArtifacts.HOOK_B, 0xB0B));
 
         keyA = PoolKey(c0, c1, 3000, 60, IHooks(address(hookA)));
         keyB = PoolKey(c0, c1, 500, 10, IHooks(address(hookB)));

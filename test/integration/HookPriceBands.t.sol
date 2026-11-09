@@ -15,6 +15,7 @@ import {HookA_DynamicFee} from "../../src/hooks/HookA_DynamicFee.sol";
 import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
+import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
 
 /// @notice The two production hooks (HookA_DynamicFee, HookB_BoundedImpact) under vault-enforced floors,
 ///         through the real PoolManager, in both directions, on an 18/18 pair (fixture) and a 6/18 USDC/WETH pair.
@@ -182,9 +183,9 @@ contract HookPriceBands6x18Test is VaultTestBase {
         v = new SharedCommitmentVault(manager, owner, x0, x1);
 
         address a = address(uint160(0x6A << 140) | FLAGS);
-        deployCodeTo("HookA_DynamicFee.sol:HookA_DynamicFee", abi.encode(manager, v, hookOwner), a);
+        deployCodeTo(ProductionArtifacts.HOOK_A, abi.encode(manager, v, hookOwner), a);
         address b = address(uint160(0x6B << 140) | FLAGS);
-        deployCodeTo("HookB_BoundedImpact.sol:HookB_BoundedImpact", abi.encode(manager, v, hookOwner), b);
+        deployCodeTo(ProductionArtifacts.HOOK_B, abi.encode(manager, v, hookOwner), b);
         address m = address(uint160(0x6C << 140) | Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG);
         deployCodeTo("MaliciousConsumerHook.sol:MaliciousConsumerHook", abi.encode(manager, v), m);
         (hA, hB, hM) = (HookA_DynamicFee(a), HookB_BoundedImpact(b), MaliciousConsumerHook(m));
@@ -371,5 +372,11 @@ contract HookPriceBands6x18Test is VaultTestBase {
         );
         _swapRaw(kM, cW == x0, -int256(req - 1), "");
         _swapRaw(kM, cW == x0, -int256(req), "");
+    }
+
+    /// @notice The 6/18-decimal hooks of this fixture are the production builds.
+    function test_productionBuilds6x18() public view {
+        ProductionArtifacts.requireProduction(address(hA), ProductionArtifacts.HOOK_A, ProductionArtifacts.DEFAULT_RUNS);
+        ProductionArtifacts.requireProduction(address(hB), ProductionArtifacts.HOOK_B, ProductionArtifacts.DEFAULT_RUNS);
     }
 }

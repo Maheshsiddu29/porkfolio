@@ -20,6 +20,7 @@ import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVaul
 import {ReentrantToken, ReentryAgent} from "../utils/ReentrantToken.sol";
 import {ScriptedHook} from "../utils/ScriptedHook.sol";
 import {ClaimDonor} from "../utils/ClaimDonor.sol";
+import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
 
 /// @notice Reentrancy: every external-call path of the vault, attacked from the two places foreign code can run.
 /// @dev Two kinds of attacker, both against the real PoolManager:
@@ -71,7 +72,7 @@ contract ReentrancyTest is Test {
 
     function setUp() public {
         vm.warp(1_700_000_000);
-        manager = new PoolManager(address(this));
+        manager = PoolManager(deployCode(ProductionArtifacts.poolManager(), abi.encode(address(this))));
         router = new PoolSwapTest(manager);
         ReentrantToken a = new ReentrantToken("A", "A");
         ReentrantToken b = new ReentrantToken("B", "B");
@@ -541,5 +542,13 @@ contract ReentrancyTest is Test {
             assertLe(vault.reserved(cs[i]) + vault.claimableAssets(cs[i]), vault.backing(cs[i]), "Q + W > B");
             assertEq(manager.balanceOf(address(hook), cs[i].toId()), 0, "hook kept claims");
         }
+    }
+
+    /// @notice This file builds its own fixture; its vault and PoolManager are the production builds.
+    function test_RE_productionBuilds() public view {
+        ProductionArtifacts.requireProduction(address(vault), ProductionArtifacts.VAULT, ProductionArtifacts.VAULT_RUNS);
+        ProductionArtifacts.requireProduction(
+            address(manager), ProductionArtifacts.poolManager(), ProductionArtifacts.DEFAULT_RUNS
+        );
     }
 }
