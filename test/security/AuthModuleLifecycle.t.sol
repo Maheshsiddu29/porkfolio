@@ -16,8 +16,8 @@ import {MaliciousAuthModule} from "../utils/MaliciousAuthModule.sol";
 /// @dev The properties: only the owner installs; the guardian can only disable; a module that leaves office is
 ///      retired for good; disabling or replacing the module changes nothing but the creation of new allocations
 ///      (swaps, cancellation, release, every LP path and every risk record keep working unchanged); signatures die
-///      with their module; the vault never calls the module; and a module that forges `reserveFor` calls is still
-///      bound by every vault-side check.
+///      with their module; the vault calls a module only once, read-only, to check its `vault()` at installation;
+///      and a module that forges `reserveFor` calls is still bound by every vault-side check.
 contract AuthModuleLifecycleTest is AuthTestBase {
     ISharedCommitmentVault.RiskScope internal constant HOOK = ISharedCommitmentVault.RiskScope.Hook;
     ISharedCommitmentVault.RiskScope internal constant CURATOR = ISharedCommitmentVault.RiskScope.Curator;
@@ -77,7 +77,10 @@ contract AuthModuleLifecycleTest is AuthTestBase {
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.AuthModuleRetired.selector, address(auth)));
         vault.setAuthModule(address(auth));
         vault.setAuthModule(address(m3));
-        vault.setAuthModule(address(m3)); // setting the installed module again keeps it installed
+        // Installing the installed module again would retire it first, so it is refused and nothing changes.
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.AuthModuleRetired.selector, address(m3)));
+        vault.setAuthModule(address(m3));
+        assertEq(vault.authModule(), address(m3));
         vm.stopPrank();
         vm.prank(relayer);
         m3.activate(_authzSigned(m3), keyA, _lastSig);
@@ -179,13 +182,16 @@ contract AuthModuleLifecycleTest is AuthTestBase {
         vault.cancelAllocation(id); // and cancellable
     }
 
-    /// @notice A module built for another vault gains nothing by being installed here: it only ever calls its own
-    ///         vault, which rejects it, and it refuses instructions naming this vault.
-    function test_ML_moduleForAnotherVaultCannotReserveHere() public {
+    /// @notice A module built for another vault cannot be installed here (its `vault()` names the other vault). Even
+    ///         if it could, it would gain nothing: it only ever calls its own vault, which rejects it, and it refuses
+    ///         instructions naming this vault.
+    function test_ML_moduleForAnotherVaultRefused() public {
         SharedCommitmentVault v2 = new SharedCommitmentVault(manager, owner, c0, c1);
         CuratorAuthorization foreign = _deployAuth(v2);
         vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InvalidAuthModule.selector, address(foreign)));
         vault.setAuthModule(address(foreign));
+        assertEq(vault.authModule(), address(auth), "the installed module is unchanged");
         uint256 nextId = vault.nextAllocationId();
 
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c1, 1000 ether);
@@ -213,13 +219,16 @@ contract AuthModuleLifecycleTest is AuthTestBase {
         }
     }
 
-    /// @notice The vault never calls the module: not on deposits, redemptions, queue processing, claims, swaps,
-    ///         cancellation, release, configuration, or when a module is installed or retired.
-    function test_ML_vaultNeverCallsModule() public {
+    /// @notice The vault calls a module exactly once: a read-only `vault()` call when the owner installs it. It never
+    ///         calls the installed or the retired module on deposits, redemptions, queue processing, claims, swaps,
+    ///         cancellation, release, configuration, or when a module is retired. The two expectations on `m2` together
+    ///         say "one call in total, and that call is `vault()`".
+    function test_ML_vaultCallsModuleOnlyAtInstall() public {
         uint256 id = _allocate(keyA, c1, 50_000 ether);
         CuratorAuthorization m2 = _deployAuth(vault);
         vm.expectCall(address(auth), bytes(""), 0);
-        vm.expectCall(address(m2), bytes(""), 0);
+        vm.expectCall(address(m2), bytes(""), 1);
+        vm.expectCall(address(m2), abi.encodeWithSignature("vault()"), 1);
         _swap(keyA, true, 1000 ether, id);
         _depositShares(makeAddr("lpX"), 1000 ether);
         (,,, uint256 req) = _redeem(makeAddr("lpX"), 500 ether, true);

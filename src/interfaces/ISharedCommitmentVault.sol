@@ -216,8 +216,12 @@ interface ISharedCommitmentVault {
     error NotAuthModule(address caller);
     /// @notice The instruction was authorized under a generation that is no longer the curator's current one.
     error StaleGeneration(address curator, uint32 authorizedGeneration, uint32 currentGeneration);
-    /// @notice This module was installed earlier and then replaced or disabled; it can never be installed again.
+    /// @notice This module was installed earlier and then replaced or disabled, so it can never be installed again;
+    ///         or it is the module installed now (installing retires the current module first).
     error AuthModuleRetired(address module);
+    /// @notice The candidate module did not answer `vault()` with this vault's address: no code, no such getter, a
+    ///         reverting getter, a short answer, or another address.
+    error InvalidAuthModule(address module);
     /// @notice `unlockCallback` was called by something other than the PoolManager.
     error NotPoolManager();
     /// @notice A state-changing entry point was called while another one was still executing in the same

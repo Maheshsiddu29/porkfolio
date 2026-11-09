@@ -115,10 +115,10 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 /// calling, and keeps the curators' nonces; it then tells the vault "this curator authorized this request under this
 /// generation". The vault trusts it for nothing else: registration, restriction, generation, hook, pool, pair,
 /// direction, floors, capacity, ceiling, admission, exposure caps and deadline are all checked here. The module holds
-/// no assets, is never called by the vault, and is not involved in `exchange`, cancellation, release or any LP path,
-/// so disabling or replacing it (`setAuthModule`) affects only the creation of new allocations. A compromised module
-/// can do at most what every registered, unrestricted curator could do together: reserve within their ceilings and
-/// every vault-side limit.
+/// no assets and is not involved in `exchange`, cancellation, release or any LP path, so disabling or replacing it
+/// (`setAuthModule`) affects only the creation of new allocations. The vault calls the module once, read-only, when
+/// the owner installs it (to read `vault()`), and never otherwise. A compromised module can do at most what every
+/// registered, unrestricted curator could do together: reserve within their ceilings and every vault-side limit.
 ///
 /// Not implemented here: rolling-window flow limits (the flow window is a fixed epoch; see `FLOW_WINDOW`),
 /// path-independent cumulative pricing, epoch-based expiry of commitments, transferable share tokens, and any
@@ -1018,28 +1018,49 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     }
 
     /// @notice Install, replace or disable the authorization module, the only caller `reserveFor` accepts.
-    /// @dev Owner: may install any module that was never installed before (replacing the current one) or set zero.
+    /// @dev Owner: may install a module that was never installed before (replacing the current one) or set zero.
     ///      Guardian: may only set zero, which stops every new allocation through the module in this transaction.
     ///      Nobody else. The module being replaced, if any, is retired for good: it can never be installed again
     ///      (`AuthModuleRetired`). That is what keeps an old module's unused signatures and nonce state from ever
-    ///      regaining authority, whether the module was replaced or disabled. Resuming after a disable therefore
-    ///      means deploying a new module; to stop new allocations temporarily instead, lower the vault-scope
-    ///      exposure caps (`setRiskLimit`), deregister curators or pause.
+    ///      regaining authority, whether the module was replaced or disabled. Installing the module that is already
+    ///      installed also reverts with `AuthModuleRetired`, because installing retires the current module first.
+    ///      Resuming after a disable therefore means deploying a new module; to stop new allocations temporarily
+    ///      instead, lower the vault-scope exposure caps (`setRiskLimit`), deregister curators or pause.
+    ///
+    ///      Installation check. A non-zero `module` must answer `vault()` with exactly this vault's address, or the
+    ///      call reverts with `InvalidAuthModule`. The vault reads it with one `staticcall`, so the candidate cannot
+    ///      change any state. The check fails closed when the address has no code (the call returns no data), when
+    ///      the contract has no such getter or its getter reverts, when it returns fewer than 32 bytes, and when the
+    ///      first returned word is not this address with clean upper bits. Only the first 32 bytes of the answer
+    ///      are copied. All remaining gas is forwarded, so a candidate that burns gas makes this transaction fail.
+    ///      This catches deployment mistakes such as a module built for another vault, a wrong address or an
+    ///      unrelated contract. It does not prove the module is safe: a malicious contract can return this address
+    ///      and do anything else. Code review, source verification and the owner's governance process are still
+    ///      required; what a module can do once installed is bounded by `reserveFor`'s checks. This is the only
+    ///      call from the vault to a module.
     ///
     ///      Nothing else changes: existing allocations stay consumable, cancellable and releasable; swaps, LP
     ///      deposits, redemptions, queue processing and claims never involve the module; flow usage, exposure
     ///      records and curator records are untouched. Signatures made for the old module do not verify under a new
-    ///      one, because the EIP-712 domain includes the module's address.
-    ///
-    ///      The vault does not call the module. The module records its vault at deployment and only ever calls that
-    ///      vault, so installing a module built for another vault gives it no way to call this one. Works while
-    ///      paused.
+    ///      one, because the EIP-712 domain includes the module's address. Works while paused.
     /// @param module New module, or address(0) to disable.
     function setAuthModule(address module) external {
         _authorize(module == address(0));
-        if (_retiredAuthModule[module]) revert AuthModuleRetired(module);
+        if (module != address(0)) {
+            bool ok;
+            assembly ("memory-safe") {
+                // Calldata is the 4-byte selector of `vault()` (0xfbfa77cf), stored in the last 4 bytes of the
+                // scratch word at 0x00, so it starts at offset 28. The answer's first word overwrites that word.
+                mstore(0x00, 0xfbfa77cf)
+                let success := staticcall(gas(), module, 28, 4, 0x00, 0x20)
+                // Read returndatasize and the answer only after the call: Yul evaluates arguments right to left.
+                ok := and(success, and(gt(returndatasize(), 31), eq(mload(0x00), address())))
+            }
+            if (!ok) revert InvalidAuthModule(module);
+        }
         address previous = authModule;
         if (previous != address(0)) _retiredAuthModule[previous] = true;
+        if (_retiredAuthModule[module]) revert AuthModuleRetired(module);
         authModule = module;
         emit AuthModuleSet(previous, module, msg.sender);
     }
