@@ -19,12 +19,16 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
 import {VaultLens} from "../../src/VaultLens.sol";
 import {CuratorAuthorization} from "../../src/CuratorAuthorization.sol";
+import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
+import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {AuthModeHook} from "../utils/AuthModeHook.sol";
 import {ClaimDonor} from "../utils/ClaimDonor.sol";
 
-/// @notice Random action sequences against the real PoolManager: allocations by three curators, swaps through three
+/// @notice Random action sequences against the real PoolManager: allocations by three curators (direct and EIP-712
+///         signed, through the authorization module, with fresh, colliding, stale and invalidated nonces and
+///         generations), module replacement, disabling and attempted reinstatement, swaps through three
 ///         hooks (HookA, HookB, a 1:1 test hook that can drain an asset to zero), time, releases, curator
 ///         cancellations, curator registration, deregistration, freeze, unfreeze, revocation and generation bumps,
 ///         owner and guardian rotation, ERC-6909 donations, multi-LP deposits, instant/queued redemptions (with
@@ -180,9 +184,15 @@ contract VaultHandler is Test {
         guardian = guardian_;
     }
 
-    /// @dev Called once by the invariant contract's setUp (not a fuzz target): the installed module.
-    function setAuth(CuratorAuthorization auth_) external {
+    /// @dev Called once by the invariant contract's setUp (not a fuzz target): the installed module, and the keys of
+    ///      the curators so the handler can sign for them.
+    function setAuth(CuratorAuthorization auth_, address[] calldata signers, uint256[] calldata keys) external {
         auth = auth_;
+        modules.push(address(auth_));
+        baseAllocationId = vault.nextAllocationId();
+        for (uint256 i; i < signers.length; ++i) {
+            signerKey[signers[i]] = keys[i];
+        }
     }
 
     /// @dev Called once by the invariant contract's setUp (not a fuzz target). `owner2` and `guardian2` are the
@@ -231,6 +241,9 @@ contract VaultHandler is Test {
                 }
             }
         }
+        // One in four direct allocations reuses the small nonce range the signed action draws from, so the two paths
+        // collide in the shared bitmap. High bits, so the fixed sequences in the progress tests are unaffected.
+        if ((seed >> 20) % 4 == 1) smallNonce = 1 + (seed >> 24) % 64; // stored + 1, so 0 means "not set"
         _allocate(who, key, out, bound(maxOut, 1 ether, 1_500_000 ether), bound(lifetime, 1, 30 days));
     }
 
@@ -697,6 +710,211 @@ contract VaultHandler is Test {
     bool public revokedEscaped; // INV-C2: a revoked curator became unrevoked or registered
 
     // ------------------------------------------------------------------
+    // Authorization module: signed activations, nonces, module lifecycle
+    // ------------------------------------------------------------------
+
+    /// Every module ever installed, oldest first. The last one is the current module unless the vault has none.
+    address[] public modules;
+    /// Set when a module leaves office (replaced or disabled). The vault must never accept it again.
+    mapping(address => bool) public ghostRetired;
+    /// allocation id the vault will assign next when the campaign starts; every later id must come from an
+    /// activation the handler saw succeed (INV-M2).
+    uint256 public baseAllocationId;
+    uint256 public ghostAllocationsCreated;
+    /// Ghost record of every (module, curator, nonce) the handler saw activate or invalidate. Bits are never cleared,
+    /// so each must still read as used in its module (INV-C6).
+    mapping(bytes32 => bool) internal ghostNonceUsed;
+    address[] internal nonceModule;
+    address[] internal nonceCurator;
+    uint256[] internal nonceValue;
+    mapping(address => uint256) internal signerKey;
+    address internal relayer = address(0xBEEF);
+    uint256 internal smallNonce; // non-zero: the next direct allocation uses smallNonce - 1
+
+    bool public staleActivation; // INV-C3: a signed activation succeeded with a generation that was not current
+    bool public nonceReused; // INV-C6: an activation succeeded with a nonce already used or invalidated
+    bool public moduleBypass; // an activation succeeded through a module that was not installed
+    bool public moduleActionMovedState; // INV-M8: installing or disabling a module changed anything else
+    bool public retiredRevived; // a retired module was installed again
+    bool public guardianInstalledModule; // the guardian installed a module
+    uint256 public signedOk;
+    uint256 public signedRefusals;
+    uint256 public staleRefusals;
+    uint256 public invalidationsOk;
+    uint256 public moduleInstallsOk;
+    uint256 public moduleDisablesOk;
+    uint256 public moduleRefusals;
+
+    function moduleCount() external view returns (uint256) {
+        return modules.length;
+    }
+
+    function nonceRecordCount() external view returns (uint256) {
+        return nonceValue.length;
+    }
+
+    function nonceRecord(uint256 i) external view returns (address, address, uint256) {
+        return (nonceModule[i], nonceCurator[i], nonceValue[i]);
+    }
+
+    /// @notice A relayer submits an EIP-712 instruction signed by one of the curators. One in four uses a stale or
+    ///         future generation, half draw the nonce from a small range shared with direct allocations and
+    ///         invalidations, and one in four goes to a module chosen at random from every module ever installed
+    ///         (retired ones included). Checks at the moment of activation: the generation was current (INV-C3), the
+    ///         nonce was unused (INV-C6), the module was the installed one, plus the admission, exposure and
+    ///         restriction checks of the direct path.
+    function activateSigned(uint256 seed, uint256 maxOut, uint256 lifetime, uint256 nonceSeed) external {
+        PoolKey memory key = seed % 2 == 0 ? keyA : keyB;
+        Currency out = (seed >> 1) % 2 == 0 ? c0 : c1;
+        address who = curators[(seed >> 2) % curators.length];
+        CuratorAuthorization m =
+            (seed >> 12) % 4 == 0 ? CuratorAuthorization(modules[(seed >> 14) % modules.length]) : _module();
+        uint32 current = vault.getCurator(who).generation;
+        uint32 gen = current;
+        uint256 g = (seed >> 4) % 8;
+        if (g == 0 && current > 0) gen = current - 1;
+        else if (g == 1 && current < type(uint32).max) gen = current + 1;
+        uint256 n = (seed >> 8) % 2 == 0 ? nonceSeed % 64 : nonce++;
+        ICuratorAuthorization.AllocationAuthorization memory a = ICuratorAuthorization.AllocationAuthorization({
+            curator: who,
+            generation: gen,
+            vault: address(vault),
+            poolId: key.toId(),
+            hook: address(key.hooks),
+            currencyIn: out == c1 ? c0 : c1,
+            currencyOut: out,
+            zeroForOne: out == c1,
+            // forge-lint: disable-next-line(unsafe-typecast)
+            maxOut: uint128(bound(maxOut, 1 ether, 1_500_000 ether)),
+            minInPerOutX96: _curatorFloor(out),
+            expiry: uint64(block.timestamp + bound(lifetime, 1, 30 days)),
+            validAfter: uint64(block.timestamp),
+            deadline: uint64(block.timestamp),
+            nonce: n
+        });
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey[who], m.hashAuthorization(a));
+        bool installed = address(m) == vault.authModule();
+        bool usedBefore = m.isNonceUsed(who, n);
+        uint256 admissible = vault.admissibleCapacity(out);
+        ISharedCommitmentVault.CuratorRecord memory rec = vault.getCurator(who);
+        Snap memory p = _take();
+        vm.prank(relayer);
+        try m.activate(a, key, abi.encodePacked(r, s, v)) returns (uint256 id) {
+            signedOk++;
+            ghostAllocationsCreated++;
+            allocationIds.push(id);
+            if (gen != current) staleActivation = true;
+            if (!installed) moduleBypass = true;
+            if (usedBefore || ghostNonceUsed[_nonceKey(address(m), who, n)]) nonceReused = true;
+            _markNonce(address(m), who, n);
+            if (!rec.registered || rec.restriction != ISharedCommitmentVault.CuratorRestriction.None) {
+                restrictedCreation = true;
+            }
+            if (a.maxOut > admissible) admissionViolated = true;
+            _checkExposure(address(key.hooks), who, out);
+            if (vault.backing(c0) != p.b0 || vault.backing(c1) != p.b1) balanceMismatch = true;
+            _checkWUnchanged(p);
+        } catch (bytes memory err) {
+            signedRefusals++;
+            if (bytes4(err) == ISharedCommitmentVault.StaleGeneration.selector) staleRefusals++;
+            // A reverted activation spends nothing.
+            if (!usedBefore && m.isNonceUsed(who, n)) nonceReused = true;
+        }
+    }
+
+    /// @notice A curator invalidates a nonce from the shared small range in the current (or last) module.
+    function invalidateNonce(uint256 seed, uint256 nonceSeed) external {
+        address who = curators[seed % curators.length];
+        CuratorAuthorization m = _module();
+        uint256 n = nonceSeed % 64;
+        vm.prank(who);
+        m.invalidateNonces(n >> 8, 1 << (n & 0xff));
+        invalidationsOk++;
+        _markNonce(address(m), who, n);
+    }
+
+    /// @notice The owner installs a freshly deployed production-build module. The previous one (if any) retires.
+    function moduleReplace() external {
+        bytes32 before = _moduleSnap();
+        address prev = vault.authModule();
+        address m = deployCode(ProductionArtifacts.authModule(), abi.encode(address(vault)));
+        vm.prank(owner);
+        vault.setAuthModule(m);
+        if (prev != address(0)) ghostRetired[prev] = true;
+        modules.push(m);
+        moduleInstallsOk++;
+        if (_moduleSnap() != before) moduleActionMovedState = true;
+    }
+
+    /// @notice The guardian (or the owner) disables the module. The module it removes retires.
+    function moduleDisable(bool asGuardian) external {
+        bytes32 before = _moduleSnap();
+        address prev = vault.authModule();
+        vm.prank(asGuardian ? guardian : owner);
+        vault.setAuthModule(address(0));
+        if (prev != address(0)) ghostRetired[prev] = true;
+        moduleDisablesOk++;
+        if (_moduleSnap() != before) moduleActionMovedState = true;
+    }
+
+    /// @notice The owner tries to reinstall a retired module, or the guardian tries to install any module. Both must
+    ///         always be refused.
+    function moduleTryReinstall(uint256 seed, bool asGuardian) external {
+        address m = modules[seed % modules.length];
+        if (!asGuardian && !ghostRetired[m]) return;
+        vm.prank(asGuardian ? guardian : owner);
+        try vault.setAuthModule(m) {
+            if (asGuardian) guardianInstalledModule = true;
+            else retiredRevived = true;
+        } catch {
+            moduleRefusals++;
+        }
+    }
+
+    /// @dev The installed module, or the most recent one while the vault has none (calls through it must fail).
+    function _module() internal view returns (CuratorAuthorization) {
+        address installed = vault.authModule();
+        return CuratorAuthorization(installed != address(0) ? installed : modules[modules.length - 1]);
+    }
+
+    function _takeNonce() internal returns (uint256 n) {
+        if (smallNonce != 0) {
+            n = smallNonce - 1;
+            smallNonce = 0;
+        } else {
+            n = nonce++;
+        }
+    }
+
+    function _nonceKey(address m, address who, uint256 n) internal pure returns (bytes32) {
+        return keccak256(abi.encode(m, who, n));
+    }
+
+    function _markNonce(address m, address who, uint256 n) internal {
+        bytes32 k = _nonceKey(m, who, n);
+        if (ghostNonceUsed[k]) return;
+        ghostNonceUsed[k] = true;
+        if (nonceValue.length < 512) {
+            nonceModule.push(m);
+            nonceCurator.push(who);
+            nonceValue.push(n);
+        }
+    }
+
+    /// @dev Everything a module change must leave alone: the curator-action snapshot (balances, B_a, W_a, Q_a, every
+    ///      curator's reserved totals, shares, queue, counters), every curator record and all 14 risk records.
+    function _moduleSnap() internal view returns (bytes32 h) {
+        h = _lifecycleSnap();
+        for (uint256 i; i < curators.length; ++i) {
+            h = keccak256(abi.encode(h, vault.getCurator(curators[i])));
+        }
+        for (uint256 i; i < 14; ++i) {
+            (ISharedCommitmentVault.RiskScope scope, address account, Currency c) = riskRecord(i);
+            h = keccak256(abi.encode(h, vault.getRiskLimit(scope, account, c)));
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Risk limits: flow ghosts, exposure, configuration
     // ------------------------------------------------------------------
 
@@ -856,17 +1074,24 @@ contract VaultHandler is Test {
             maxOut: uint128(maxOut),
             minInPerOutX96: _curatorFloor(out), // must be >= the live vault floor or reserveFor reverts
             expiry: uint64(block.timestamp + lifetime),
-            nonce: nonce++,
+            nonce: _takeNonce(),
             deadline: uint64(block.timestamp)
         });
         uint256 admissible = vault.admissibleCapacity(out);
         ISharedCommitmentVault.CuratorRecord memory rec = vault.getCurator(who);
         Snap memory p = _take();
+        CuratorAuthorization m = _module();
+        bool installed = address(m) == vault.authModule();
+        bool usedBefore = m.isNonceUsed(who, req.nonce);
         vm.prank(who);
-        try auth.activateDirect(req) returns (uint256 newId) {
+        try m.activateDirect(req) returns (uint256 newId) {
             id = newId;
             allocationIds.push(id);
             allocationsOk++;
+            ghostAllocationsCreated++;
+            if (!installed) moduleBypass = true;
+            if (usedBefore || ghostNonceUsed[_nonceKey(address(m), who, req.nonce)]) nonceReused = true;
+            _markNonce(address(m), who, req.nonce);
             if (!rec.registered || rec.restriction != ISharedCommitmentVault.CuratorRestriction.None) {
                 restrictedCreation = true;
             }
@@ -1062,14 +1287,18 @@ contract VaultInvariantsTest is VaultTestBase {
         vault.setCuratorCeiling(curator3, c1, 500_000 ether);
         vm.stopPrank();
         handler.setGuardian(guardianAddr);
-        handler.setAuth(auth);
         address[] memory cs = new address[](3);
         cs[0] = curator;
         cs[1] = curator2;
         cs[2] = curator3;
+        uint256[] memory keys = new uint256[](3);
+        (, keys[0]) = makeAddrAndKey("curator");
+        (, keys[1]) = makeAddrAndKey("curator2");
+        (, keys[2]) = makeAddrAndKey("curator3");
+        handler.setAuth(auth, cs, keys);
         handler.setLifecycle(cs, makeAddr("owner2"), makeAddr("guardian2"));
 
-        bytes4[] memory selectors = new bytes4[](31);
+        bytes4[] memory selectors = new bytes4[](38);
         selectors[0] = VaultHandler.allocate.selector;
         selectors[1] = VaultHandler.swap.selector;
         selectors[2] = VaultHandler.warp.selector;
@@ -1101,6 +1330,13 @@ contract VaultInvariantsTest is VaultTestBase {
         selectors[28] = VaultHandler.riskOwnerSet.selector;
         selectors[29] = VaultHandler.riskGuardianTighten.selector;
         selectors[30] = VaultHandler.riskGuardianTryLoosen.selector;
+        selectors[31] = VaultHandler.activateSigned.selector;
+        selectors[32] = VaultHandler.activateSigned.selector; // signed activation weighted x2
+        selectors[33] = VaultHandler.invalidateNonce.selector;
+        selectors[34] = VaultHandler.moduleReplace.selector;
+        selectors[35] = VaultHandler.moduleReplace.selector; // so that a disable does not starve activation
+        selectors[36] = VaultHandler.moduleDisable.selector;
+        selectors[37] = VaultHandler.moduleTryReinstall.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -1424,7 +1660,51 @@ contract VaultInvariantsTest is VaultTestBase {
     }
 
     /// @dev Logged (not asserted) per run; only the final run's log is printed by forge.
+    /// INV-C3: every signed activation that succeeded named the curator's generation at that moment.
+    function invariant_signedActivationUsesCurrentGeneration() public view {
+        assertFalse(handler.staleActivation());
+    }
+
+    /// INV-C6: a (module, curator, nonce) activates at most once, across the signed and direct paths and
+    /// invalidation; a reverted activation spends nothing; and no recorded bit is ever cleared.
+    function invariant_noncesSingleUse() public view {
+        assertFalse(handler.nonceReused());
+        for (uint256 i; i < handler.nonceRecordCount(); ++i) {
+            (address m, address c, uint256 n) = handler.nonceRecord(i);
+            assertTrue(CuratorAuthorization(m).isNonceUsed(c, n), "nonce bit cleared");
+        }
+    }
+
+    /// INV-M2: allocations are created only through the installed module. Every id the vault assigned since setUp
+    /// belongs to an activation the handler saw succeed, and none came through a module that was not installed.
+    function invariant_onlyInstalledModuleCreatesAllocations() public view {
+        assertEq(vault.nextAllocationId(), handler.baseAllocationId() + handler.ghostAllocationsCreated());
+        assertFalse(handler.moduleBypass());
+    }
+
+    /// INV-M8: installing, replacing or disabling the module moves no asset, share, queue entry, reservation, risk
+    /// record or curator record. Retired modules never return, the guardian never installs one, and the vault's
+    /// module is always the latest one installed (or none).
+    function invariant_moduleLifecycle() public view {
+        assertFalse(handler.moduleActionMovedState());
+        assertFalse(handler.retiredRevived());
+        assertFalse(handler.guardianInstalledModule());
+        address m = vault.authModule();
+        if (m != address(0)) {
+            assertEq(m, handler.modules(handler.moduleCount() - 1));
+            assertFalse(handler.ghostRetired(m));
+        }
+    }
+
     function afterInvariant() public view {
+        console2.log("signed ok/refused/stale:", handler.signedOk(), handler.signedRefusals(), handler.staleRefusals());
+        console2.log(
+            "invalidations/moduleInstalls/moduleDisables:",
+            handler.invalidationsOk(),
+            handler.moduleInstallsOk(),
+            handler.moduleDisablesOk()
+        );
+        console2.log("moduleRefusals:", handler.moduleRefusals());
         console2.log("alloc/swap/release:", handler.allocationsOk(), handler.swapsOk(), handler.releasesOk());
         console2.log("deposit/instant/queued:", handler.depositsOk(), handler.instantOk(), handler.queuedOk());
         console2.log("finalize/claim/cancel:", handler.finalizedOk(), handler.claimsOk(), handler.cancelsOk());
@@ -1612,5 +1892,50 @@ contract VaultInvariantsTest is VaultTestBase {
         invariant_flowHierarchyConsistent();
         invariant_exposureAndHookReserved();
         invariant_reservedIsExactAndBacked();
+    }
+
+    /// @notice The authorization actions make progress and their checks are live: a signed activation, a stale one, a
+    ///         nonce collision between the paths, an invalidation, a disable that stops both paths, a replacement,
+    ///         refused reinstatements, and a signature for a retired module.
+    function test_handler_authProgress() public {
+        // Seed bits: 0 pool (keyA), 1 asset (token0), 2-3 curator ((seed >> 2) % 3 == 0: curators[0]), 4-6 generation
+        // (2: current, 0: one below), 8 nonce range (0: nonceSeed % 64), 12-13 module (non-zero: the installed one).
+        uint256 s = 1 << 12 | 2 << 4; // (s >> 2) % 3 == 1032 % 3 == 0
+        uint256 sStale = 1 << 12 | 2 << 2; // (sStale >> 2) % 3 == 1026 % 3 == 0; (sStale >> 4) % 8 == 0
+        handler.activateSigned(s, 10_000 ether, 1 days, 7);
+        assertEq(handler.signedOk(), 1);
+        handler.activateSigned(s, 10_000 ether, 1 days, 7); // nonce 7 again
+        assertEq(handler.signedRefusals(), 1);
+        handler.curatorBump(0);
+        handler.activateSigned(sStale, 10_000 ether, 1 days, 9); // generation one below the current one
+        assertEq(handler.staleRefusals(), 1);
+        handler.invalidateNonce(0, 10);
+        handler.activateSigned(s, 10_000 ether, 1 days, 10);
+        assertEq(handler.signedRefusals(), 3, "invalidated nonce");
+        // Direct allocation colliding with signed nonce 11. Seed 1 << 20 | 11 << 24: curators[0] ((seed >> 2) % 3 == 0),
+        // (seed >> 20) % 4 == 1 selects the small range, and the direct nonce is (seed >> 24) % 64 == 11.
+        handler.activateSigned(s, 10_000 ether, 1 days, 11);
+        uint256 okBefore = handler.allocationsOk();
+        handler.allocate(1 << 20 | 11 << 24, 10_000 ether, 1 days);
+        assertEq(handler.allocationsOk(), okBefore, "direct path refused the signed nonce");
+        handler.moduleDisable(true);
+        handler.activateSigned(s, 10_000 ether, 1 days, 12);
+        handler.allocate(0, 10_000 ether, 1 days);
+        assertEq(handler.allocationsOk(), okBefore, "disabled module creates nothing");
+        handler.moduleTryReinstall(0, false);
+        handler.moduleTryReinstall(0, true);
+        assertEq(handler.moduleRefusals(), 2);
+        handler.moduleReplace();
+        handler.activateSigned(s, 10_000 ether, 1 days, 13);
+        handler.activateSigned(0 << 12, 10_000 ether, 1 days, 14); // random module: modules[0] is retired
+        handler.allocate(0, 10_000 ether, 1 days);
+        assertEq(handler.allocationsOk(), okBefore + 1);
+        assertGe(handler.signedOk(), 3);
+        invariant_signedActivationUsesCurrentGeneration();
+        invariant_noncesSingleUse();
+        invariant_onlyInstalledModuleCreatesAllocations();
+        invariant_moduleLifecycle();
+        invariant_reservedIsExactAndBacked();
+        invariant_curatorActionsMoveNothing();
     }
 }
