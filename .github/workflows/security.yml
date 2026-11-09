@@ -39,12 +39,7 @@ jobs:
       - name: Artifact settings, sizes and gas (production builds)
         run: test/bench/run.sh
 
-      - name: Vault keeps at least 2,048 bytes under EIP-170
-        run: |
-          runtime=$(( ($(jq -r '.deployedBytecode.object' out/SharedCommitmentVault.sol/SharedCommitmentVault.json | wc -c) - 3) / 2 ))
-          margin=$(( 24576 - runtime ))
-          echo "vault runtime ${runtime} bytes, margin ${margin} bytes"
-          test "$margin" -ge 2048
-
-      - name: Production-build security suite (CI fuzz profile)
+      # security.sh fails if the vault has less than 2,048 bytes of EIP-170 margin, if any production contract
+      # exceeds EIP-170 or EIP-3860, or if any test fails. Running it locally reproduces this step exactly.
+      - name: Size gate and production-build security suite (CI fuzz profile)
         run: test/bench/security.sh

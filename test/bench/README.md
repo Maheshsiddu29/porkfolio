@@ -47,7 +47,8 @@ gas numbers, however, include a PoolManager and hooks that are not the productio
 - a hook, `VaultLens` or `CuratorAuthorization` has no default-profile artifact;
 - any of them exceeds the EIP-170 runtime limit of 24,576 bytes.
 
-A margin below the project target of 2,048 bytes is flagged `BELOW_TARGET` but does not fail the run.
+A margin below the project target of 2,048 bytes is flagged `BELOW_TARGET` but does not fail this run; it fails
+`security.sh` and `test_productionSizesWithinLimits` (below).
 `test_bench_sizes` also asserts that each deployed contract has the same code length as the artifact the report
 describes.
 
@@ -127,6 +128,8 @@ runtime hashes. Reading `out/` needs the read-only `fs_permissions` entry in `fo
 | `test_PA_auth_equivalenceCompetitionAndCaps` | signed and direct paths give the same allocation; two instructions competing for the last backing; exposure and flow caps bind signed allocations |
 | `test_PA_auth_compromisedModuleBounded` | a malicious module forging `reserveFor` is stopped by the ceiling, registration and floor checks and cannot cancel, consume or configure |
 | `test_PA_auth_reentrantWalletIsStatic` | a wallet that tries to cancel its own allocation from `isValidSignature` changes nothing |
+| `test_PA_auth_moduleInstallCheck` | the install check refuses another vault's module, an address without code, the PoolManager, the vault, and reverting, short or dirty `vault()` answers; installing the installed module again is refused; HookA (whose `vault()` names this vault) is accepted, creates nothing, and keeps its consumer role |
+| `test_PA_auth_signatureTimeRules` | one-day window bound at its edge, validAfter after deadline and expiry not after deadline refused (signed and direct), a future-dated instruction activates only in its window, a replay is refused |
 
 ## The functional suite also runs on production builds
 
@@ -142,12 +145,17 @@ routers and test-only contracts (`AuthModeHook`, `ScriptedHook`, `MaliciousConsu
 ## Running the production-build security suite (CI)
 
 ```sh
-test/bench/security.sh            # forge build --force; ProductionBuilds; ProductionArtifactSecurity; full suite
+test/bench/security.sh            # forge build --force; size gate; ProductionBuilds; ProductionArtifactSecurity; full suite
 FOUNDRY_PROFILE=default test/bench/security.sh   # same with 1,000 fuzz runs instead of 10,000
 ```
 
-`.github/workflows/security.yml` runs this script on pushes and pull requests (see that file for what it does and does
-not do). `run.sh` runs only the gas benchmark.
+The size gate fails the script if the vault's runtime margin under EIP-170 is below 2,048 bytes, if another production
+contract exceeds EIP-170, or if any init code exceeds EIP-3860 (49,152 bytes). `test_productionSizesWithinLimits` in
+`ProductionBuilds.t.sol` asserts the runtime limits again on the deployed fixture, so a plain `forge test` also fails.
+
+`.github/workflows/security.yml` runs `run.sh` and then this script on pushes and pull requests (see that file for
+what it does and does not do), so running both locally reproduces the CI job. `run.sh` alone runs the size report and
+the gas benchmark.
 
 Gas is the `gasleft()` difference around one external call made from the test contract, so it includes the call
 overhead of that call but not the 21,000 base cost of a transaction. Compare numbers only between runs made with the

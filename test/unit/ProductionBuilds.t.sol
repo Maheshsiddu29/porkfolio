@@ -28,6 +28,18 @@ contract ProductionBuildsTest is VaultTestBase {
         );
     }
 
+    /// @notice Size limits on the deployed production code: the vault keeps at least 2,048 bytes under the EIP-170
+    ///         runtime limit (24,576), the project's margin for later fixes; every other production contract fits
+    ///         EIP-170. Deployed code has the artifact's length (immutables are filled in place), so this is the size
+    ///         that would be deployed.
+    function test_productionSizesWithinLimits() public view {
+        assertLe(address(vault).code.length, 24_576 - 2048, "vault margin below 2,048 bytes");
+        address[4] memory others = [address(hookA), address(hookB), address(lens), address(auth)];
+        for (uint256 i; i < others.length; ++i) {
+            assertLe(others[i].code.length, 24_576, "over EIP-170");
+        }
+    }
+
     /// @notice The check is not vacuous: the 2,000-run hook build that a by-name `deployCode` would return inside this
     ///         file differs from the production build, and the masked comparison tells them apart.
     function test_maskedHashDistinguishesBuilds() public view {
