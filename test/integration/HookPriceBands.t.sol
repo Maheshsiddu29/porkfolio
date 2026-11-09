@@ -208,6 +208,14 @@ contract HookPriceBands6x18Test is VaultTestBase {
         v.setConsumer(b, true);
         v.setConsumer(m, true);
         v.setCurator(curator, true);
+        address[5] memory scoped = [address(0), a, b, m, curator];
+        for (uint256 i; i < 5; ++i) {
+            ISharedCommitmentVault.RiskScope sc = i == 0
+                ? ISharedCommitmentVault.RiskScope.Vault
+                : i == 4 ? ISharedCommitmentVault.RiskScope.Curator : ISharedCommitmentVault.RiskScope.Hook;
+            v.setRiskLimit(sc, scoped[i], x0, MAX_FLOW_CAP, 10_000);
+            v.setRiskLimit(sc, scoped[i], x1, MAX_FLOW_CAP, 10_000);
+        }
         v.setCuratorCeiling(curator, x0, type(uint256).max);
         v.setCuratorCeiling(curator, x1, type(uint256).max);
         vm.stopPrank();

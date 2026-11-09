@@ -121,7 +121,12 @@ contract ProductionArtifactSecurityTest is Test {
             vault.setCurator(cs[i], true);
             vault.setCuratorCeiling(cs[i], c0, type(uint256).max);
             vault.setCuratorCeiling(cs[i], c1, type(uint256).max);
+            _openLimits(ISharedCommitmentVault.RiskScope.Curator, cs[i]);
         }
+        _openLimits(ISharedCommitmentVault.RiskScope.Vault, address(0));
+        _openLimits(ISharedCommitmentVault.RiskScope.Hook, hookA);
+        _openLimits(ISharedCommitmentVault.RiskScope.Hook, hookB);
+        _openLimits(ISharedCommitmentVault.RiskScope.Hook, s);
         vm.stopPrank();
 
         _fund(owner, address(vault), FUNDING);
@@ -456,5 +461,12 @@ contract ProductionArtifactSecurityTest is Test {
                 assertEq(manager.balanceOf(hooks[j], c.toId()), 0, "hook kept claims");
             }
         }
+    }
+
+    /// @dev Configures `account` at `scope` in both assets with the widest limits (largest flow cap, 100% exposure).
+    ///      Caller must already be pranking as the owner.
+    function _openLimits(ISharedCommitmentVault.RiskScope scope, address account) internal {
+        vault.setRiskLimit(scope, account, c0, type(uint104).max, 10_000);
+        vault.setRiskLimit(scope, account, c1, type(uint104).max, 10_000);
     }
 }

@@ -313,6 +313,7 @@ contract VaultSecurityTest is VaultTestBase {
         vm.startPrank(owner);
         vault.setCurator(curator2, true);
         vault.setCuratorCeiling(curator2, c1, QUOTA);
+        _openLimits(ISharedCommitmentVault.RiskScope.Curator, curator2);
         vm.stopPrank();
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, QUOTA);
         vm.prank(curator);
@@ -590,6 +591,7 @@ contract VaultSecurityTest is VaultTestBase {
         manager.initialize(keyM, SQRT_PRICE_1_1);
         vm.prank(owner);
         vault.setConsumer(addr, true); // the owner whitelisted it: worst case
+        _openLimitsAsOwner(ISharedCommitmentVault.RiskScope.Hook, addr);
         id = _allocate(keyM, c1, 1000 ether);
     }
 

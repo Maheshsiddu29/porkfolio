@@ -893,6 +893,9 @@ contract VaultInvariantsTest is VaultTestBase {
         vault.setGuardian(guardianAddr);
         vault.setCurator(curator2, true);
         vault.setCurator(curator3, true);
+        _openLimits(ISharedCommitmentVault.RiskScope.Hook, e);
+        _openLimits(ISharedCommitmentVault.RiskScope.Curator, curator2);
+        _openLimits(ISharedCommitmentVault.RiskScope.Curator, curator3);
         vault.setCuratorCeiling(curator2, c0, type(uint256).max);
         vault.setCuratorCeiling(curator2, c1, type(uint256).max);
         vault.setCuratorCeiling(curator3, c0, 500_000 ether);

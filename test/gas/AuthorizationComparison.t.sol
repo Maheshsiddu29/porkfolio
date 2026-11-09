@@ -7,6 +7,7 @@ import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
+import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {AuthModeHook} from "../utils/AuthModeHook.sol";
 
@@ -87,5 +88,6 @@ contract AuthorizationComparisonTest is VaultTestBase {
         manager.initialize(key, SQRT_PRICE_1_1);
         vm.prank(owner);
         vault.setConsumer(addr, true);
+        _openLimitsAsOwner(ISharedCommitmentVault.RiskScope.Hook, addr);
     }
 }

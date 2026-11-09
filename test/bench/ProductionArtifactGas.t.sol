@@ -106,6 +106,10 @@ contract ProductionArtifactGasTest is Test {
         vault.setSellFloor(c1, PRICE_1_1_X96);
         vault.setCuratorCeiling(curator, c0, type(uint256).max);
         vault.setCuratorCeiling(curator, c1, type(uint256).max);
+        _openLimits(ISharedCommitmentVault.RiskScope.Vault, address(0));
+        _openLimits(ISharedCommitmentVault.RiskScope.Hook, hookA);
+        _openLimits(ISharedCommitmentVault.RiskScope.Hook, hookB);
+        _openLimits(ISharedCommitmentVault.RiskScope.Curator, curator);
         vm.stopPrank();
 
         _approveAndFund(owner, address(vault), VAULT_FUNDING);
@@ -243,6 +247,7 @@ contract ProductionArtifactGasTest is Test {
         vm.startPrank(owner);
         vault.setCurator(curator2, true);
         vault.setCuratorCeiling(curator2, c1, type(uint256).max);
+        _openLimits(ISharedCommitmentVault.RiskScope.Curator, curator2);
         vm.stopPrank();
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, 100_000 ether);
         vm.prank(curator2);
@@ -417,5 +422,12 @@ contract ProductionArtifactGasTest is Test {
         for (uint256 i; i < data.length; ++i) {
             gas += data[i] == 0 ? 4 : 16;
         }
+    }
+
+    /// @dev Configures `account` at `scope` in both assets with the widest limits (largest flow cap, 100% exposure).
+    ///      Caller must already be pranking as the owner.
+    function _openLimits(ISharedCommitmentVault.RiskScope scope, address account) internal {
+        vault.setRiskLimit(scope, account, c0, type(uint104).max, 10_000);
+        vault.setRiskLimit(scope, account, c1, type(uint104).max, 10_000);
     }
 }

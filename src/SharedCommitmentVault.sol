@@ -84,14 +84,33 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 /// separately impossible: the PoolManager reverts with `AlreadyUnlocked`. Hooks that call `exchange` inside
 /// `beforeSwap` are not affected: the lock is only held while a vault entry point is executing.
 ///
+/// Risk limits. Each asset the vault sells has limits at three scopes: per consumer hook, per curator and
+/// vault-wide (`RiskScope`, one `RiskLimit` record per scope and asset). Each record holds two limits:
+///   flow cap        gross output paid under the scope in the current fixed window of FLOW_WINDOW seconds;
+///   exposure cap    unused reserved capacity the scope may hold, in basis points of eligible backing
+///                   E_a = N_a - D_a (net assets minus the queue's pro-rata claim).
+/// Every `exchange` adds its output to all three flow records and reverts if any would exceed its cap. Every
+/// `allocate` checks all three exposure caps. A record the owner never configured fails closed at both points.
+/// The four quantities are kept apart:
+///   reserved capacity   Q_a, curatorReserved, hookReserved: promised but not yet paid; falls on consumption,
+///                       cancellation, release and expiry-release;
+///   gross outflow       RiskLimit.flowUsed: paid in the current window; only consumption raises it, nothing
+///                       lowers it before the window ends, and inflows are never netted against it;
+///   free inventory      F_a = N_a - Q_a: what LP exits can be paid from;
+///   LP liabilities      W_a (finalized, owed) and D_a (queued, pro rata).
+/// Flow and exposure limits apply only to `allocate` and `exchange`. Deposits, redemptions, queue processing,
+/// claims, request cancellation, `release` and `cancelAllocation` never read them. The limits bound how much and how
+/// fast the reserve can be sold; they say nothing about the price received, which only the floors bound.
+///
 /// Read-only helpers. This contract serves its stored records (public getters, `getAllocation`, `getRequest`) and
 /// the admission limit `admissibleCapacity`. Previews, request status, N_a, F_a, D_a, deliverable shares and an
 /// allocation's effective floor are computed by `VaultLens`, a separate stateless contract that reads the getters
 /// declared in `IVaultState`. Nothing in this contract calls the lens; every check here uses its own internal copy
 /// of those formulas.
 ///
-/// Not implemented here: signed (EIP-712) allocation instructions and their verification, flow limits,
-/// epoch-based expiry, transferable share tokens, and any protocol, curator or performance fee.
+/// Not implemented here: signed (EIP-712) allocation instructions and their verification, rolling-window flow
+/// limits (the flow window is a fixed epoch; see `FLOW_WINDOW`), path-independent cumulative pricing, epoch-based
+/// expiry of commitments, transferable share tokens, and any protocol, curator or performance fee.
 contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCallback {
     /// @notice Largest amount accepted for any single asset amount, per-asset backing, or the share supply:
     ///         2^127 - 1.
@@ -115,6 +134,18 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      would block every instant exit (instant exits are only allowed while nothing is pending). The bound
     ///      keeps a redeemer's extra gas cost fixed however long the queue grows.
     uint256 public constant INLINE_QUEUE_STEPS = 4;
+
+    /// @notice Length of one flow-limit window, in seconds.
+    /// @dev Windows are fixed epochs aligned to Unix time: epoch e = floor(block.timestamp / FLOW_WINDOW) covers
+    ///      [e * FLOW_WINDOW, (e + 1) * FLOW_WINDOW - 1]. A trade at exactly (e + 1) * FLOW_WINDOW is in epoch e + 1.
+    ///      Boundary burst: a fixed epoch is not a rolling window. A scope can pay its full cap in the last second of
+    ///      one epoch and its full cap again in the first second of the next, so up to 2 * cap can leave within two
+    ///      seconds, and any interval of T seconds can see up to (ceil(T / FLOW_WINDOW) + 1) * cap. Within a single
+    ///      epoch the total never exceeds the cap in force at each trade.
+    uint256 public constant FLOW_WINDOW = 1 days;
+
+    /// @dev Denominator of the exposure caps: 10,000 basis points = 100%.
+    uint256 internal constant _BPS = 10_000;
 
     /// @notice The Uniswap v4 PoolManager that holds the ERC-20 behind the vault's claims.
     IPoolManager public immutable poolManager;
@@ -182,6 +213,14 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///         canceled, so queue processing starts here.
     uint256 public queueHead = 1;
 
+    /// @notice Unused capacity currently held by a hook's unreleased allocations, in raw units of `currency`.
+    /// @dev The per-hook counterpart of `curatorReserved`, and like it the sum of maxOut - consumed over the hook's
+    ///      unreleased allocations: raised by `allocate`, lowered by `exchange` and `_close`. Summed over all hooks it
+    ///      equals Q_a. Used only for the hook-scope exposure cap.
+    mapping(address consumer => mapping(Currency currency => uint256)) public hookReserved;
+    /// @dev Risk limits by keccak256(abi.encode(scope, account, currency)); see `RiskLimit` and `getRiskLimit`.
+    mapping(bytes32 key => RiskLimit) internal _riskLimits;
+
     /// @dev Transient-storage (EIP-1153) slot of the reentrancy lock: keccak256 of
     ///      "porkfolio.SharedCommitmentVault.reentrancyLock". Transient storage is cleared at the end of every
     ///      transaction and rolled back with a revert, so the lock can never stay set by mistake.
@@ -239,8 +278,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     // Administration (no function here moves assets)
     //
     // Owner: every configuration change. Guardian: only changes that REDUCE risk (pause, deregister,
-    // freeze or revoke a curator, lower a ceiling, raise a buffer floor, raise a price floor, halt a direction,
-    // emergency release); it can never loosen, register, unfreeze, unpause, resume, or touch ownership or the
+    // freeze or revoke a curator, lower a ceiling or a configured risk limit, raise a buffer floor, raise a price
+    // floor, halt a direction, emergency release); it can never loosen, register, unfreeze, unpause, resume, or touch ownership or the
     // guardian slot.
     // Anyone else: nothing.
     // ==================================================================
@@ -408,6 +447,45 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         _authorize(ceiling <= curatorCeiling[curator][currency]);
         curatorCeiling[curator][currency] = ceiling;
         emit CuratorCeilingSet(curator, currency, ceiling);
+    }
+
+    /// @notice Configure the flow cap and the exposure cap of one scope in one asset.
+    /// @dev Authorization. The owner may set any values, which also marks the record configured; configuring is the
+    ///      only way to open a path (an unconfigured record blocks allocation and consumption). The guardian may
+    ///      only tighten a record that is already configured: both new values must be at most the current ones.
+    ///      Configuring a new record or raising either value is `GuardianCannotIncreaseRisk` for the guardian. A
+    ///      record can never be unconfigured; set both values to zero to close it.
+    ///
+    ///      Effect on recorded usage. Only `flowCap` and `maxReservedBps` change. `flowUsed` and `epoch` are left as
+    ///      they are, so no change can erase output already paid in the current window. Raising a cap lets the scope
+    ///      pay the difference in this window. Lowering a cap below what was already used in this window blocks any
+    ///      further output until the next window, which then starts at zero under the new cap. A cap change never
+    ///      cancels or shrinks an existing allocation: the exposure cap is checked only when an allocation is created,
+    ///      and an allocation that was within the cap stays valid when the cap or the backing later falls (its
+    ///      consumption is still bounded by the flow caps, the floors and its own maxOut).
+    ///
+    ///      Works while paused. Records are keyed by address, not by curator generation or registration, so
+    ///      deregistering, re-registering, freezing, unfreezing or revoking a curator, or unregistering and
+    ///      re-registering a hook, never resets them; nor does replacing the owner or the guardian.
+    /// @param scope Hook, Curator or Vault.
+    /// @param account The hook or curator for those scopes (non-zero); address(0) for the vault scope.
+    /// @param currency Asset the vault sells under this limit. Must be asset0 or asset1.
+    /// @param flowCap Most gross output per window, raw units of `currency`. At most 2^104 - 1 (about 2 * 10^13
+    ///        whole tokens at 18 decimals).
+    /// @param maxReservedBps Exposure cap in basis points of eligible backing, at most 10,000.
+    function setRiskLimit(RiskScope scope, address account, Currency currency, uint256 flowCap, uint16 maxReservedBps)
+        external
+    {
+        _otherAsset(currency); // validates currency
+        if ((scope == RiskScope.Vault) != (account == address(0))) revert InvalidRiskLimit();
+        if (flowCap > type(uint104).max || maxReservedBps > _BPS) revert InvalidRiskLimit();
+        RiskLimit storage l = _riskLimit(scope, account, currency);
+        _authorize(l.configured && flowCap <= l.flowCap && maxReservedBps <= l.maxReservedBps);
+        l.configured = true;
+        // forge-lint: disable-next-line(unsafe-typecast) flowCap <= type(uint104).max, checked above.
+        l.flowCap = uint104(flowCap);
+        l.maxReservedBps = maxReservedBps;
+        emit RiskLimitSet(scope, account, currency, flowCap, maxReservedBps, msg.sender);
     }
 
     /// @notice Set R_a, the inventory of `currency` that new allocations must leave unreserved.
@@ -816,10 +894,26 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      available for the named hook until `req.expiry`, at no worse than `req.minInPerOutX96`. No assets move;
     ///      Q_a and the curator's reserved total rise by `maxOut`.
     ///
-    ///      Checks, in order: curator neither frozen nor revoked; registered curator; deadline not passed; nonce unused; consumer registered and equal to
-    ///      `key.hooks`; pool currencies equal the vault's pair; `currencyOut` is one of them; direction configured
-    ///      and not halted; curator floor >= vault floor; non-zero `maxOut` within MAX_AMOUNT; expiry in the future
-    ///      and within MAX_HORIZON; curator ceiling; and the admission rule Q_a + maxOut + R_a + D_a <= N_a.
+    ///      Checks, in order: curator neither frozen nor revoked; registered curator; deadline not passed; nonce
+    ///      unused; consumer registered and equal to `key.hooks`; pool currencies equal the vault's pair;
+    ///      `currencyOut` is one of them; direction configured and not halted; curator floor >= vault floor; non-zero
+    ///      `maxOut` within MAX_AMOUNT; expiry in the future and within MAX_HORIZON; curator ceiling; the admission
+    ///      rule Q_a + maxOut + R_a + D_a <= N_a; and the exposure caps of the hook, the curator and the vault.
+    ///
+    ///      Exposure caps. Eligible backing is E_a = N_a - D_a: net assets minus the queue's pro-rata claim, so
+    ///      LP withdrawal liabilities (W_a, through N_a, and D_a) are never counted as backing a new promise. For each
+    ///      scope, with `held` its current unused reserved capacity (hookReserved, curatorReserved or Q_a) and
+    ///      `bps` its maxReservedBps, the allocation is accepted only if
+    ///
+    ///          (held + maxOut) * 10,000 <= bps * E_a
+    ///
+    ///      Both sides are exact integers below 2^142, so there is no rounding in the check itself; it is the same as
+    ///      held + maxOut <= floor(bps * E_a / 10,000), i.e. the cap rounds down, against the curator and in favour
+    ///      of LPs. D_a is rounded up, which lowers E_a further. Example: E_a = 1,000,001 and bps = 2,500 allow
+    ///      held + maxOut <= 250,000. A record that was never configured reverts with `RiskLimitNotConfigured`, so a
+    ///      path needs its hook, curator and vault records configured in this asset before anything can be reserved
+    ///      on it. The exposure cap is an amount check only: it does not value the two assets against each other
+    ///      and does not bound the price at which reserved capacity is later sold.
     ///
     ///      The admission rule protects three things from being promised to a hook: existing commitments (Q_a),
     ///      the buffer (R_a), and the queue's pro-rata share (D_a). Claimable assets W_a are excluded because the
@@ -871,9 +965,16 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         uint256 admissible = admissibleCapacity(out);
         if (req.maxOut > admissible) revert InsufficientBacking(req.maxOut, admissible);
 
+        // E_a = N_a - D_a. D_a <= N_a because P <= S, so this cannot underflow.
+        uint256 eligible = _netAssets(out) - _pendingDemand(out);
+        _checkExposure(RiskScope.Hook, req.consumer, out, hookReserved[req.consumer][out], req.maxOut, eligible);
+        _checkExposure(RiskScope.Curator, curator, out, curatorReserved[curator][out], req.maxOut, eligible);
+        _checkExposure(RiskScope.Vault, address(0), out, reserved[out], req.maxOut, eligible);
+
         nonceUsed[curator][req.nonce] = true;
         reserved[out] += req.maxOut;
         curatorReserved[curator][out] += req.maxOut;
+        hookReserved[req.consumer][out] += req.maxOut;
 
         allocationId = nextAllocationId++;
         PoolId poolId = req.key.toId();
@@ -963,6 +1064,13 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      transaction reverts, so output can never leave without input arriving. The vault holds no operator rights
     ///      over anyone else's claims and grants none over its own.
     ///
+    ///      Flow limits. `amountOut`, the exact output transferred below, is added to the current-window usage of
+    ///      three records of `currencyOut`: the calling hook's, the allocation curator's and the vault's. The call
+    ///      reverts with `FlowLimitExceeded` if any of them would exceed its cap, and with `RiskLimitNotConfigured` if
+    ///      any is unconfigured. The vault computes the usage itself from the amount it pays; nothing a hook reports
+    ///      is trusted. Usage is gross: the input received is never subtracted, so trading back and forth cannot
+    ///      free capacity. A revert anywhere in the swap rolls all three records back with everything else.
+    ///
     ///      A floor only guarantees that trades are no worse than the configured minimum. It does not guarantee
     ///      the trade happened at a fair market price; a registered hook can sell the full remaining quota at
     ///      exactly the floor.
@@ -1003,12 +1111,20 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         uint256 backingIn = backing[cin];
         if (amountIn > MAX_AMOUNT - backingIn) revert AmountTooLarge();
 
+        // Flow limits, before any other effect. Each call checks and records in one step.
+        uint256 epoch = _flowEpoch();
+        _consumeFlow(RiskScope.Hook, msg.sender, cout, amountOut, epoch);
+        _consumeFlow(RiskScope.Curator, curator, cout, amountOut, epoch);
+        _consumeFlow(RiskScope.Vault, address(0), cout, amountOut, epoch);
+
         // Effects. amountOut <= remaining <= reserved[out] <= backing[out] - claimable[out], so no underflow
-        // and claimable redemption assets are never paid to a hook.
+        // and claimable redemption assets are never paid to a hook. hookReserved and curatorReserved hold this
+        // allocation's remaining capacity, so they cannot underflow either.
         // forge-lint: disable-next-line(unsafe-typecast) amountOut <= remaining <= maxOut (a uint128).
         a.consumed += uint128(amountOut);
         reserved[cout] -= amountOut;
         curatorReserved[curator][cout] -= amountOut;
+        hookReserved[msg.sender][cout] -= amountOut;
         backing[cout] -= amountOut;
         backing[cin] = backingIn + amountIn;
 
@@ -1035,6 +1151,21 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     /// @return The curator record.
     function getCurator(address curator) external view returns (CuratorRecord memory) {
         return _curators[curator];
+    }
+
+    /// @notice Stored risk limits and flow usage of one scope in one asset. All-zero if never configured.
+    /// @dev `flowUsed` belongs to window `epoch`; it is current usage only while `epoch` equals
+    ///      block.timestamp / FLOW_WINDOW. `VaultLens.flowAvailable` applies that rule.
+    /// @param scope Hook, Curator or Vault.
+    /// @param account The hook or curator; address(0) for the vault scope.
+    /// @param currency Asset the limit applies to.
+    /// @return The stored record.
+    function getRiskLimit(RiskScope scope, address account, Currency currency)
+        external
+        view
+        returns (RiskLimit memory)
+    {
+        return _riskLimit(scope, account, currency);
     }
 
     /// @notice Stored state of a withdrawal request. Returns an all-zero struct for an unknown id.
@@ -1155,17 +1286,19 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      and `cancelAllocation`. Precondition: `a` was loaded with `_getLiveAllocation`, which reverts for an
     ///      unknown or already closed id, so each allocation passes through here at most once.
     ///
-    ///      Effects, in one step: `released` is set, then Q_out and curatorReserved[curator][out] both fall by
-    ///      unused = maxOut - consumed. These are exactly this allocation's contribution to both sums (both are
-    ///      maintained as the sum of maxOut - consumed over unreleased allocations), so neither can underflow and
-    ///      no other allocation's share is touched. `consumed` is not changed, and no claims, B_a, W_a, shares or
-    ///      queue entries move.
+    ///      Effects, in one step: `released` is set, then Q_out, curatorReserved[curator][out] and
+    ///      hookReserved[consumer][out] all fall by unused = maxOut - consumed. These are exactly this allocation's
+    ///      contribution to the three sums (each is maintained as the sum of maxOut - consumed over unreleased
+    ///      allocations), so none can underflow and no other allocation's share is touched. `consumed` is not
+    ///      changed, no claims, B_a, W_a, shares or queue entries move, and no flow usage is returned: closing
+    ///      releases capacity that was never paid out, while output already paid stays counted in its window.
     function _close(uint256 allocationId, Allocation storage a, CloseReason reason) internal {
         uint256 unused = a.maxOut - a.consumed;
         a.released = true;
         Currency out = a.currencyOut;
         reserved[out] -= unused;
         curatorReserved[a.curator][out] -= unused;
+        hookReserved[a.consumer][out] -= unused;
         emit AllocationReleased(allocationId, msg.sender, unused, reason);
     }
 
@@ -1251,6 +1384,60 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     function _nextGeneration(address curator, uint32 generation) internal pure returns (uint32) {
         if (generation == type(uint32).max) revert GenerationExhausted(curator);
         return generation + 1;
+    }
+
+    /// @dev Storage record of one scope in one asset. The key hashes all three inputs, so records of different scopes,
+    ///      accounts or assets never share a slot.
+    function _riskLimit(RiskScope scope, address account, Currency currency) internal view returns (RiskLimit storage) {
+        return _riskLimits[keccak256(abi.encode(scope, account, currency))];
+    }
+
+    /// @dev Current flow window: floor(block.timestamp / FLOW_WINDOW), full 256-bit timestamp, no truncation. The
+    ///      result is stored in 40 bits; once it no longer fits (around year 3 billion at a one-day window) every
+    ///      flow-limited consumption reverts with `FlowEpochOutOfRange` instead of wrapping to an old window, which
+    ///      could otherwise look like an unused window.
+    function _flowEpoch() internal view returns (uint256 epoch) {
+        epoch = block.timestamp / FLOW_WINDOW;
+        if (epoch > type(uint40).max) revert FlowEpochOutOfRange(epoch);
+    }
+
+    /// @dev Adds `amount` to the gross outflow of one scope in window `epoch`, or reverts.
+    ///      used = (stored epoch == epoch) ? flowUsed : 0. A stored epoch below the current one is a finished window,
+    ///      however many windows were skipped, so the usage restarts from zero in O(1); nothing iterates over the
+    ///      skipped windows. The check is used + amount <= flowCap, computed in 256 bits (used < 2^104 and
+    ///      amount < 2^127, so no overflow), and the new usage is then at most flowCap < 2^104, so the narrowing
+    ///      store is exact. If the cap was lowered below `used`, the available amount is zero. Reverts with
+    ///      `RiskLimitNotConfigured` for an unconfigured record (fail closed).
+    function _consumeFlow(RiskScope scope, address account, Currency currency, uint256 amount, uint256 epoch) internal {
+        RiskLimit storage l = _riskLimit(scope, account, currency);
+        if (!l.configured) revert RiskLimitNotConfigured(scope, account, currency);
+        uint256 used = l.epoch == epoch ? l.flowUsed : 0;
+        uint256 cap = l.flowCap;
+        if (used + amount > cap) revert FlowLimitExceeded(scope, account, currency, amount, _sub0(cap, used));
+        // forge-lint: disable-next-line(unsafe-typecast) epoch <= type(uint40).max (`_flowEpoch`).
+        l.epoch = uint40(epoch);
+        // forge-lint: disable-next-line(unsafe-typecast) used + amount <= cap <= type(uint104).max.
+        l.flowUsed = uint104(used + amount);
+    }
+
+    /// @dev Exposure cap of one scope for a new allocation of `amount`: reverts unless the record is configured and
+    ///      (held + amount) * 10,000 <= maxReservedBps * eligible (see `allocate`). held + amount < 2^128 because
+    ///      both are bounded by MAX_AMOUNT, and maxReservedBps * eligible <= 10,000 * 2^127, so neither product can
+    ///      overflow. The reported `available` is floor(bps * eligible / 10,000) - held, floored at zero.
+    function _checkExposure(
+        RiskScope scope,
+        address account,
+        Currency currency,
+        uint256 held,
+        uint256 amount,
+        uint256 eligible
+    ) internal view {
+        RiskLimit storage l = _riskLimit(scope, account, currency);
+        if (!l.configured) revert RiskLimitNotConfigured(scope, account, currency);
+        uint256 limit = l.maxReservedBps * eligible;
+        if ((held + amount) * _BPS > limit) {
+            revert ExposureCapExceeded(scope, account, currency, amount, _sub0(limit / _BPS, held));
+        }
     }
 
     /// @dev a - b, or 0 if b > a.

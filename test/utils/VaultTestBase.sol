@@ -106,6 +106,13 @@ abstract contract VaultTestBase is Test {
         vault.setSellFloor(c1, PRICE_1_1_X96);
         vault.setCuratorCeiling(curator, c0, VAULT_FUNDING);
         vault.setCuratorCeiling(curator, c1, VAULT_FUNDING);
+        // Risk limits fail closed until configured. The shared fixture opens every path it uses as wide as the
+        // vault allows, so tests written before flow and exposure limits keep their meaning; tests of the limits
+        // themselves tighten them explicitly.
+        _openLimits(ISharedCommitmentVault.RiskScope.Vault, address(0));
+        _openLimits(ISharedCommitmentVault.RiskScope.Hook, address(hookA));
+        _openLimits(ISharedCommitmentVault.RiskScope.Hook, address(hookB));
+        _openLimits(ISharedCommitmentVault.RiskScope.Curator, curator);
         vm.stopPrank();
 
         _fundVault(VAULT_FUNDING, VAULT_FUNDING);
@@ -123,6 +130,24 @@ abstract contract VaultTestBase is Test {
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
+
+    uint256 internal constant MAX_FLOW_CAP = type(uint104).max;
+
+    /// @dev Configures `account` at `scope` in both assets with the widest limits: the largest flow cap and 100%
+    ///      exposure. At 100% the exposure caps never bind before the admission rule does (each scope holds part of
+    ///      Q_a, and admission already keeps Q_a + maxOut <= N_a - R_a - D_a = E_a - R_a). Caller must already be
+    ///      pranking as the owner.
+    function _openLimits(ISharedCommitmentVault.RiskScope scope, address account) internal {
+        vault.setRiskLimit(scope, account, c0, MAX_FLOW_CAP, 10_000);
+        vault.setRiskLimit(scope, account, c1, MAX_FLOW_CAP, 10_000);
+    }
+
+    /// @dev `_openLimits` called as the owner.
+    function _openLimitsAsOwner(ISharedCommitmentVault.RiskScope scope, address account) internal {
+        vm.startPrank(owner);
+        _openLimits(scope, account);
+        vm.stopPrank();
+    }
 
     function _hookAddress(uint256 salt) internal pure returns (address) {
         return address(uint160(salt << 140) | HOOK_FLAGS);

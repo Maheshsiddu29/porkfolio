@@ -30,6 +30,8 @@ interface IBenchVault is IVaultState {
     function revokeCurator(address curator) external;
     function bumpGeneration() external returns (uint32);
     function setCuratorCeiling(address curator, Currency currency, uint256 ceiling) external;
+    function setRiskLimit(RiskScope scope, address account, Currency currency, uint256 flowCap, uint16 maxReservedBps)
+        external;
     function setSellFloor(Currency currencyOut, uint160 minInPerOutX96) external;
     function setSellHalted(Currency currencyOut, bool halted) external;
     function setPaused(bool paused_) external;

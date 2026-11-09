@@ -37,6 +37,8 @@ contract CuratorCancellationTest is VaultTestBase {
         vault.setConsumer(e, true);
         vault.setGuardian(guardian);
         vault.setCurator(curator2, true);
+        _openLimits(ISharedCommitmentVault.RiskScope.Hook, e);
+        _openLimits(ISharedCommitmentVault.RiskScope.Curator, curator2);
         vault.setCuratorCeiling(curator2, c0, VAULT_FUNDING);
         vault.setCuratorCeiling(curator2, c1, VAULT_FUNDING);
         vm.stopPrank();

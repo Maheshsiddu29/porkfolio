@@ -150,6 +150,43 @@ interface ISharedCommitmentVault {
         uint32 generation;
     }
 
+    /// @notice Level at which a risk limit applies. Every limit is kept per asset sold (`currencyOut`).
+    /// @dev Hook: one consumer hook, across all its pools, allocations and curators; keyed by the hook address.
+    ///      Curator: one curator, across all its allocations and hooks; keyed by the curator address.
+    ///      Vault: everything, across all curators and hooks; keyed by address(0).
+    enum RiskScope {
+        Hook,
+        Curator,
+        Vault
+    }
+
+    /// @notice Risk limits and gross-outflow usage of one scope in one asset.
+    /// @dev Two storage slots. The first (configured, epoch, flowCap, flowUsed) is the only one `exchange` reads and
+    ///      writes; the second (maxReservedBps) is read only by `allocate`.
+    ///
+    ///      Flow window. Time is divided into fixed epochs of FLOW_WINDOW seconds: epoch e covers the timestamps
+    ///      [e * FLOW_WINDOW, (e + 1) * FLOW_WINDOW - 1], both ends inclusive. `flowUsed` is the gross output paid
+    ///      under this scope during epoch `epoch`. When the current epoch is later than `epoch`, the stored usage
+    ///      belongs to a finished window and counts as zero; the next consumption starts the new window at its own
+    ///      amount. Usage never decreases inside an epoch: no inflow, cancellation, release, expiry, configuration
+    ///      change, curator or hook state change, or LP operation lowers it.
+    /// @param configured     True once the owner has set this record. An unconfigured record fails closed: no new
+    ///                       allocation for it and no consumption under it. Never cleared.
+    /// @param epoch          Index (block.timestamp / FLOW_WINDOW) of the window `flowUsed` belongs to. 40 bits:
+    ///                       enough for about three billion years at a one-day window.
+    /// @param flowCap        Most gross output, in raw units of the asset, per epoch. Zero allows no output.
+    /// @param flowUsed       Gross output already paid in epoch `epoch`, raw units. Normally at most `flowCap`; it
+    ///                       can be above it only after the cap was lowered during the epoch.
+    /// @param maxReservedBps Most unused reserved capacity this scope may hold after a new allocation, in basis
+    ///                       points of the asset's eligible backing E_a (see `allocate`). Zero allows none.
+    struct RiskLimit {
+        bool configured;
+        uint40 epoch;
+        uint104 flowCap;
+        uint104 flowUsed;
+        uint16 maxReservedBps;
+    }
+
     // ------------------------------------------------------------------
     // Errors: roles and generic input
     // ------------------------------------------------------------------
@@ -275,6 +312,23 @@ interface ISharedCommitmentVault {
     error ZeroPriceFloor();
     /// @notice The curator's floor is below the live vault floor for that direction.
     error FloorBelowVaultMinimum(uint256 curatorFloor, uint256 vaultFloor);
+    /// @notice The hook, curator or vault-wide risk limit for this asset was never configured, so the path fails
+    ///         closed. `account` is the hook or curator, or address(0) for the vault scope.
+    error RiskLimitNotConfigured(RiskScope scope, address account, Currency currency);
+    /// @notice The output would take this scope's gross outflow in the current window above its cap. `available` is
+    ///         what is left in this window (zero when the cap was lowered below what was already used).
+    error FlowLimitExceeded(RiskScope scope, address account, Currency currency, uint256 requested, uint256 available);
+    /// @notice The allocation would take this scope's unused reserved capacity above its share of eligible backing.
+    ///         `available` = max(0, floor(maxReservedBps * E_a / 10,000) - held).
+    error ExposureCapExceeded(
+        RiskScope scope, address account, Currency currency, uint256 requested, uint256 available
+    );
+    /// @notice A risk-limit argument is out of range: a flow cap above 2^104 - 1, basis points above 10,000, or an
+    ///         account that does not match the scope (non-zero for Vault, zero for Hook or Curator).
+    error InvalidRiskLimit();
+    /// @notice block.timestamp / FLOW_WINDOW no longer fits the 40-bit epoch field. Every flow-limited consumption
+    ///         reverts from then on rather than wrapping to an old window.
+    error FlowEpochOutOfRange(uint256 epoch);
     /// @notice The two direction floors would cross: their product would be below 2^192, which would make a round
     ///         trip at the floors profitable. `requiredMinimum` = ceil(2^192 / opposite floor).
     error InconsistentDirectionalFloors(uint256 floor, uint256 requiredMinimum);
@@ -302,6 +356,16 @@ interface ISharedCommitmentVault {
     event CuratorCeilingSet(address indexed curator, Currency indexed currency, uint256 ceiling);
     /// @notice The buffer floor R_a for `currency` changed.
     event BufferFloorSet(Currency indexed currency, uint256 floor);
+    /// @notice A risk limit was set. `account` is the hook or curator, or address(0) for the vault scope. Usage
+    ///         already recorded in the current window is unchanged. `by` is the owner or guardian.
+    event RiskLimitSet(
+        RiskScope indexed scope,
+        address indexed account,
+        Currency indexed currency,
+        uint256 flowCap,
+        uint16 maxReservedBps,
+        address by
+    );
     /// @notice The vault floor for selling `currencyOut` changed. `by` is the owner or guardian.
     event SellFloorSet(Currency indexed currencyOut, uint160 previousFloor, uint160 newFloor, address indexed by);
     /// @notice The direction selling `currencyOut` was halted or resumed. `by` is the owner or guardian.

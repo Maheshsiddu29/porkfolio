@@ -45,6 +45,24 @@ interface IVaultState is ISharedCommitmentVault {
     /// @return The curator record.
     function getCurator(address curator) external view returns (CuratorRecord memory);
 
+    /// @notice Unused capacity currently held by a hook's unreleased allocations, in raw units of `currency`.
+    function hookReserved(address consumer, Currency currency) external view returns (uint256);
+
+    /// @notice Unused capacity currently held by a curator's unreleased allocations, in raw units of `currency`.
+    function curatorReserved(address curator, Currency currency) external view returns (uint256);
+
+    /// @notice Length of one flow-limit window, in seconds.
+    function FLOW_WINDOW() external view returns (uint256);
+
+    /// @notice Stored risk limits and flow usage of one scope in one asset. All-zero (unconfigured) if never set.
+    /// @dev `flowUsed` is the usage of window `epoch`; it is not reset in storage when a window ends, so compare
+    ///      `epoch` with block.timestamp / FLOW_WINDOW before reading it as current usage (`VaultLens` does this).
+    /// @param scope Hook, Curator or Vault.
+    /// @param account The hook or curator; address(0) for the vault scope.
+    /// @param currency The asset the limit applies to (the asset the vault sells).
+    /// @return The stored record.
+    function getRiskLimit(RiskScope scope, address account, Currency currency) external view returns (RiskLimit memory);
+
     /// @notice Stored state of a withdrawal request; an all-zero struct if the id does not exist.
     /// @param requestId Request to read.
     /// @return The request record.

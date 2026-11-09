@@ -100,6 +100,17 @@ contract ReentrancyTest is Test {
             vault.setCuratorCeiling(curators[i], c0, type(uint256).max);
             vault.setCuratorCeiling(curators[i], c1, type(uint256).max);
         }
+        // Risk limits fail closed until configured; open every scope this fixture uses as wide as allowed.
+        address[5] memory scoped = [address(0), h, address(agent), curator, address(agent)];
+        for (uint256 i; i < 5; ++i) {
+            ISharedCommitmentVault.RiskScope sc = i == 0
+                ? ISharedCommitmentVault.RiskScope.Vault
+                : i < 3 ? ISharedCommitmentVault.RiskScope.Hook : ISharedCommitmentVault.RiskScope.Curator;
+            vault.setRiskLimit(sc, scoped[i], c0, type(uint104).max, 10_000);
+            vault.setRiskLimit(sc, scoped[i], c1, type(uint104).max, 10_000);
+        }
+        vault.setRiskLimit(ISharedCommitmentVault.RiskScope.Curator, h, c0, type(uint104).max, 10_000);
+        vault.setRiskLimit(ISharedCommitmentVault.RiskScope.Curator, h, c1, type(uint104).max, 10_000);
         vm.stopPrank();
 
         _fund(owner, FUNDING);

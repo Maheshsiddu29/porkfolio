@@ -57,6 +57,8 @@ contract ZeroAssetStatesTest is VaultTestBase {
         vm.startPrank(owner);
         vault.setConsumer(e, true);
         vault.setConsumer(m, true);
+        _openLimits(ISharedCommitmentVault.RiskScope.Hook, e);
+        _openLimits(ISharedCommitmentVault.RiskScope.Hook, m);
         vm.stopPrank();
     }
 

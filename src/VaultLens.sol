@@ -9,8 +9,8 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 
 /// @title VaultLens
 /// @notice Read-only helpers for `SharedCommitmentVault`: deposit and redemption previews, the status of a queued
-///         request, and the derived quantities N_a, F_a, D_a, deliverable shares and an allocation's effective
-///         price floor.
+///         request, the derived quantities N_a, F_a, D_a, E_a, deliverable shares and an allocation's effective
+///         price floor, and the headroom left under each flow and exposure limit.
 /// @dev These views are kept out of the vault to leave room in its bytecode under the EIP-170 limit. That is safe
 ///      because none of them is needed as an external function by the vault itself: the vault keeps its own
 ///      internal copy of every formula it enforces.
@@ -54,7 +54,7 @@ contract VaultLens {
     /// @param vault Vault to read.
     /// @param currency Asset to evaluate.
     /// @return Raw units of `currency`, or 0 when nothing is pending.
-    function pendingDemand(IVaultState vault, Currency currency) external view returns (uint256) {
+    function pendingDemand(IVaultState vault, Currency currency) public view returns (uint256) {
         uint256 p = vault.pendingShares();
         if (p == 0) return 0;
         return FullMath.mulDivRoundingUp(p, netAssets(vault, currency), vault.totalShares());
@@ -154,5 +154,78 @@ contract VaultLens {
         if (r.claimable0 != 0 || r.claimable1 != 0) return ISharedCommitmentVault.RequestStatus.Claimable;
         return
             r.canceled ? ISharedCommitmentVault.RequestStatus.Canceled : ISharedCommitmentVault.RequestStatus.Completed;
+    }
+
+    /// @notice E_a = N_a - D_a: the backing exposure caps are measured against. Excludes assets owed to finalized
+    ///         requests (through N_a) and the queue's pro-rata claim D_a.
+    /// @dev Same as the value `allocate` computes. D_a <= N_a, so this cannot underflow.
+    /// @param vault Vault to read.
+    /// @param currency Asset to evaluate.
+    /// @return Raw units of `currency`.
+    function eligibleBacking(IVaultState vault, Currency currency) public view returns (uint256) {
+        return netAssets(vault, currency) - pendingDemand(vault, currency);
+    }
+
+    /// @notice Gross output already paid under one scope in the current flow window.
+    /// @dev The stored usage counts only if it belongs to the current window, block.timestamp / FLOW_WINDOW;
+    ///      usage stored for an earlier window is zero now. This is exactly the value `exchange` starts from.
+    /// @param vault Vault to read.
+    /// @param scope Hook, Curator or Vault.
+    /// @param account The hook or curator; address(0) for the vault scope.
+    /// @param currency Asset paid out.
+    /// @return Raw units of `currency`.
+    function flowUsed(IVaultState vault, ISharedCommitmentVault.RiskScope scope, address account, Currency currency)
+        public
+        view
+        returns (uint256)
+    {
+        ISharedCommitmentVault.RiskLimit memory l = vault.getRiskLimit(scope, account, currency);
+        return l.epoch == block.timestamp / vault.FLOW_WINDOW() ? l.flowUsed : 0;
+    }
+
+    /// @notice Most output one scope may still pay in the current window: max(0, flowCap - used), and 0 for an
+    ///         unconfigured record (which `exchange` refuses outright).
+    /// @dev A single `exchange` is limited by the minimum of this value over its hook, its curator and the vault.
+    /// @param vault Vault to read.
+    /// @param scope Hook, Curator or Vault.
+    /// @param account The hook or curator; address(0) for the vault scope.
+    /// @param currency Asset paid out.
+    /// @return Raw units of `currency`.
+    function flowAvailable(
+        IVaultState vault,
+        ISharedCommitmentVault.RiskScope scope,
+        address account,
+        Currency currency
+    ) external view returns (uint256) {
+        ISharedCommitmentVault.RiskLimit memory l = vault.getRiskLimit(scope, account, currency);
+        if (!l.configured) return 0;
+        uint256 used = flowUsed(vault, scope, account, currency);
+        return l.flowCap > used ? l.flowCap - used : 0;
+    }
+
+    /// @notice Largest new allocation one scope's exposure cap accepts right now:
+    ///         max(0, floor(maxReservedBps * E_a / 10,000) - held), and 0 for an unconfigured record.
+    /// @dev `held` is hookReserved, curatorReserved or Q_a for the Hook, Curator and Vault scopes. `allocate` also
+    ///      applies the admission rule, the curator ceiling and the other two scopes' caps.
+    /// @param vault Vault to read.
+    /// @param scope Hook, Curator or Vault.
+    /// @param account The hook or curator; address(0) for the vault scope.
+    /// @param currency Asset the allocation would sell.
+    /// @return Raw units of `currency`.
+    function exposureAvailable(
+        IVaultState vault,
+        ISharedCommitmentVault.RiskScope scope,
+        address account,
+        Currency currency
+    ) external view returns (uint256) {
+        ISharedCommitmentVault.RiskLimit memory l = vault.getRiskLimit(scope, account, currency);
+        if (!l.configured) return 0;
+        uint256 held = scope == ISharedCommitmentVault.RiskScope.Hook
+            ? vault.hookReserved(account, currency)
+            : scope == ISharedCommitmentVault.RiskScope.Curator
+                ? vault.curatorReserved(account, currency)
+                : vault.reserved(currency);
+        uint256 limit = uint256(l.maxReservedBps) * eligibleBacking(vault, currency) / 10_000;
+        return limit > held ? limit - held : 0;
     }
 }

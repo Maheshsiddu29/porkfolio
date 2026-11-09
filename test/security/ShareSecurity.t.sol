@@ -251,6 +251,7 @@ contract ShareSecurityTest is VaultTestBase {
         manager.initialize(keyM, SQRT_PRICE_1_1);
         vm.prank(owner);
         vault.setConsumer(addr, true);
+        _openLimitsAsOwner(ISharedCommitmentVault.RiskScope.Hook, addr);
         uint256 mid = _allocate(keyM, c1, 1000 ether);
 
         m.configure(MaliciousConsumerHook.Attack.TransferFromVault, mid, w1);

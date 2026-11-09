@@ -39,6 +39,7 @@ contract PricePolicyTest is VaultTestBase {
         manager.initialize(keyM, SQRT_PRICE_1_1);
         vm.startPrank(owner);
         vault.setConsumer(m, true);
+        _openLimits(ISharedCommitmentVault.RiskScope.Hook, m);
         vault.setGuardian(guardian);
         vault.setCuratorCeiling(curator, c0, type(uint256).max);
         vault.setCuratorCeiling(curator, c1, type(uint256).max);
@@ -416,7 +417,26 @@ contract PricePolicyTest is VaultTestBase {
 
         // Leg 2: the trader sells all out1 back; the vault pays the maximum floor(out1 * 2^96 / f0) token0.
         uint256 back = FullMath.mulDiv(out1, Q96, f0);
-        if (back != 0) _trade(_allocM(c0, uint128(back), uint160(f0)), c0, out1, back);
+        if (back > MAX_FLOW_CAP) {
+            // A single output above the largest configurable flow cap (2^104 - 1 per window) cannot execute at
+            // all: the flow limit refuses it before any claim moves. The floor arithmetic is still checked below.
+            _tradeExpect(
+                _allocM(c0, uint128(back), uint160(f0)),
+                c0,
+                out1,
+                back,
+                abi.encodeWithSelector(
+                    ISharedCommitmentVault.FlowLimitExceeded.selector,
+                    ISharedCommitmentVault.RiskScope.Hook,
+                    address(mal),
+                    c0,
+                    back,
+                    MAX_FLOW_CAP
+                )
+            );
+        } else if (back != 0) {
+            _trade(_allocM(c0, uint128(back), uint160(f0)), c0, out1, back);
+        }
         assertLe(back, x, "round trip at the floors is never profitable");
         _assertEquations();
     }
