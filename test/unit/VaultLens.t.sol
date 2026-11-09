@@ -139,10 +139,10 @@ contract VaultLensTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c, uint128(left + 1));
         vm.prank(curator);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InsufficientBacking.selector, left + 1, left));
-        vault.allocate(req);
+        auth.activateDirect(req);
         req = _request(keyA, c, uint128(left));
         vm.prank(curator);
-        vault.allocate(req);
+        auth.activateDirect(req);
         vm.revertToState(snap);
     }
 

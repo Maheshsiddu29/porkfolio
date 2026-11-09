@@ -267,7 +267,7 @@ contract QueueGriefingTest is VaultTestBase {
         req.maxOut = uint128(vault.admissibleCapacity(c1));
         if (req.maxOut > 0) {
             vm.prank(curator);
-            vault.allocate(req); // cannot take what the queue needs: admission subtracts D
+            auth.activateDirect(req); // cannot take what the queue needs: admission subtracts D
         }
         vault.processQueue(100);
         assertEq(vault.pendingShares(), 0, "all pending demand was protected from the new allocation");

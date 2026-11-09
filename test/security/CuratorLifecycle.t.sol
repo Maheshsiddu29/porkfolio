@@ -78,7 +78,7 @@ contract CuratorLifecycleTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, 1 ether);
         vm.prank(curator);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.CuratorNotRegistered.selector, curator));
-        vault.allocate(req);
+        auth.activateDirect(req);
 
         _swap(keyA, true, 1000 ether, id); // still a commitment to the hook
         assertGt(vault.getAllocation(id).consumed, 0);
@@ -120,7 +120,7 @@ contract CuratorLifecycleTest is VaultTestBase {
                 ISharedCommitmentVault.CuratorRestriction.Frozen
             )
         );
-        vault.allocate(req);
+        auth.activateDirect(req);
         assertEq(vault.reserved(c1), 10_000 ether, "reservation kept while frozen");
         _assertEquations();
     }
@@ -168,7 +168,7 @@ contract CuratorLifecycleTest is VaultTestBase {
                 ISharedCommitmentVault.CuratorRestriction.Frozen
             )
         );
-        vault.allocate(req);
+        auth.activateDirect(req);
         // A fully consumed allocation releases nothing: consumed output is never returned as unused capacity.
         vm.prank(owner);
         vault.release(id);
@@ -222,7 +222,7 @@ contract CuratorLifecycleTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, 1 ether);
         vm.prank(curator);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.CuratorNotRegistered.selector, curator));
-        vault.allocate(req);
+        auth.activateDirect(req);
         _swap(keyA, true, 1 ether, id); // a deregistered, unrestricted curator's allocation is consumable
     }
 
@@ -422,7 +422,7 @@ contract CuratorLifecycleTest is VaultTestBase {
                 ISharedCommitmentVault.CuratorRestriction.Revoked
             )
         );
-        vault.allocate(req);
+        auth.activateDirect(req);
         // The curator can still raise its own generation (harmless), and cleanup still works.
         vm.prank(curator);
         assertEq(vault.bumpGeneration(), 1);
@@ -602,7 +602,7 @@ contract CuratorLifecycleTest is VaultTestBase {
     function _allocateAs(address who, PoolKey memory key, Currency out, uint128 maxOut) internal returns (uint256) {
         ISharedCommitmentVault.AllocationRequest memory req = _request(key, out, maxOut);
         vm.prank(who);
-        return vault.allocate(req);
+        return auth.activateDirect(req);
     }
 
     function _assertRecord(

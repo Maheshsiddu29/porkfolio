@@ -20,6 +20,8 @@ import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
 import {VaultLens} from "../../src/VaultLens.sol";
+import {CuratorAuthorization} from "../../src/CuratorAuthorization.sol";
+import {IVaultState} from "../../src/interfaces/IVaultState.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {HookA_DynamicFee} from "../../src/hooks/HookA_DynamicFee.sol";
 import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
@@ -28,10 +30,12 @@ import {ProductionArtifacts} from "./ProductionArtifacts.sol";
 
 /// @notice Shared fixture: REAL v4-core PoolManager (pinned), two distinct hooks on two distinct pools that
 ///         share one vault, and a funded vault. No PoolManager behaviour is mocked.
-/// @dev Production builds. The PoolManager and both hooks are deployed from their production artifact files
+/// @dev Production builds. The PoolManager, both hooks, the lens and the authorization module are deployed from their
+///      production artifact files
 ///      (`ProductionArtifacts`), not compiled into this file: a file that imports the vault is compiled under the
 ///      vault's 2,000-run profile, and a `new PoolManager` or a by-name `deployCode` here would deploy 2,000-run
-///      builds. The vault has a single artifact, so `new SharedCommitmentVault` is already its production build.
+///      builds. Curators allocate through the module's direct path (`_allocate`), the only way to create an
+///      allocation. The vault has a single artifact, so `new SharedCommitmentVault` is already its production build.
 ///      `test/unit/ProductionBuilds.t.sol` checks every one of them against its artifact's recorded settings and
 ///      runtime-code hash. Test-only contracts (routers, malicious hooks) are compiled here; they are never deployed.
 abstract contract VaultTestBase is Test {
@@ -52,6 +56,7 @@ abstract contract VaultTestBase is Test {
 
     SharedCommitmentVault internal vault;
     VaultLens internal lens; // stateless read-only helpers (previews, N_a, F_a, D_a, request status)
+    CuratorAuthorization internal auth; // the vault's authorization module: the only caller of reserveFor
     HookA_DynamicFee internal hookA;
     HookB_BoundedImpact internal hookB;
     PoolKey internal keyA; // HookA pool: fee 3000 / tickSpacing 60
@@ -80,6 +85,7 @@ abstract contract VaultTestBase is Test {
 
         vault = new SharedCommitmentVault(manager, owner, c0, c1);
         lens = VaultLens(deployCode(ProductionArtifacts.LENS));
+        auth = _deployAuth(vault);
         batchRouter = new BatchSwapRouter(manager, address(vault));
 
         hookA = HookA_DynamicFee(_deployHook(ProductionArtifacts.HOOK_A, 0xA11CE));
@@ -96,6 +102,7 @@ abstract contract VaultTestBase is Test {
         vm.stopPrank();
 
         vm.startPrank(owner);
+        vault.setAuthModule(address(auth));
         vault.setConsumer(address(hookA), true);
         vault.setConsumer(address(hookB), true);
         vault.setCurator(curator, true);
@@ -147,6 +154,19 @@ abstract contract VaultTestBase is Test {
         vm.startPrank(owner);
         _openLimits(scope, account);
         vm.stopPrank();
+    }
+
+    /// @dev The production build of the authorization module, bound to `v`. Not installed; the owner of `v` must call
+    ///      `setAuthModule`.
+    function _deployAuth(SharedCommitmentVault v) internal returns (CuratorAuthorization) {
+        return CuratorAuthorization(deployCode(ProductionArtifacts.authModule(), abi.encode(IVaultState(address(v)))));
+    }
+
+    /// @dev Deploys a module for `v` and installs it as `v`'s owner.
+    function _installAuth(SharedCommitmentVault v) internal returns (CuratorAuthorization a) {
+        a = _deployAuth(v);
+        vm.prank(v.owner());
+        v.setAuthModule(address(a));
     }
 
     function _hookAddress(uint256 salt) internal pure returns (address) {
@@ -210,7 +230,7 @@ abstract contract VaultTestBase is Test {
     function _allocate(PoolKey memory key, Currency out, uint128 maxOut) internal returns (uint256 id) {
         ISharedCommitmentVault.AllocationRequest memory req = _request(key, out, maxOut);
         vm.prank(curator);
-        id = vault.allocate(req);
+        id = auth.activateDirect(req);
     }
 
     function _swap(PoolKey memory key, bool zeroForOne, uint256 amountIn, uint256 allocationId)

@@ -8,6 +8,7 @@ import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
+import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {AuthModeHook} from "../utils/AuthModeHook.sol";
 
@@ -122,12 +123,12 @@ contract CuratorCancellationTest is VaultTestBase {
     function test_CC_cancelThenResubmitSameInstruction_reverts() public {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, 10_000 ether);
         vm.prank(curator);
-        uint256 id = vault.allocate(req);
+        uint256 id = auth.activateDirect(req);
         vm.prank(curator);
         vault.cancelAllocation(id);
         vm.prank(curator);
-        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.NonceAlreadyUsed.selector, curator, req.nonce));
-        vault.allocate(req);
+        vm.expectRevert(abi.encodeWithSelector(ICuratorAuthorization.NonceAlreadyUsed.selector, curator, req.nonce));
+        auth.activateDirect(req);
         uint256 id2 = _allocate(keyA, c1, 10_000 ether);
         assertGt(id2, id, "ids are never reused");
         assertTrue(vault.getAllocation(id).released, "old id stays closed");
@@ -360,7 +361,7 @@ contract CuratorCancellationTest is VaultTestBase {
     function _allocateAs(address who, PoolKey memory key, Currency out, uint128 maxOut) internal returns (uint256) {
         ISharedCommitmentVault.AllocationRequest memory req = _request(key, out, maxOut);
         vm.prank(who);
-        return vault.allocate(req);
+        return auth.activateDirect(req);
     }
 
     function _cancel(address who, uint256 id) internal {

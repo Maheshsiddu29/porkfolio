@@ -93,7 +93,7 @@ contract AdmissibleCapacityTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, 1);
         vm.prank(curator);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InsufficientBacking.selector, 1, 0));
-        vault.allocate(req);
+        auth.activateDirect(req);
 
         // The other asset is unaffected.
         assertEq(vault.admissibleCapacity(c0), _referenceFor(c0));
@@ -119,7 +119,7 @@ contract AdmissibleCapacityTest is VaultTestBase {
             ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, 1);
             vm.prank(curator);
             vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InsufficientBacking.selector, 1, 0));
-            vault.allocate(req);
+            auth.activateDirect(req);
         }
     }
 
@@ -145,7 +145,7 @@ contract AdmissibleCapacityTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, uint128(cap));
         vm.prank(curator);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InsufficientBacking.selector, cap, cap - 1));
-        vault.allocate(req);
+        auth.activateDirect(req);
 
         // Exact fit.
         vm.prank(owner);
@@ -160,7 +160,7 @@ contract AdmissibleCapacityTest is VaultTestBase {
         req = _request(keyA, c1, 1);
         vm.prank(curator);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InsufficientBacking.selector, 1, 0));
-        vault.allocate(req);
+        auth.activateDirect(req);
     }
 
     // ------------------------------------------------------------------
@@ -245,10 +245,10 @@ contract AdmissibleCapacityTest is VaultTestBase {
             vm.expectRevert(
                 abi.encodeWithSelector(ISharedCommitmentVault.InsufficientBacking.selector, maxOut, expected)
             );
-            vault.allocate(req);
+            auth.activateDirect(req);
             assertEq(vault.reserved(c1), qBefore);
         } else {
-            vault.allocate(req);
+            auth.activateDirect(req);
             assertEq(vault.reserved(c1), qBefore + maxOut);
             assertLe(
                 vault.reserved(c1) + vault.bufferFloor(c1) + lens.pendingDemand(vault, c1), n, "admission rule held"

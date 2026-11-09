@@ -177,7 +177,7 @@ contract MultiLpAccountingTest is VaultTestBase {
                 ISharedCommitmentVault.InsufficientBacking.selector, 1_000_000 ether + 1, 1_000_000 ether
             )
         );
-        vault.allocate(r);
+        auth.activateDirect(r);
         assertEq(vault.processQueue(10), 0, "no token1 inventory yet");
 
         // Commitment partly consumed, then expires and is released.
@@ -412,7 +412,7 @@ contract MultiLpAccountingTest is VaultTestBase {
             ISharedCommitmentVault.AllocationRequest memory r = _request(keyB, c1, uint128(later < cap ? later : cap));
             r.expiry = uint64(block.timestamp + 20 days);
             vm.prank(curator);
-            vault.allocate(r);
+            auth.activateDirect(r);
         }
         // Traders keep consuming the old commitment.
         swapIn = bound(swapIn, 0, q1 / 2);

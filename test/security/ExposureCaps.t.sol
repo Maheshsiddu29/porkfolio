@@ -129,7 +129,7 @@ contract ExposureCapsTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory all0 =
             _request(keyE1, c0, uint128(vault.admissibleCapacity(c0)));
         vm.prank(curator);
-        uint256 lock0 = vault.allocate(all0);
+        uint256 lock0 = auth.activateDirect(all0);
         (uint256 instant,,, uint256 req) = _redeem(lp0, 200_000 ether, true);
         assertEq(instant, 0, "asset0 fully committed: everything queues");
         assertGt(req, 0);
@@ -240,7 +240,7 @@ contract ExposureCapsTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyE1, c1, 1);
         vm.prank(curator);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InsufficientBacking.selector, 1, 0));
-        vault.allocate(req);
+        auth.activateDirect(req);
     }
 
     /// @notice Random caps and backing sizes, up to 2^120 raw units: the vault accepts exactly the amounts the
@@ -276,7 +276,7 @@ contract ExposureCapsTest is VaultTestBase {
         // One more unit is refused, by an exposure cap or by the admission rule, whichever binds.
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyE1, c1, 1);
         vm.prank(curator);
-        try vault.allocate(req) {
+        try auth.activateDirect(req) {
             assertTrue(false, "one unit above the binding limit was accepted");
         } catch (bytes memory err) {
             bytes4 sel = bytes4(err);
@@ -309,7 +309,7 @@ contract ExposureCapsTest is VaultTestBase {
     function _alloc(address who, PoolKey memory key, uint128 maxOut) internal returns (uint256) {
         ISharedCommitmentVault.AllocationRequest memory req = _request(key, c1, maxOut);
         vm.prank(who);
-        return vault.allocate(req);
+        return auth.activateDirect(req);
     }
 
     function _allocReverts(
@@ -327,7 +327,7 @@ contract ExposureCapsTest is VaultTestBase {
                 ISharedCommitmentVault.ExposureCapExceeded.selector, scope, account, c1, maxOut, available
             )
         );
-        vault.allocate(req);
+        auth.activateDirect(req);
     }
 
     function _swapE(PoolKey memory key, uint256 id, uint256 amount) internal {

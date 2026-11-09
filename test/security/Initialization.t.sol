@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {CuratorAuthorization} from "../../src/CuratorAuthorization.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {ClaimDonor} from "../utils/ClaimDonor.sol";
@@ -62,6 +63,7 @@ contract InitializationTest is VaultTestBase {
         vm.stopPrank();
 
         // A registered curator cannot commit capacity of an empty vault.
+        CuratorAuthorization av = _installAuth(v);
         vm.startPrank(owner);
         v.setConsumer(address(hookA), true);
         v.setCurator(curator, true);
@@ -71,7 +73,7 @@ contract InitializationTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c1, 1);
         vm.prank(curator);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InsufficientBacking.selector, 1, 0));
-        v.allocate(r);
+        av.activateDirect(r);
 
         vm.prank(owner);
         uint256 shares = v.initialDeposit(4000 ether, 1000 ether, lpA);

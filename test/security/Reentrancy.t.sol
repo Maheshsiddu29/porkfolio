@@ -17,6 +17,9 @@ import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
+import {CuratorAuthorization} from "../../src/CuratorAuthorization.sol";
+import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
+import {IVaultState} from "../../src/interfaces/IVaultState.sol";
 import {ReentrantToken, ReentryAgent} from "../utils/ReentrantToken.sol";
 import {ScriptedHook} from "../utils/ScriptedHook.sol";
 import {ClaimDonor} from "../utils/ClaimDonor.sol";
@@ -51,6 +54,7 @@ contract ReentrancyTest is Test {
     Currency internal c0;
     Currency internal c1;
     SharedCommitmentVault internal vault;
+    CuratorAuthorization internal auth;
     ScriptedHook internal hook;
     ReentryAgent internal agent;
     PoolKey internal key; // pool of the scripted hook
@@ -80,6 +84,8 @@ contract ReentrancyTest is Test {
         c0 = Currency.wrap(address(t0));
         c1 = Currency.wrap(address(t1));
         vault = new SharedCommitmentVault(manager, owner, c0, c1);
+        auth =
+            CuratorAuthorization(deployCode(ProductionArtifacts.authModule(), abi.encode(IVaultState(address(vault)))));
         agent = new ReentryAgent();
 
         address h = address(uint160(0x5C1 << 140) | Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG);
@@ -90,6 +96,7 @@ contract ReentrancyTest is Test {
         manager.initialize(key, SQRT_PRICE_1_1);
 
         vm.startPrank(owner);
+        vault.setAuthModule(address(auth));
         vault.setConsumer(h, true);
         vault.setConsumer(address(agent), true);
         vault.setSellFloor(c0, PRICE_1_1_X96);
@@ -158,10 +165,10 @@ contract ReentrancyTest is Test {
     /// @notice Inside a deposit's `transferFrom` (B_a raised, claims not yet minted), every locked entry point
     ///         rejects the agent with `ReentrantCall`, and the deposit itself completes with exact accounting.
     function test_RE_depositWindow_everyLockedEntryPointRejectsReentry() public {
-        bytes[] memory calls = _lockedCalls();
+        (address[] memory to, bytes[] memory calls) = _lockedCalls();
         for (uint256 i; i < calls.length; ++i) {
             uint256 snap = vm.snapshotState();
-            _arm(t0, calls[i]);
+            _armVia(t0, to[i], calls[i]);
             uint256 sharesBefore = vault.sharesOf(lp);
             (uint256 a0, uint256 a1) = _depositAsLp(1000 ether);
             assertEq(t0.attempts(), 1, "callback ran");
@@ -181,10 +188,10 @@ contract ReentrancyTest is Test {
         vault.release(assetOneLock);
         vault.processQueue(10);
         assertEq(vault.pendingShares(), 0);
-        bytes[] memory calls = _lockedCalls();
+        (address[] memory to, bytes[] memory calls) = _lockedCalls();
         for (uint256 i; i < calls.length; ++i) {
             uint256 snap = vm.snapshotState();
-            _arm(t1, calls[i]);
+            _armVia(t1, to[i], calls[i]);
             uint256 before1 = t1.balanceOf(lp);
             uint256 backing1 = vault.backing(c1);
             vm.prank(lp);
@@ -328,18 +335,18 @@ contract ReentrancyTest is Test {
     function test_RE_hook_unexpectedNestedCalls_revertAtomically() public {
         _freeAssetOne();
         ISharedCommitmentVault.AllocationRequest memory req = _request(key, c1, 10_000 ether, 1 days);
-        bytes memory ret = hook.exec(address(vault), abi.encodeCall(vault.allocate, (req)));
+        bytes memory ret = hook.exec(address(auth), abi.encodeCall(auth.activateDirect, (req)));
         uint256 id = abi.decode(ret, (uint256));
         uint256[6] memory before = _state(id);
 
         ScriptedHook.Call[] memory pre = new ScriptedHook.Call[](2);
         pre[0] = ScriptedHook.Call(address(vault), abi.encodeCall(vault.cancelAllocation, (id)));
-        pre[1] = ScriptedHook.Call(address(vault), abi.encodeCall(vault.allocate, (req)));
+        pre[1] = ScriptedHook.Call(address(auth), abi.encodeCall(auth.activateDirect, (req)));
         hook.script(pre, _none(), _none(), 0);
         _swapReverts(
             1000 ether,
             id,
-            abi.encodeWithSelector(ISharedCommitmentVault.NonceAlreadyUsed.selector, address(hook), req.nonce)
+            abi.encodeWithSelector(ICuratorAuthorization.NonceAlreadyUsed.selector, address(hook), req.nonce)
         );
         _assertStateUnchanged(before, id);
 
@@ -371,16 +378,23 @@ contract ReentrancyTest is Test {
     // Helpers
     // ------------------------------------------------------------------
 
-    /// @dev One call per locked entry point, each made by the agent with every precondition satisfied.
-    function _lockedCalls() internal returns (bytes[] memory c) {
+    /// @dev One call per locked entry point, each made by the agent with every precondition satisfied. Allocation
+    ///      creation is reached the only way it can be, through the module's direct path; the module bubbles the
+    ///      vault's `ReentrantCall` from `reserveFor`.
+    function _lockedCalls() internal returns (address[] memory to, bytes[] memory c) {
         c = new bytes[](10);
+        to = new address[](10);
+        for (uint256 i; i < 10; ++i) {
+            to[i] = address(vault);
+        }
+        to[6] = address(auth);
         c[0] = abi.encodeCall(vault.deposit, (100 ether, 1e30, 1e30, address(agent)));
         c[1] = abi.encodeCall(vault.initialDeposit, (1 ether, 1 ether, address(agent)));
         c[2] = abi.encodeCall(vault.redeem, (10 ether, 0, 0, address(agent), true));
         c[3] = abi.encodeCall(vault.processQueue, (5));
         c[4] = abi.encodeCall(vault.cancelRequest, (pendingReq));
         c[5] = abi.encodeCall(vault.claim, (claimableReq));
-        c[6] = abi.encodeCall(vault.allocate, (_request(agentKey, c0, 1 ether, 1 days)));
+        c[6] = abi.encodeCall(auth.activateDirect, (_request(agentKey, c0, 1 ether, 1 days)));
         c[7] = abi.encodeCall(vault.release, (expiredId));
         c[8] = abi.encodeCall(vault.cancelAllocation, (agentAllocId));
         c[9] = abi.encodeCall(vault.exchange, (agentKey, false, agentExchangeId, 10 ether, 10 ether));
@@ -401,7 +415,7 @@ contract ReentrancyTest is Test {
             "processQueue",
             "cancelRequest",
             "claim",
-            "allocate",
+            "reserveFor (via module)",
             "release",
             "cancelAllocation",
             "exchange"
@@ -411,6 +425,10 @@ contract ReentrancyTest is Test {
 
     function _arm(ReentrantToken t, bytes memory vaultCall) internal {
         t.arm(address(agent), abi.encodeCall(agent.exec, (address(vault), vaultCall)));
+    }
+
+    function _armVia(ReentrantToken t, address to, bytes memory data) internal {
+        t.arm(address(agent), abi.encodeCall(agent.exec, (to, data)));
     }
 
     function _armDirect(ReentrantToken t, address to, bytes memory data) internal {
@@ -472,10 +490,10 @@ contract ReentrancyTest is Test {
     {
         ISharedCommitmentVault.AllocationRequest memory req = _request(k, out, maxOut, lifetime);
         if (who.code.length != 0) {
-            id = abi.decode(_as(who, address(vault), abi.encodeCall(vault.allocate, (req))), (uint256));
+            id = abi.decode(_as(who, address(auth), abi.encodeCall(auth.activateDirect, (req))), (uint256));
         } else {
             vm.prank(who);
-            id = vault.allocate(req);
+            id = auth.activateDirect(req);
         }
     }
 
@@ -555,8 +573,11 @@ contract ReentrancyTest is Test {
         }
     }
 
-    /// @notice This file builds its own fixture; its vault and PoolManager are the production builds.
+    /// @notice This file builds its own fixture; its vault, module and PoolManager are the production builds.
     function test_RE_productionBuilds() public view {
+        ProductionArtifacts.requireProduction(
+            address(auth), ProductionArtifacts.authModule(), ProductionArtifacts.DEFAULT_RUNS
+        );
         ProductionArtifacts.requireProduction(address(vault), ProductionArtifacts.VAULT, ProductionArtifacts.VAULT_RUNS);
         ProductionArtifacts.requireProduction(
             address(manager), ProductionArtifacts.poolManager(), ProductionArtifacts.DEFAULT_RUNS

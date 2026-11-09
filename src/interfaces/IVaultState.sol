@@ -45,6 +45,9 @@ interface IVaultState is ISharedCommitmentVault {
     /// @return The curator record.
     function getCurator(address curator) external view returns (CuratorRecord memory);
 
+    /// @notice The authorization module allowed to call `reserveFor`; zero when none is installed.
+    function authModule() external view returns (address);
+
     /// @notice Unused capacity currently held by a hook's unreleased allocations, in raw units of `currency`.
     function hookReserved(address consumer, Currency currency) external view returns (uint256);
 

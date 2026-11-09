@@ -10,6 +10,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {CuratorAuthorization} from "../../src/CuratorAuthorization.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
@@ -23,7 +24,7 @@ contract PricePolicyTest is VaultTestBase {
     uint160 internal constant SWAP_FLAGS = Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG;
     uint256 internal constant Q96 = FixedPoint96.Q96;
     uint160 internal constant MAX_FLOOR = type(uint160).max;
-    uint256 internal constant SELL_POLICY_SLOT = 11; // `forge inspect SharedCommitmentVault storageLayout`
+    uint256 internal constant SELL_POLICY_SLOT = 10; // `forge inspect SharedCommitmentVault storageLayout`
 
     address internal guardian = makeAddr("guardian");
     address internal lpA = makeAddr("lpA");
@@ -54,7 +55,7 @@ contract PricePolicyTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyM, out, maxOut);
         r.minInPerOutX96 = curatorFloor;
         vm.prank(curator);
-        id = vault.allocate(r);
+        id = auth.activateDirect(r);
     }
 
     /// @dev Swap through the registered test hook paying exactly `amountIn` for exactly `amountOut`.
@@ -130,16 +131,17 @@ contract PricePolicyTest is VaultTestBase {
         r.minInPerOutX96 = 0;
         vm.prank(curator);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.FloorBelowVaultMinimum.selector, 0, Q96));
-        vault.allocate(r);
+        auth.activateDirect(r);
         r.minInPerOutX96 = uint160(Q96 - 1);
         vm.prank(curator);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.FloorBelowVaultMinimum.selector, Q96 - 1, Q96));
-        vault.allocate(r);
+        auth.activateDirect(r);
     }
 
     /// @notice A vault whose floors were never configured accepts no allocation in either direction.
     function test_PP_unconfiguredDirection_isClosed() public {
         SharedCommitmentVault v = new SharedCommitmentVault(manager, owner, c0, c1);
+        CuratorAuthorization av = _installAuth(v);
         vm.startPrank(owner);
         v.setCurator(curator, true);
         v.setConsumer(address(hookA), true);
@@ -153,7 +155,7 @@ contract PricePolicyTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c1, 1);
         vm.prank(curator);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.PriceFloorNotConfigured.selector, c1));
-        v.allocate(r);
+        av.activateDirect(r);
         // Opening a direction is owner-only: the guardian cannot do it.
         vm.prank(owner);
         v.setGuardian(guardian);
@@ -326,7 +328,7 @@ contract PricePolicyTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c1, 1 ether);
         vm.prank(curator);
         vm.expectRevert(halted);
-        vault.allocate(r);
+        auth.activateDirect(r);
         vm.expectRevert(halted);
         lens.effectiveFloorX96(vault, id1);
 

@@ -17,7 +17,9 @@ import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 import {PoolModifyLiquidityTest} from "@uniswap/v4-core/src/test/PoolModifyLiquidityTest.sol";
 
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
+import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
 import {IBenchVault, IBenchHook} from "./IBench.sol";
+import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
 
 /// @title Production-artifact gas and size benchmark
 /// @notice Measures size and gas on the bytecode that would be deployed, not on copies compiled for tests.
@@ -60,6 +62,7 @@ contract ProductionArtifactGasTest is Test {
     Currency internal c0;
     Currency internal c1;
     IBenchVault internal vault;
+    ICuratorAuthorization internal auth;
     address internal hookA;
     address internal hookB;
     PoolKey internal keyA;
@@ -85,6 +88,7 @@ contract ProductionArtifactGasTest is Test {
         c1 = Currency.wrap(address(token1));
 
         vault = IBenchVault(deployCode(VAULT_ARTIFACT, abi.encode(manager, owner, c0, c1)));
+        auth = ICuratorAuthorization(deployCode(ProductionArtifacts.authModule(), abi.encode(vault)));
         hookA = _deployHook(HOOK_A_ARTIFACT, 0xA11CE);
         hookB = _deployHook(HOOK_B_ARTIFACT, 0xB0B);
 
@@ -99,6 +103,7 @@ contract ProductionArtifactGasTest is Test {
         vm.stopPrank();
 
         vm.startPrank(owner);
+        vault.setAuthModule(address(auth));
         vault.setConsumer(hookA, true);
         vault.setConsumer(hookB, true);
         vault.setCurator(curator, true);
@@ -234,7 +239,7 @@ contract ProductionArtifactGasTest is Test {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, 100_000 ether);
         vm.prank(curator);
         uint256 g = gasleft();
-        vault.allocate(req);
+        auth.activateDirect(req);
         console2.log("BENCH allocate (first in vault):", g - gasleft());
     }
 
@@ -252,7 +257,7 @@ contract ProductionArtifactGasTest is Test {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, 100_000 ether);
         vm.prank(curator2);
         uint256 g = gasleft();
-        vault.allocate(req);
+        auth.activateDirect(req);
         console2.log("BENCH allocate (steady state, new curator):", g - gasleft());
     }
 
@@ -427,7 +432,7 @@ contract ProductionArtifactGasTest is Test {
     function _allocate(address who, PoolKey memory key, Currency out, uint128 maxOut) internal returns (uint256) {
         ISharedCommitmentVault.AllocationRequest memory req = _request(key, out, maxOut);
         vm.prank(who);
-        return vault.allocate(req);
+        return auth.activateDirect(req);
     }
 
     function _swap(PoolKey memory key, bool zeroForOne, int256 amountSpecified, bytes memory hookData) internal {

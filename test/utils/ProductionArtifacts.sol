@@ -40,6 +40,14 @@ library ProductionArtifacts {
         return VM.exists(both) ? both : "out/PoolManager.sol/PoolManager.json";
     }
 
+    /// @dev The authorization module, compiled with the default settings. Like the PoolManager it is also compiled
+    ///      under the vault's profile when a test file imports both, and the default build is then the
+    ///      `.default.json` file.
+    function authModule() internal view returns (string memory) {
+        string memory both = "out/CuratorAuthorization.sol/CuratorAuthorization.default.json";
+        return VM.exists(both) ? both : "out/CuratorAuthorization.sol/CuratorAuthorization.json";
+    }
+
     /// @notice keccak256 of `code` with every immutable slot of `artifact` zeroed.
     /// @dev Immutables (the PoolManager and vault addresses in a hook, the pair in the vault) are written into the
     ///      runtime code at deployment, so deployed code differs from the artifact's `deployedBytecode` exactly at

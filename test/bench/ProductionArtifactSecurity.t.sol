@@ -18,6 +18,7 @@ import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
+import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
 import {IBenchVault, IBenchHook} from "./IBench.sol";
 import {ReentrantToken, ReentryAgent} from "../utils/ReentrantToken.sol";
 import {ScriptedHook} from "../utils/ScriptedHook.sol";
@@ -25,7 +26,8 @@ import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
 
 /// @title Production-artifact security tests
 /// @notice Security-relevant paths run against the exact bytecode that would be deployed: the vault, HookA, HookB and
-///         the pinned v4 PoolManager are each deployed from their production artifact file.
+///         the authorization module and the pinned v4 PoolManager are each deployed from their production artifact
+///         file.
 /// @dev Why this file exists. It imports no project source, only interfaces, so it compiles under the default
 ///      profile and talks to the vault only through its ABI; the functional suite (`VaultTestBase`) also deploys the
 ///      production builds now, but compiles the vault source into its files. This file is the ABI-level check.
@@ -64,6 +66,7 @@ contract ProductionArtifactSecurityTest is Test {
     Currency internal c0;
     Currency internal c1;
     IBenchVault internal vault;
+    ICuratorAuthorization internal auth;
     address internal hookA;
     address internal hookB;
     ScriptedHook internal scripted;
@@ -92,6 +95,7 @@ contract ProductionArtifactSecurityTest is Test {
         c1 = Currency.wrap(address(t1));
 
         vault = IBenchVault(deployCode(VAULT_JSON, abi.encode(manager, owner, c0, c1)));
+        auth = _deployAuth(vault);
         hookA = address(uint160(0xA11CE << 140) | HOOK_FLAGS);
         hookB = address(uint160(0xB0B << 140) | HOOK_FLAGS);
         deployCodeTo(HOOK_A_JSON, abi.encode(manager, vault, hookOwner), hookA);
@@ -113,6 +117,7 @@ contract ProductionArtifactSecurityTest is Test {
 
         vm.startPrank(owner);
         vault.setGuardian(guardian);
+        vault.setAuthModule(address(auth));
         vault.setConsumer(hookA, true);
         vault.setConsumer(hookB, true);
         vault.setConsumer(s, true);
@@ -151,15 +156,18 @@ contract ProductionArtifactSecurityTest is Test {
         _assertProduction(hookA, HOOK_A_JSON, DEFAULT_RUNS);
         _assertProduction(hookB, HOOK_B_JSON, DEFAULT_RUNS);
         _assertProduction(address(manager), PM_JSON, DEFAULT_RUNS);
+        _assertProduction(address(auth), ProductionArtifacts.authModule(), DEFAULT_RUNS);
         ProductionArtifacts.requireProduction(address(vault), VAULT_JSON, VAULT_RUNS);
         ProductionArtifacts.requireProduction(hookA, HOOK_A_JSON, DEFAULT_RUNS);
         ProductionArtifacts.requireProduction(hookB, HOOK_B_JSON, DEFAULT_RUNS);
         ProductionArtifacts.requireProduction(address(manager), PM_JSON, DEFAULT_RUNS);
+        ProductionArtifacts.requireProduction(address(auth), ProductionArtifacts.authModule(), DEFAULT_RUNS);
         console2.log("runtime keccak256 (immutables masked):");
         console2.logBytes32(ProductionArtifacts.artifactRuntimeHash(VAULT_JSON));
         console2.logBytes32(ProductionArtifacts.artifactRuntimeHash(HOOK_A_JSON));
         console2.logBytes32(ProductionArtifacts.artifactRuntimeHash(HOOK_B_JSON));
         console2.logBytes32(ProductionArtifacts.artifactRuntimeHash(PM_JSON));
+        console2.logBytes32(ProductionArtifacts.artifactRuntimeHash(ProductionArtifacts.authModule()));
     }
 
     // ------------------------------------------------------------------
@@ -267,7 +275,7 @@ contract ProductionArtifactSecurityTest is Test {
     ///         (`AlreadyUnlocked`). A pair-token callback during a deposit cannot re-enter the production vault.
     function test_PA_maliciousHookAndTokenReentrancy() public {
         bytes memory r =
-            scripted.exec(address(vault), abi.encodeCall(vault.allocate, (_request(keyS, c1, 10_000 ether))));
+            scripted.exec(address(auth), abi.encodeCall(auth.activateDirect, (_request(keyS, c1, 10_000 ether))));
         uint256 id = abi.decode(r, (uint256));
         ScriptedHook.Call[] memory none = new ScriptedHook.Call[](0);
         ScriptedHook.Call[] memory cancel = new ScriptedHook.Call[](1);
@@ -385,7 +393,7 @@ contract ProductionArtifactSecurityTest is Test {
     function test_PA_flowLimits_splitTradesAndRollback() public {
         _setLimit(HOOK, address(scripted), c1, 1000 ether, 10_000);
         bytes memory r =
-            scripted.exec(address(vault), abi.encodeCall(vault.allocate, (_request(keyS, c1, 10_000 ether))));
+            scripted.exec(address(auth), abi.encodeCall(auth.activateDirect, (_request(keyS, c1, 10_000 ether))));
         uint256 id = abi.decode(r, (uint256));
         ScriptedHook.Call[] memory none = new ScriptedHook.Call[](0);
         scripted.script(none, none, none, 500 ether);
@@ -455,7 +463,9 @@ contract ProductionArtifactSecurityTest is Test {
     ///         and window arithmetic on production builds survives 2^32 and fails closed past the 40-bit epoch.
     function test_PA_failClosedAndTimestampBoundaries() public {
         IBenchVault v = IBenchVault(deployCode(VAULT_JSON, abi.encode(manager, owner, c0, c1)));
+        ICuratorAuthorization av = _deployAuth(v);
         vm.startPrank(owner);
+        v.setAuthModule(address(av));
         v.setConsumer(hookA, true);
         v.setCurator(curator, true);
         v.setSellFloor(c1, PRICE_1_1_X96);
@@ -471,7 +481,7 @@ contract ProductionArtifactSecurityTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(ISharedCommitmentVault.RiskLimitNotConfigured.selector, VAULT, address(0), c1)
         );
-        v.allocate(req);
+        av.activateDirect(req);
 
         _setLimit(CURATOR, curator, c1, 1500 ether, 10_000);
         vm.warp(2 ** 32 - 10);
@@ -584,7 +594,7 @@ contract ProductionArtifactSecurityTest is Test {
                 ISharedCommitmentVault.ExposureCapExceeded.selector, scope, account, c1, maxOut, available
             )
         );
-        vault.allocate(req);
+        auth.activateDirect(req);
     }
 
     /// @dev Hash of every flow record the fixture uses, in both assets.
@@ -611,6 +621,10 @@ contract ProductionArtifactSecurityTest is Test {
         assertTrue(vm.parseJsonBool(json, ".metadata.settings.viaIR"), string.concat(artifact, ": viaIR"));
         assertEq(vm.parseJsonString(json, ".metadata.settings.evmVersion"), "cancun", string.concat(artifact, ": evm"));
         assertEq(deployed.code.length, vm.getDeployedCode(artifact).length, string.concat(artifact, ": code"));
+    }
+
+    function _deployAuth(IBenchVault v) internal returns (ICuratorAuthorization) {
+        return ICuratorAuthorization(deployCode(ProductionArtifacts.authModule(), abi.encode(v)));
     }
 
     function _fund(address who, address spender, uint256 amount) internal {
@@ -642,7 +656,7 @@ contract ProductionArtifactSecurityTest is Test {
     function _allocate(address who, PoolKey memory key, Currency out, uint128 maxOut) internal returns (uint256) {
         ISharedCommitmentVault.AllocationRequest memory req = _request(key, out, maxOut);
         vm.prank(who);
-        return vault.allocate(req);
+        return auth.activateDirect(req);
     }
 
     function _swap(PoolKey memory key, bool zeroForOne, uint256 amountIn, uint256 id)

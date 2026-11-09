@@ -214,7 +214,7 @@ contract ShareSecurityTest is VaultTestBase {
                 ISharedCommitmentVault.InsufficientBacking.selector, 1_000_000 ether + 1, 1_000_000 ether
             )
         );
-        vault.allocate(r);
+        auth.activateDirect(r);
         uint256 id2 = _allocate(keyA, c1, 1_000_000 ether);
 
         // Another LP cannot reach it, a hook can consume the whole commitment without touching it.
@@ -357,7 +357,7 @@ contract ShareSecurityTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyB, c0, 1 ether);
         vm.prank(curator);
         vm.expectRevert(ISharedCommitmentVault.Paused.selector);
-        vault.allocate(r);
+        auth.activateDirect(r);
         _expectSwapRevert(address(hookA), abi.encodeWithSelector(ISharedCommitmentVault.Paused.selector));
         _swap(keyA, true, 1 ether, id);
 

@@ -90,7 +90,7 @@ contract ZeroAssetStatesTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyM, out, uint128(amountOut));
         r.minInPerOutX96 = MIN_CONSISTENT_FLOOR;
         vm.prank(curator);
-        uint256 id = vault.allocate(r);
+        uint256 id = auth.activateDirect(r);
         pay = FullMath.mulDivRoundingUp(amountOut, MIN_CONSISTENT_FLOOR, FixedPoint96.Q96);
         mal.configure(MaliciousConsumerHook.Attack.ExactAmounts, id, amountOut);
         _swapRaw(keyM, out == c1, -int256(pay), "");
@@ -124,7 +124,7 @@ contract ZeroAssetStatesTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c1, 1);
         vm.prank(curator);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InsufficientBacking.selector, 1, 0));
-        vault.allocate(r);
+        auth.activateDirect(r);
 
         // Deposits pay only token0 and are fully backed; instant redemptions pay only token0.
         (uint256 d0, uint256 d1) = _depositShares(lpA, 1000 ether);

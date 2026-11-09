@@ -198,7 +198,7 @@ contract RolesTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, 1 ether);
         vm.prank(curator);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.CuratorNotRegistered.selector, curator));
-        vault.allocate(req);
+        auth.activateDirect(req);
 
         // An existing allocation is a commitment: still consumable until released (CA §7.5), and the guardian can
         // release it at once.
@@ -217,7 +217,7 @@ contract RolesTest is VaultTestBase {
         vm.prank(owner);
         vault.setCurator(curator, true);
         vm.prank(curator);
-        vault.allocate(req);
+        auth.activateDirect(req);
         _assertEquations();
     }
 

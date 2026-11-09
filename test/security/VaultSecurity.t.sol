@@ -13,6 +13,7 @@ import {stdError} from "forge-std/StdError.sol";
 
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
+import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
 import {BaseCompatibleHook} from "../../src/hooks/BaseCompatibleHook.sol";
 import {HookA_DynamicFee} from "../../src/hooks/HookA_DynamicFee.sol";
 import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
@@ -33,7 +34,7 @@ contract VaultSecurityTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyC, c1, QUOTA);
         vm.prank(curator);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.ConsumerNotRegistered.selector, address(hookC)));
-        vault.allocate(req);
+        auth.activateDirect(req);
     }
 
     function test_revokedHook_cannotConsume() public {
@@ -113,7 +114,7 @@ contract VaultSecurityTest is VaultTestBase {
         req.currencyOut = Currency.wrap(address(0xdead));
         vm.prank(curator);
         vm.expectRevert(ISharedCommitmentVault.InvalidCurrency.selector);
-        vault.allocate(req);
+        auth.activateDirect(req);
     }
 
     function test_allocate_consumerKeyMismatch_reverts() public {
@@ -123,7 +124,7 @@ contract VaultSecurityTest is VaultTestBase {
         vm.expectRevert(
             abi.encodeWithSelector(ISharedCommitmentVault.ConsumerMismatch.selector, address(hookB), address(hookA))
         );
-        vault.allocate(req);
+        auth.activateDirect(req);
     }
 
     function test_unknownAllocation_reverts() public {
@@ -164,7 +165,7 @@ contract VaultSecurityTest is VaultTestBase {
         vm.expectRevert(
             abi.encodeWithSelector(ISharedCommitmentVault.CuratorCeilingExceeded.selector, 1001 ether, 1000 ether)
         );
-        vault.allocate(req);
+        auth.activateDirect(req);
     }
 
     function test_unauthorisedCurator_hasZeroCeiling() public {
@@ -172,13 +173,13 @@ contract VaultSecurityTest is VaultTestBase {
         // An unregistered address is rejected before any ceiling is consulted...
         vm.prank(attacker);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.CuratorNotRegistered.selector, attacker));
-        vault.allocate(req);
+        auth.activateDirect(req);
         // ...and registration alone grants no capacity: the ceiling is still zero.
         vm.prank(owner);
         vault.setCurator(attacker, true);
         vm.prank(attacker);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.CuratorCeilingExceeded.selector, 1, 0));
-        vault.allocate(req);
+        auth.activateDirect(req);
     }
 
     function test_insufficientBacking_singleAndAggregate() public {
@@ -192,7 +193,7 @@ contract VaultSecurityTest is VaultTestBase {
                 ISharedCommitmentVault.InsufficientBacking.selector, VAULT_FUNDING + 1, VAULT_FUNDING
             )
         );
-        vault.allocate(req);
+        auth.activateDirect(req);
 
         // Aggregate: Q + newQ + R + D must not exceed N (here D = 0 and N = backing).
         vm.prank(owner);
@@ -205,7 +206,7 @@ contract VaultSecurityTest is VaultTestBase {
                 ISharedCommitmentVault.InsufficientBacking.selector, 300_000 ether + 1, 300_000 ether
             )
         );
-        vault.allocate(req);
+        auth.activateDirect(req);
         _allocate(keyB, c1, 300_000 ether); // exactly at the bound succeeds
         assertEq(vault.reserved(c1) + vault.bufferFloor(c1), vault.backing(c1));
     }
@@ -216,14 +217,14 @@ contract VaultSecurityTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, type(uint128).max);
         vm.prank(curator);
         vm.expectRevert(ISharedCommitmentVault.AmountTooLarge.selector);
-        vault.allocate(req);
+        auth.activateDirect(req);
     }
 
     function test_priceFloor_enforced() public {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, QUOTA);
         req.minInPerOutX96 = uint160(FixedPoint96.Q96 * 101 / 100); // demand >= 1.01 in per out
         vm.prank(curator);
-        uint256 id = vault.allocate(req);
+        uint256 id = auth.activateDirect(req);
 
         uint256 out = hookA.quote(keyA, true, 100 ether, id);
         uint256 requiredIn = (out * req.minInPerOutX96 + FixedPoint96.Q96 - 1) / FixedPoint96.Q96;
@@ -257,7 +258,7 @@ contract VaultSecurityTest is VaultTestBase {
         vm.warp(req.deadline + 1);
         vm.prank(curator);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InstructionExpired.selector, req.deadline));
-        vault.allocate(req);
+        auth.activateDirect(req);
     }
 
     function test_horizonAndPastExpiry() public {
@@ -269,7 +270,7 @@ contract VaultSecurityTest is VaultTestBase {
                 ISharedCommitmentVault.HorizonExceeded.selector, req.expiry, block.timestamp + 30 days
             )
         );
-        vault.allocate(req);
+        auth.activateDirect(req);
 
         req.expiry = type(uint64).max;
         vm.prank(curator);
@@ -278,34 +279,34 @@ contract VaultSecurityTest is VaultTestBase {
                 ISharedCommitmentVault.HorizonExceeded.selector, req.expiry, block.timestamp + 30 days
             )
         );
-        vault.allocate(req);
+        auth.activateDirect(req);
 
         req.expiry = uint64(block.timestamp);
         vm.prank(curator);
         vm.expectRevert(ISharedCommitmentVault.InvalidExpiry.selector);
-        vault.allocate(req);
+        auth.activateDirect(req);
 
         req.expiry = uint64(block.timestamp + 30 days); // exactly at horizon is allowed
         vm.prank(curator);
-        vault.allocate(req);
+        auth.activateDirect(req);
     }
 
     function test_replay_sameNonce_reverts_evenAfterRelease() public {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, QUOTA);
         vm.prank(curator);
-        uint256 id = vault.allocate(req);
+        uint256 id = auth.activateDirect(req);
 
         vm.prank(curator);
-        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.NonceAlreadyUsed.selector, curator, req.nonce));
-        vault.allocate(req);
+        vm.expectRevert(abi.encodeWithSelector(ICuratorAuthorization.NonceAlreadyUsed.selector, curator, req.nonce));
+        auth.activateDirect(req);
 
         vm.warp(req.expiry);
         vault.release(id);
         req.expiry = uint64(block.timestamp + 1 days);
         req.deadline = uint64(block.timestamp + 1 hours);
         vm.prank(curator);
-        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.NonceAlreadyUsed.selector, curator, req.nonce));
-        vault.allocate(req);
+        vm.expectRevert(abi.encodeWithSelector(ICuratorAuthorization.NonceAlreadyUsed.selector, curator, req.nonce));
+        auth.activateDirect(req);
     }
 
     function test_nonce_isCuratorScoped() public {
@@ -317,9 +318,9 @@ contract VaultSecurityTest is VaultTestBase {
         vm.stopPrank();
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, QUOTA);
         vm.prank(curator);
-        vault.allocate(req);
+        auth.activateDirect(req);
         vm.prank(curator2);
-        vault.allocate(req); // same nonce, different curator: independent
+        auth.activateDirect(req); // same nonce, different curator: independent
     }
 
     /// @notice Lazy expiry: time passing changes nothing on-chain; capacity returns only on `release`.
@@ -366,7 +367,7 @@ contract VaultSecurityTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyB, c1, QUOTA);
         vm.prank(curator);
         vm.expectRevert(ISharedCommitmentVault.Paused.selector);
-        vault.allocate(req);
+        auth.activateDirect(req);
 
         // The owner has no asset path; LP redemption stays available while paused.
         (uint256 instant,,,) = _redeem(lp0, 1 ether, false);

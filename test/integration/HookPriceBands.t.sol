@@ -10,6 +10,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {CuratorAuthorization} from "../../src/CuratorAuthorization.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {HookA_DynamicFee} from "../../src/hooks/HookA_DynamicFee.sol";
 import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
@@ -166,6 +167,7 @@ contract HookPriceBands6x18Test is VaultTestBase {
     Currency internal x0; // sorted pair of the 6/18 vault
     Currency internal x1;
     SharedCommitmentVault internal v;
+    CuratorAuthorization internal av; // v's authorization module
     HookA_DynamicFee internal hA;
     HookB_BoundedImpact internal hB;
     MaliciousConsumerHook internal hM;
@@ -181,6 +183,7 @@ contract HookPriceBands6x18Test is VaultTestBase {
         cW = Currency.wrap(address(weth));
         (x0, x1) = address(usdc) < address(weth) ? (cU, cW) : (cW, cU);
         v = new SharedCommitmentVault(manager, owner, x0, x1);
+        av = _installAuth(v);
 
         address a = address(uint160(0x6A << 140) | FLAGS);
         deployCodeTo(ProductionArtifacts.HOOK_A, abi.encode(manager, v, hookOwner), a);
@@ -271,7 +274,7 @@ contract HookPriceBands6x18Test is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory r = _request(key, out, maxOut);
         (r.minInPerOutX96,) = v.sellPolicy(out);
         vm.prank(curator);
-        id = v.allocate(r);
+        id = av.activateDirect(r);
     }
 
     /// @dev Trader sells `amountIn` of `cin` through `key`; returns the measured vault deltas (in, out).

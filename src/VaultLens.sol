@@ -48,7 +48,7 @@ contract VaultLens {
     }
 
     /// @notice D_a = ceil(P * N_a / S): what the pending queue would be owed in `currency` if it were finalized now.
-    /// @dev Same as the vault's `_pendingDemand`, which `admissibleCapacity` and `allocate` use. Rounded up so the
+    /// @dev Same as the vault's `_pendingDemand`, which `admissibleCapacity` and `reserveFor` use. Rounded up so the
     ///      capacity protected for the queue is never less than its exact pro-rata share. Example: P = 300,
     ///      S = 1,000 and N_a = 1,001 give ceil(300.3) = 301. P > 0 implies S >= P > 0, so the division is safe.
     /// @param vault Vault to read.
@@ -158,7 +158,7 @@ contract VaultLens {
 
     /// @notice E_a = N_a - D_a: the backing exposure caps are measured against. Excludes assets owed to finalized
     ///         requests (through N_a) and the queue's pro-rata claim D_a.
-    /// @dev Same as the value `allocate` computes. D_a <= N_a, so this cannot underflow.
+    /// @dev Same as the value `reserveFor` computes. D_a <= N_a, so this cannot underflow.
     /// @param vault Vault to read.
     /// @param currency Asset to evaluate.
     /// @return Raw units of `currency`.
@@ -205,7 +205,7 @@ contract VaultLens {
 
     /// @notice Largest new allocation one scope's exposure cap accepts right now:
     ///         max(0, floor(maxReservedBps * E_a / 10,000) - held), and 0 for an unconfigured record.
-    /// @dev `held` is hookReserved, curatorReserved or Q_a for the Hook, Curator and Vault scopes. `allocate` also
+    /// @dev `held` is hookReserved, curatorReserved or Q_a for the Hook, Curator and Vault scopes. `reserveFor` also
     ///      applies the admission rule, the curator ceiling and the other two scopes' caps.
     /// @param vault Vault to read.
     /// @param scope Hook, Curator or Vault.

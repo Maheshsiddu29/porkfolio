@@ -16,9 +16,10 @@ interface ISharedCommitmentVault {
     // Types
     // ------------------------------------------------------------------
 
-    /// @notice A curator's instruction to reserve vault capacity for one consumer hook on one pool.
-    /// @dev Only direct submission by the curator is implemented. The struct carries a nonce and deadline so that a
-    ///      signed version could reuse the same fields, but no signature verification exists.
+    /// @notice A curator's instruction to reserve vault capacity for one consumer hook on one pool, as the
+    ///         authorization module passes it to `reserveFor`.
+    /// @dev The module builds it from a signed `AllocationAuthorization`, or takes it from the curator's own call.
+    ///      The vault checks every field itself; it does not rely on the module having checked them.
     /// @param consumer        Registered hook allowed to consume this allocation. Must equal `key.hooks`.
     /// @param key             Pool the allocation is bound to. Its currencies must be the vault's pair, in order.
     /// @param currencyOut     Currency the vault pays out (key.currency0 or key.currency1). Fixes the direction.
@@ -27,7 +28,9 @@ interface ISharedCommitmentVault {
     ///                        floor for this direction. Trades need amountIn >= ceil(amountOut * floor / 2^96).
     /// @param expiry          Unix time at which the allocation stops being consumable (consumable while
     ///                        block.timestamp < expiry). At most MAX_HORIZON after creation.
-    /// @param nonce           Curator-scoped single-use value. Prevents the same instruction being applied twice.
+    /// @param nonce           Curator-scoped single-use value, consumed by the authorization module (signed and
+    ///                        direct instructions share one bitmap per curator). The vault only reports it in
+    ///                        `AllocationCreated`.
     /// @param deadline        Last Unix time (inclusive) at which the instruction may be submitted.
     struct AllocationRequest {
         address consumer;
@@ -143,7 +146,8 @@ interface ISharedCommitmentVault {
     /// @param generation  Counter for curator instructions that have not been turned into allocations yet. It
     ///                    rises by one on every deregistration, on every unfreeze and when the curator calls
     ///                    `bumpGeneration`, and never falls. An instruction tagged with an older generation is no
-    ///                    longer valid. No signed-instruction path exists yet, so nothing in this contract reads it.
+    ///                    longer valid: `reserveFor` rejects any request whose generation is not the current
+    ///                    one. It never wraps; at type(uint32).max every increment reverts (`GenerationExhausted`).
     struct CuratorRecord {
         bool registered;
         CuratorRestriction restriction;
@@ -162,7 +166,7 @@ interface ISharedCommitmentVault {
 
     /// @notice Risk limits and gross-outflow usage of one scope in one asset.
     /// @dev Two storage slots. The first (configured, epoch, flowCap, flowUsed) is the only one `exchange` reads and
-    ///      writes; the second (maxReservedBps) is read only by `allocate`.
+    ///      writes; the second (maxReservedBps) is read only by `reserveFor`.
     ///
     ///      Flow window. Time is divided into fixed epochs of FLOW_WINDOW seconds: epoch e covers the timestamps
     ///      [e * FLOW_WINDOW, (e + 1) * FLOW_WINDOW - 1], both ends inclusive. `flowUsed` is the gross output paid
@@ -178,7 +182,7 @@ interface ISharedCommitmentVault {
     /// @param flowUsed       Gross output already paid in epoch `epoch`, raw units. Normally at most `flowCap`; it
     ///                       can be above it only after the cap was lowered during the epoch.
     /// @param maxReservedBps Most unused reserved capacity this scope may hold after a new allocation, in basis
-    ///                       points of the asset's eligible backing E_a (see `allocate`). Zero allows none.
+    ///                       points of the asset's eligible backing E_a (see `reserveFor`). Zero allows none.
     struct RiskLimit {
         bool configured;
         uint40 epoch;
@@ -197,7 +201,7 @@ interface ISharedCommitmentVault {
     error NotPendingOwner();
     /// @notice The guardian attempted a change that would loosen a limit or restore a capability.
     error GuardianCannotIncreaseRisk();
-    /// @notice `allocate` was called by an address that is not a registered curator.
+    /// @notice A reservation was requested for a curator that is not registered.
     error CuratorNotRegistered(address curator);
     /// @notice The curator is frozen or revoked, so it cannot create allocations and its allocations cannot be
     ///         consumed.
@@ -208,6 +212,12 @@ interface ISharedCommitmentVault {
     error InvalidCuratorTransition(address curator, CuratorRestriction restriction);
     /// @notice The curator's generation is already type(uint32).max and cannot be raised again. It never wraps.
     error GenerationExhausted(address curator);
+    /// @notice `reserveFor` was called by something other than the installed authorization module.
+    error NotAuthModule(address caller);
+    /// @notice The instruction was authorized under a generation that is no longer the curator's current one.
+    error StaleGeneration(address curator, uint32 authorizedGeneration, uint32 currentGeneration);
+    /// @notice This module was installed earlier and then replaced or disabled; it can never be installed again.
+    error AuthModuleRetired(address module);
     /// @notice `unlockCallback` was called by something other than the PoolManager.
     error NotPoolManager();
     /// @notice A state-changing entry point was called while another one was still executing in the same
@@ -277,8 +287,6 @@ interface ISharedCommitmentVault {
     error HorizonExceeded(uint64 expiry, uint256 maxExpiry);
     /// @notice The instruction's deadline has passed.
     error InstructionExpired(uint64 deadline);
-    /// @notice The curator already used this nonce.
-    error NonceAlreadyUsed(address curator, uint256 nonce);
     /// @notice The allocation exceeds what the admission rule allows: N_a - Q_a - R_a - D_a.
     error InsufficientBacking(uint256 requested, uint256 available);
 
@@ -348,6 +356,9 @@ interface ISharedCommitmentVault {
     event CuratorUpdated(
         address indexed curator, bool registered, CuratorRestriction restriction, uint32 generation, address indexed by
     );
+    /// @notice The authorization module changed from `previousModule` to `newModule` (zero: none installed).
+    ///         `previousModule`, if non-zero, is retired for good. `by` is the owner or guardian.
+    event AuthModuleSet(address indexed previousModule, address indexed newModule, address indexed by);
     /// @notice The vault was paused or unpaused.
     event PausedSet(bool paused);
     /// @notice A consumer hook was registered or revoked.
@@ -383,7 +394,8 @@ interface ISharedCommitmentVault {
     event RequestCanceled(uint256 indexed requestId, uint256 sharesReturned);
     /// @notice Finalized assets of a request were paid to `receiver`.
     event Claimed(uint256 indexed requestId, address indexed receiver, uint256 amount0, uint256 amount1);
-    /// @notice A curator reserved capacity for a hook.
+    /// @notice A curator reserved capacity for a hook. `nonce` is the instruction's nonce in the authorization
+    ///         module.
     event AllocationCreated(
         uint256 indexed allocationId,
         address indexed curator,
@@ -403,6 +415,21 @@ interface ISharedCommitmentVault {
     event AllocationReleased(
         uint256 indexed allocationId, address indexed by, uint256 unusedCapacity, CloseReason reason
     );
+
+    // ------------------------------------------------------------------
+    // Authorization module entry point
+    // ------------------------------------------------------------------
+
+    /// @notice Reserve capacity for `curator`, as requested by the installed authorization module.
+    /// @dev Callable only by `authModule`. The module vouches that `curator` authorized `req` under `generation`;
+    ///      the vault itself checks everything that decides whether capital may be reserved.
+    /// @param req Allocation request.
+    /// @param curator Curator the allocation belongs to.
+    /// @param generation Curator generation the request was authorized under; must equal the current one.
+    /// @return allocationId Id of the new allocation.
+    function reserveFor(AllocationRequest calldata req, address curator, uint32 generation)
+        external
+        returns (uint256 allocationId);
 
     // ------------------------------------------------------------------
     // Consumer entry point

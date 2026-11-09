@@ -8,6 +8,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {CuratorAuthorization} from "../../src/CuratorAuthorization.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {AuthModeHook} from "../utils/AuthModeHook.sol";
@@ -334,7 +335,7 @@ contract FlowLimitsTest is VaultTestBase {
         req.expiry = type(uint64).max;
         req.deadline = type(uint64).max;
         vm.prank(curator);
-        uint256 id = vault.allocate(req);
+        uint256 id = auth.activateDirect(req);
         _expectSwapRevert(e1, abi.encodeWithSelector(ISharedCommitmentVault.FlowEpochOutOfRange.selector, t / W));
         _swapRaw(keyE1, true, -int256(1 ether), abi.encode(id));
     }
@@ -437,7 +438,7 @@ contract FlowLimitsTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyE1, c1, 100 ether);
         req.expiry = uint64(block.timestamp + 1);
         vm.prank(curator);
-        uint256 d = vault.allocate(req);
+        uint256 d = auth.activateDirect(req);
         vm.warp(block.timestamp + 1);
         vault.release(d);
         assertEq(_snap(), snap, "closes moved no flow record");
@@ -523,20 +524,21 @@ contract FlowLimitsTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyE3, c1, 1 ether);
         vm.prank(curator);
         vm.expectRevert(_notConfigured(HOOK, e3, c1));
-        vault.allocate(req);
+        auth.activateDirect(req);
         req = _request(keyE1, c1, 1 ether);
         vm.prank(fresh);
         vm.expectRevert(_notConfigured(CURATOR, fresh, c1));
-        vault.allocate(req);
+        auth.activateDirect(req);
         // Configuring one asset does not configure the other.
         vm.prank(owner);
         vault.setRiskLimit(CURATOR, fresh, c0, 1 ether, 10_000);
         vm.prank(fresh);
         vm.expectRevert(_notConfigured(CURATOR, fresh, c1));
-        vault.allocate(req);
+        auth.activateDirect(req);
 
         // Vault scope, on a fresh vault whose hook and curator records are configured.
         SharedCommitmentVault v = new SharedCommitmentVault(manager, owner, c0, c1);
+        CuratorAuthorization av = _installAuth(v);
         vm.startPrank(owner);
         v.setConsumer(e1, true);
         v.setCurator(curator, true);
@@ -552,10 +554,10 @@ contract FlowLimitsTest is VaultTestBase {
         vm.stopPrank();
         vm.prank(curator);
         vm.expectRevert(_notConfigured(VAULT, address(0), c1));
-        v.allocate(req);
+        av.activateDirect(req);
     }
 
-    /// @notice `exchange` itself fails closed on an unconfigured record, independently of `allocate`. Records cannot
+    /// @notice `exchange` itself fails closed on an unconfigured record, independently of `reserveFor`. Records cannot
     ///         be unconfigured through the interface, so the configured flag is cleared with `vm.store`.
     function test_FL_exchangeFailsClosedOnUnconfiguredRecord() public {
         uint256 id = _alloc(curator, keyE1, c1, 5000 ether);
@@ -703,7 +705,7 @@ contract FlowLimitsTest is VaultTestBase {
         req.expiry = uint64(block.timestamp + 30 days);
         req.deadline = uint64(block.timestamp);
         vm.prank(who);
-        return vault.allocate(req);
+        return auth.activateDirect(req);
     }
 
     /// @dev 1:1 swap selling token1 from the vault (the trader pays `amount` token0 and receives `amount` token1).
@@ -763,13 +765,13 @@ contract FlowLimitsTest is VaultTestBase {
         assertEq(keccak256(abi.encode(a)), keccak256(abi.encode(b)), "record changed");
     }
 
-    /// @dev Storage slot of a record's first word. `_riskLimits` is declared at slot 22 (`forge inspect
+    /// @dev Storage slot of a record's first word. `_riskLimits` is declared at slot 21 (`forge inspect
     ///      SharedCommitmentVault storageLayout`); tests that write to it first check the decoded value.
     function _recordSlot(ISharedCommitmentVault.RiskScope scope, address account, Currency c)
         internal
         pure
         returns (bytes32)
     {
-        return keccak256(abi.encode(keccak256(abi.encode(scope, account, c)), uint256(22)));
+        return keccak256(abi.encode(keccak256(abi.encode(scope, account, c)), uint256(21)));
     }
 }

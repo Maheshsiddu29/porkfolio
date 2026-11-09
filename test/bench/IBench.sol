@@ -20,7 +20,7 @@ interface IBenchVault is IVaultState {
     function processQueue(uint256 maxSteps) external returns (uint256);
     function cancelRequest(uint256 requestId) external returns (uint256);
     function claim(uint256 requestId) external returns (uint256, uint256);
-    function allocate(AllocationRequest calldata req) external returns (uint256);
+    function setAuthModule(address module) external;
     function release(uint256 allocationId) external;
     function cancelAllocation(uint256 allocationId) external;
     function setConsumer(address consumer, bool registered) external;

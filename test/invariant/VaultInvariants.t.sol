@@ -18,6 +18,7 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
 import {VaultLens} from "../../src/VaultLens.sol";
+import {CuratorAuthorization} from "../../src/CuratorAuthorization.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {AuthModeHook} from "../utils/AuthModeHook.sol";
@@ -53,6 +54,7 @@ contract VaultHandler is Test {
     }
 
     SharedCommitmentVault internal vault;
+    CuratorAuthorization internal auth;
     VaultLens internal lens = new VaultLens();
     IPoolManager internal manager;
     PoolSwapTest internal router;
@@ -176,6 +178,11 @@ contract VaultHandler is Test {
     /// @dev Called once by the invariant contract's setUp (not a fuzz target).
     function setGuardian(address guardian_) external {
         guardian = guardian_;
+    }
+
+    /// @dev Called once by the invariant contract's setUp (not a fuzz target): the installed module.
+    function setAuth(CuratorAuthorization auth_) external {
+        auth = auth_;
     }
 
     /// @dev Called once by the invariant contract's setUp (not a fuzz target). `owner2` and `guardian2` are the
@@ -847,7 +854,7 @@ contract VaultHandler is Test {
             currencyOut: out,
             // forge-lint: disable-next-line(unsafe-typecast)
             maxOut: uint128(maxOut),
-            minInPerOutX96: _curatorFloor(out), // must be >= the live vault floor or allocate reverts
+            minInPerOutX96: _curatorFloor(out), // must be >= the live vault floor or reserveFor reverts
             expiry: uint64(block.timestamp + lifetime),
             nonce: nonce++,
             deadline: uint64(block.timestamp)
@@ -856,7 +863,7 @@ contract VaultHandler is Test {
         ISharedCommitmentVault.CuratorRecord memory rec = vault.getCurator(who);
         Snap memory p = _take();
         vm.prank(who);
-        try vault.allocate(req) returns (uint256 newId) {
+        try auth.activateDirect(req) returns (uint256 newId) {
             id = newId;
             allocationIds.push(id);
             allocationsOk++;
@@ -1055,6 +1062,7 @@ contract VaultInvariantsTest is VaultTestBase {
         vault.setCuratorCeiling(curator3, c1, 500_000 ether);
         vm.stopPrank();
         handler.setGuardian(guardianAddr);
+        handler.setAuth(auth);
         address[] memory cs = new address[](3);
         cs[0] = curator;
         cs[1] = curator2;

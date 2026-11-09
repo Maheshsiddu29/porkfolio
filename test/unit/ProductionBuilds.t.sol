@@ -6,8 +6,8 @@ import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
 
 /// @notice The shared functional fixture runs the production builds of every deployable contract.
 /// @dev Every test that extends `VaultTestBase` (unit, integration, security, fuzz and the invariant campaign) uses
-///      this fixture. If this test passes, those tests exercised the vault built at 2,000 runs, the hooks and the lens
-///      at 44,444,444 runs and the pinned PoolManager at its upstream setting, each byte for byte as recorded in its
+///      this fixture. If this test passes, those tests exercised the vault built at 2,000 runs, the hooks, the lens and
+///      the authorization module at 44,444,444 runs and the pinned PoolManager at its upstream setting, each byte for byte as recorded in its
 ///      artifact file (immutables masked). Test-only contracts the fixture also deploys (routers, malicious hooks)
 ///      are compiled into the test files and are never deployed by the project.
 contract ProductionBuildsTest is VaultTestBase {
@@ -22,6 +22,9 @@ contract ProductionBuildsTest is VaultTestBase {
         ProductionArtifacts.requireProduction(address(lens), ProductionArtifacts.LENS, ProductionArtifacts.DEFAULT_RUNS);
         ProductionArtifacts.requireProduction(
             address(manager), ProductionArtifacts.poolManager(), ProductionArtifacts.DEFAULT_RUNS
+        );
+        ProductionArtifacts.requireProduction(
+            address(auth), ProductionArtifacts.authModule(), ProductionArtifacts.DEFAULT_RUNS
         );
     }
 

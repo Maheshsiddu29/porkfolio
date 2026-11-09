@@ -30,7 +30,7 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 /// Shared reserve. Any number of registered hooks, each on its own pool over the same two currencies, draw on the
 /// same balances. They cannot draw freely. A hook can only consume an allocation: capacity a curator reserved for
 /// that hook, on one pool, in one direction, up to a maximum output, until an expiry, at or above a minimum price.
-/// Reserving capacity (`allocate`) moves no assets; it only stops the same inventory from being promised twice or
+/// Reserving capacity (`reserveFor`) moves no assets; it only stops the same inventory from being promised twice or
 /// paid out to redeeming LPs while the commitment is live.
 ///
 /// Authority over claims. The vault never calls `setOperator` or `approve` on the PoolManager, so nobody else can
@@ -58,7 +58,9 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 /// Roles.
 ///   Owner     Configures everything, initializes the vault, can loosen limits. Has no function that moves LP assets.
 ///   Guardian  Optional emergency role. May only make changes that reduce risk (see `_authorize`).
-///   Curator   Registered address that reserves capacity for hooks, within its own per-currency ceiling.
+///   Curator   Registered address that reserves capacity for hooks, within its own per-currency ceiling, through
+///             the authorization module (a signed instruction, or a call to the module).
+///   Module    The installed authorization module (`authModule`): the only caller of `reserveFor`.
 ///   Consumer  Registered hook that calls `exchange` against allocations made out to it.
 ///   LP        Anyone, after initialization: deposits, redeems, cancels and claims its own requests.
 ///
@@ -90,7 +92,7 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 ///   exposure cap    unused reserved capacity the scope may hold, in basis points of eligible backing
 ///                   E_a = N_a - D_a (net assets minus the queue's pro-rata claim).
 /// Every `exchange` adds its output to all three flow records and reverts if any would exceed its cap. Every
-/// `allocate` checks all three exposure caps. A record the owner never configured fails closed at both points.
+/// `reserveFor` checks all three exposure caps. A record the owner never configured fails closed at both points.
 /// The four quantities are kept apart:
 ///   reserved capacity   Q_a, curatorReserved, hookReserved: promised but not yet paid; falls on consumption,
 ///                       cancellation, release and expiry-release;
@@ -98,7 +100,7 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 ///                       lowers it before the window ends, and inflows are never netted against it;
 ///   free inventory      F_a = N_a - Q_a: what LP exits can be paid from;
 ///   LP liabilities      W_a (finalized, owed) and D_a (queued, pro rata).
-/// Flow and exposure limits apply only to `allocate` and `exchange`. Deposits, redemptions, queue processing,
+/// Flow and exposure limits apply only to `reserveFor` and `exchange`. Deposits, redemptions, queue processing,
 /// claims, request cancellation, `release` and `cancelAllocation` never read them. The limits bound how much and how
 /// fast the reserve can be sold; they say nothing about the price received, which only the floors bound.
 ///
@@ -108,9 +110,19 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 /// declared in `IVaultState`. Nothing in this contract calls the lens; every check here uses its own internal copy
 /// of those formulas.
 ///
-/// Not implemented here: signed (EIP-712) allocation instructions and their verification, rolling-window flow
-/// limits (the flow window is a fixed epoch; see `FLOW_WINDOW`), path-independent cumulative pricing, epoch-based
-/// expiry of commitments, transferable share tokens, and any protocol, curator or performance fee.
+/// Authorization module. New allocations are created only through `reserveFor`, which only `authModule` may call.
+/// The module (`CuratorAuthorization`) verifies the curator's EIP-712 signature, or that the curator itself is
+/// calling, and keeps the curators' nonces; it then tells the vault "this curator authorized this request under this
+/// generation". The vault trusts it for nothing else: registration, restriction, generation, hook, pool, pair,
+/// direction, floors, capacity, ceiling, admission, exposure caps and deadline are all checked here. The module holds
+/// no assets, is never called by the vault, and is not involved in `exchange`, cancellation, release or any LP path,
+/// so disabling or replacing it (`setAuthModule`) affects only the creation of new allocations. A compromised module
+/// can do at most what every registered, unrestricted curator could do together: reserve within their ceilings and
+/// every vault-side limit.
+///
+/// Not implemented here: rolling-window flow limits (the flow window is a fixed epoch; see `FLOW_WINDOW`),
+/// path-independent cumulative pricing, epoch-based expiry of commitments, transferable share tokens, and any
+/// protocol, curator or performance fee.
 contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCallback {
     /// @notice Largest amount accepted for any single asset amount, per-asset backing, or the share supply:
     ///         2^127 - 1.
@@ -173,11 +185,9 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///         allocations. Zero means the curator can allocate nothing in that currency.
     mapping(address curator => mapping(Currency currency => uint256)) public curatorCeiling;
     /// @notice Unused capacity currently held by a curator's unreleased allocations, in raw units of `currency`.
-    /// @dev Moves in lockstep with `reserved`: raised by `allocate`, lowered by `exchange`, `release` and
+    /// @dev Moves in lockstep with `reserved`: raised by `reserveFor`, lowered by `exchange`, `release` and
     ///      `cancelAllocation`.
     mapping(address curator => mapping(Currency currency => uint256)) public curatorReserved;
-    /// @notice Allocation nonces a curator has already used. A nonce is spent only when `allocate` succeeds.
-    mapping(address curator => mapping(uint256 nonce => bool)) public nonceUsed;
 
     /// @notice B_a: ERC-6909 claims the vault has accounted for, in raw units of the asset.
     mapping(Currency currency => uint256) public backing;
@@ -195,7 +205,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     /// @dev Allocation records by id. Ids start at 1, so an all-zero record (consumer == address(0)) means
     ///      "unknown allocation".
     mapping(uint256 allocationId => Allocation) internal _allocations;
-    /// @notice Id the next successful `allocate` call will assign.
+    /// @notice Id the next successful `reserveFor` call will assign.
     uint256 public nextAllocationId = 1;
 
     /// @notice S: all outstanding shares, including queued shares and the MIN_SHARES held by address(0).
@@ -220,6 +230,12 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     mapping(address consumer => mapping(Currency currency => uint256)) public hookReserved;
     /// @dev Risk limits by keccak256(abi.encode(scope, account, currency)); see `RiskLimit` and `getRiskLimit`.
     mapping(bytes32 key => RiskLimit) internal _riskLimits;
+
+    /// @notice The authorization module, the only address allowed to call `reserveFor`. Zero: none installed, so no
+    ///         new allocation can be created.
+    address public authModule;
+    /// @dev Modules that were installed and then replaced or disabled. A retired module can never be installed again.
+    mapping(address module => bool) internal _retiredAuthModule;
 
     /// @dev Transient-storage (EIP-1153) slot of the reentrancy lock: keccak256 of
     ///      "porkfolio.SharedCommitmentVault.reentrancyLock". Transient storage is cleared at the end of every
@@ -254,7 +270,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     }
 
     /// @notice Fixes the PoolManager and the asset pair for the lifetime of the vault.
-    /// @dev The pair must be given in PoolKey order (asset0 < asset1) so `allocate` can compare it field by field
+    /// @dev The pair must be given in PoolKey order (asset0 < asset1) so `reserveFor` can compare it field by field
     ///      with a pool's currencies. Native ETH (address zero) is rejected because deposits pull ERC-20 with
     ///      `transferFrom`. Price floors start unset, so no allocation is possible until the owner opens a
     ///      direction with `setSellFloor`.
@@ -265,7 +281,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     constructor(IPoolManager poolManager_, address owner_, Currency asset0_, Currency asset1_) {
         if (address(poolManager_) == address(0) || owner_ == address(0)) revert ZeroAddress();
         if (asset0_.isAddressZero()) revert NativeCurrencyUnsupported();
-        // PoolKey currencies are sorted; requiring the same order lets allocate() match pools exactly.
+        // PoolKey currencies are sorted; requiring the same order lets reserveFor() match pools exactly.
         if (!(asset0_ < asset1_)) revert InvalidAssetPair();
         poolManager = poolManager_;
         owner = owner_;
@@ -279,8 +295,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     //
     // Owner: every configuration change. Guardian: only changes that REDUCE risk (pause, deregister,
     // freeze or revoke a curator, lower a ceiling or a configured risk limit, raise a buffer floor, raise a price
-    // floor, halt a direction, emergency release); it can never loosen, register, unfreeze, unpause, resume, or touch ownership or the
-    // guardian slot.
+    // floor, halt a direction, disable the authorization module, emergency release); it can never loosen, register,
+    // unfreeze, unpause, resume, install a module, or touch ownership or the guardian slot.
     // Anyone else: nothing.
     // ==================================================================
 
@@ -489,7 +505,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     }
 
     /// @notice Set R_a, the inventory of `currency` that new allocations must leave unreserved.
-    /// @dev Checked only by `allocate`, through `admissibleCapacity`. It does not reserve anything for a particular
+    /// @dev Checked only by `reserveFor`, through the admission rule (`admissibleCapacity`). It does not reserve anything for a particular
     ///      LP and does not limit redemptions. Raising it above current free inventory does not affect existing
     ///      allocations; it only stops new ones. Owner may raise or lower; the guardian may only raise (or set the
     ///      same value).
@@ -889,21 +905,36 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     // Curator allocations (capacity reservation)
     // ==================================================================
 
-    /// @notice Reserve up to `req.maxOut` of `req.currencyOut` for one hook on one pool.
-    /// @dev The caller is the curator. An allocation is a promise that the vault will keep this much of one asset
-    ///      available for the named hook until `req.expiry`, at no worse than `req.minInPerOutX96`. No assets move;
-    ///      Q_a and the curator's reserved total rise by `maxOut`.
+    /// @notice Reserve up to `req.maxOut` of `req.currencyOut` for one hook on one pool, on behalf of `curator`.
+    /// @dev Only the installed authorization module (`authModule`) may call. The module vouches for one fact: that
+    ///      `curator` authorized exactly `req` under `generation` (by an EIP-712 signature, or by calling the module
+    ///      itself). Nothing else the module could say is trusted; every check below runs here on the vault's own
+    ///      state. An allocation is a promise that the vault will keep this much of one asset available for the
+    ///      named hook until `req.expiry`, at no worse than `req.minInPerOutX96`. No assets move; Q_a and the
+    ///      curator's and hook's reserved totals rise by `maxOut`.
     ///
-    ///      Checks, in order: curator neither frozen nor revoked; registered curator; deadline not passed; nonce
-    ///      unused; consumer registered and equal to `key.hooks`; pool currencies equal the vault's pair;
-    ///      `currencyOut` is one of them; direction configured and not halted; curator floor >= vault floor; non-zero
-    ///      `maxOut` within MAX_AMOUNT; expiry in the future and within MAX_HORIZON; curator ceiling; the admission
-    ///      rule Q_a + maxOut + R_a + D_a <= N_a; and the exposure caps of the hook, the curator and the vault.
+    ///      Checks, in order: caller is the installed module; curator neither frozen nor revoked; curator registered;
+    ///      `generation` equals the curator's current generation; deadline not passed; consumer registered and equal
+    ///      to `key.hooks`; pool currencies equal the vault's pair; `currencyOut` is one of them; direction
+    ///      configured and not halted; curator floor >= vault floor; non-zero `maxOut` within MAX_AMOUNT; expiry in
+    ///      the future and within MAX_HORIZON; curator ceiling; the admission rule Q_a + maxOut + R_a + D_a <= N_a;
+    ///      and the exposure caps of the hook, the curator and the vault. Nonces are the module's: the vault does not
+    ///      track them, and only reports `req.nonce` in `AllocationCreated`. Each allocation gets a new id, so two
+    ///      requests can never produce the same allocation.
     ///
-    ///      Exposure caps. Eligible backing is E_a = N_a - D_a: net assets minus the queue's pro-rata claim, so
-    ///      LP withdrawal liabilities (W_a, through N_a, and D_a) are never counted as backing a new promise. For each
-    ///      scope, with `held` its current unused reserved capacity (hookReserved, curatorReserved or Q_a) and
-    ///      `bps` its maxReservedBps, the allocation is accepted only if
+    ///      Generation. A request authorized before the curator's generation last rose (deregistration, unfreeze or
+    ///      the curator's own `bumpGeneration`) fails with `StaleGeneration`, even if the curator has since been
+    ///      registered again. The module passes the generation the curator signed; on the direct path, where the
+    ///      curator is the caller, it passes the current one.
+    ///
+    ///      Admission and eligible backing. E_a = N_a - D_a is net assets minus the queue's pro-rata claim. The
+    ///      admission limit is max(0, E_a - Q_a - R_a), computed by subtracting in turn with a floor at zero, which
+    ///      equals max(0, N_a - Q_a - R_a - D_a) (see `admissibleCapacity`). It protects three things from being
+    ///      promised to a hook: existing commitments (Q_a), the buffer (R_a), and the queue's pro-rata share (D_a).
+    ///      Claimable assets W_a are excluded because N_a = B_a - W_a.
+    ///
+    ///      Exposure caps. For each scope, with `held` its current unused reserved capacity (hookReserved,
+    ///      curatorReserved or Q_a) and `bps` its maxReservedBps, the allocation is accepted only if
     ///
     ///          (held + maxOut) * 10,000 <= bps * E_a
     ///
@@ -915,36 +946,31 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      on it. The exposure cap is an amount check only: it does not value the two assets against each other
     ///      and does not bound the price at which reserved capacity is later sold.
     ///
-    ///      The admission rule protects three things from being promised to a hook: existing commitments (Q_a),
-    ///      the buffer (R_a), and the queue's pro-rata share (D_a). Claimable assets W_a are excluded because the
-    ///      rule is written against N_a = B_a - W_a. A curator floor below the live vault floor is rejected here,
-    ///      and `exchange` also applies max(vault floor, curator floor), so a later vault-floor increase still
-    ///      binds this allocation. Because the vault floor is at least 1, a zero curator floor is always rejected.
-    ///
-    ///      The request struct is shaped so that a signed version can reuse it; this function only supports direct
-    ///      calls by the curator.
+    ///      Floors. A curator floor below the live vault floor is rejected here, and `exchange` also applies
+    ///      max(vault floor, curator floor), so a later vault-floor increase still binds this allocation. Because the
+    ///      vault floor is at least 1, a zero curator floor is always rejected.
     /// @param req Allocation instruction; see `AllocationRequest` for the fields.
+    /// @param curator Curator the allocation belongs to (the signer, or the caller of the module's direct path).
+    /// @param generation Curator generation the instruction was authorized under.
     /// @return allocationId Id of the new allocation. The swapper passes it to the hook as hookData.
-    function allocate(AllocationRequest calldata req)
+    function reserveFor(AllocationRequest calldata req, address curator, uint32 generation)
         external
         nonReentrant
         whenNotPaused
         returns (uint256 allocationId)
     {
-        address curator = msg.sender;
+        if (msg.sender != authModule) revert NotAuthModule(msg.sender);
         CuratorRecord memory record = _curators[curator];
         if (record.restriction != CuratorRestriction.None) revert CuratorRestricted(curator, record.restriction);
         if (!record.registered) revert CuratorNotRegistered(curator);
-
+        if (generation != record.generation) revert StaleGeneration(curator, generation, record.generation);
         if (req.deadline < block.timestamp) revert InstructionExpired(req.deadline);
-        if (nonceUsed[curator][req.nonce]) revert NonceAlreadyUsed(curator, req.nonce);
         if (!isConsumer[req.consumer]) revert ConsumerNotRegistered(req.consumer);
         if (address(req.key.hooks) != req.consumer) revert ConsumerMismatch(req.consumer, address(req.key.hooks));
         if (!(req.key.currency0 == asset0) || !(req.key.currency1 == asset1)) revert UnsupportedPair();
 
-        bool outIsCurrency0 = req.currencyOut == req.key.currency0;
-        if (!outIsCurrency0 && !(req.currencyOut == req.key.currency1)) revert InvalidCurrency();
-        Currency currencyIn = outIsCurrency0 ? req.key.currency1 : req.key.currency0;
+        // The key's currencies are the pair (checked above), so this also checks that currencyOut is one of them.
+        Currency currencyIn = _otherAsset(req.currencyOut);
 
         // The direction must be configured and not halted, and the curator floor may only be at least as strict as
         // the vault floor. Zero curator floors are therefore always rejected (vault floor >= 1).
@@ -962,16 +988,13 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         uint256 curatorAvailable = _sub0(curatorCeiling[curator][out], curatorReserved[curator][out]);
         if (req.maxOut > curatorAvailable) revert CuratorCeilingExceeded(req.maxOut, curatorAvailable);
 
-        uint256 admissible = admissibleCapacity(out);
+        uint256 eligible = _eligibleBacking(out);
+        uint256 admissible = _admissible(out, eligible);
         if (req.maxOut > admissible) revert InsufficientBacking(req.maxOut, admissible);
-
-        // E_a = N_a - D_a. D_a <= N_a because P <= S, so this cannot underflow.
-        uint256 eligible = _netAssets(out) - _pendingDemand(out);
         _checkExposure(RiskScope.Hook, req.consumer, out, hookReserved[req.consumer][out], req.maxOut, eligible);
         _checkExposure(RiskScope.Curator, curator, out, curatorReserved[curator][out], req.maxOut, eligible);
         _checkExposure(RiskScope.Vault, address(0), out, reserved[out], req.maxOut, eligible);
 
-        nonceUsed[curator][req.nonce] = true;
         reserved[out] += req.maxOut;
         curatorReserved[curator][out] += req.maxOut;
         hookReserved[req.consumer][out] += req.maxOut;
@@ -992,6 +1015,33 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         });
 
         emit AllocationCreated(allocationId, curator, req.consumer, poolId, out, req.maxOut, req.expiry, req.nonce);
+    }
+
+    /// @notice Install, replace or disable the authorization module, the only caller `reserveFor` accepts.
+    /// @dev Owner: may install any module that was never installed before (replacing the current one) or set zero.
+    ///      Guardian: may only set zero, which stops every new allocation through the module in this transaction.
+    ///      Nobody else. The module being replaced, if any, is retired for good: it can never be installed again
+    ///      (`AuthModuleRetired`). That is what keeps an old module's unused signatures and nonce state from ever
+    ///      regaining authority, whether the module was replaced or disabled. Resuming after a disable therefore
+    ///      means deploying a new module; to stop new allocations temporarily instead, lower the vault-scope
+    ///      exposure caps (`setRiskLimit`), deregister curators or pause.
+    ///
+    ///      Nothing else changes: existing allocations stay consumable, cancellable and releasable; swaps, LP
+    ///      deposits, redemptions, queue processing and claims never involve the module; flow usage, exposure
+    ///      records and curator records are untouched. Signatures made for the old module do not verify under a new
+    ///      one, because the EIP-712 domain includes the module's address.
+    ///
+    ///      The vault does not call the module. The module records its vault at deployment and only ever calls that
+    ///      vault, so installing a module built for another vault gives it no way to call this one. Works while
+    ///      paused.
+    /// @param module New module, or address(0) to disable.
+    function setAuthModule(address module) external {
+        _authorize(module == address(0));
+        if (_retiredAuthModule[module]) revert AuthModuleRetired(module);
+        address previous = authModule;
+        if (previous != address(0)) _retiredAuthModule[previous] = true;
+        authModule = module;
+        emit AuthModuleSet(previous, module, msg.sender);
     }
 
     /// @notice Close an allocation and return its unused capacity to free inventory.
@@ -1178,21 +1228,20 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     /// @notice Largest new allocation of `currency` the admission rule accepts right now: N_a - Q_a - R_a - D_a,
     ///         or 0 if that is negative.
     /// @dev Example: N_a = 1,000, Q_a = 300, R_a = 100 and D_a = 150 give 450. This does not include the curator's
-    ///      own ceiling, which `allocate` checks separately.
+    ///      own ceiling or the exposure caps, which `reserveFor` checks separately.
     ///
-    ///      Each term is subtracted in turn with a floor at zero instead of summing Q_a + R_a + D_a first. R_a is an
-    ///      admin input with no upper bound (the guardian may raise it to type(uint256).max to stop new allocations
-    ///      in this asset), so the sum could overflow and revert with a panic. Because every term is non-negative,
-    ///      max(0, max(0, max(0, N - Q) - R) - D) equals max(0, N - Q - R - D) exactly: once an intermediate result
-    ///      reaches zero, the exact value is already <= 0. The result is therefore unchanged wherever the sum did
-    ///      not overflow, and is 0 (so `allocate` reverts with `InsufficientBacking`) wherever it did.
+    ///      Computed as max(0, max(0, E_a - Q_a) - R_a) with E_a = N_a - D_a (exact, since D_a <= N_a), the same
+    ///      E_a the exposure caps use. Each term is subtracted in turn with a floor at zero instead of summing
+    ///      Q_a + R_a + D_a first. R_a is an admin input with no upper bound (the guardian may raise it to
+    ///      type(uint256).max to stop new allocations in this asset), so the sum could overflow and revert with a
+    ///      panic. Because every term is non-negative, the floored chain equals max(0, N - D - Q - R) exactly: once an
+    ///      intermediate result reaches zero, the exact value is already <= 0. The result is therefore unchanged
+    ///      wherever the sum did not overflow, and is 0 (so `reserveFor` reverts with `InsufficientBacking`) wherever
+    ///      it did.
     /// @param currency Asset the allocation would sell.
     /// @return Raw units of `currency`.
-    function admissibleCapacity(Currency currency) public view returns (uint256) {
-        return
-            _sub0(
-                _sub0(_sub0(_netAssets(currency), reserved[currency]), bufferFloor[currency]), _pendingDemand(currency)
-            );
+    function admissibleCapacity(Currency currency) external view returns (uint256) {
+        return _admissible(currency, _eligibleBacking(currency));
     }
 
     // ==================================================================
@@ -1204,6 +1253,18 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      underflow: every path keeps W_a <= B_a. Returns 0 for a currency outside the pair.
     function _netAssets(Currency currency) internal view returns (uint256) {
         return backing[currency] - claimableAssets[currency];
+    }
+
+    /// @dev E_a = N_a - D_a: net assets minus the queue's pro-rata claim, the backing new allocations may be measured
+    ///      against. D_a <= N_a because P <= S, so this cannot underflow.
+    function _eligibleBacking(Currency currency) internal view returns (uint256) {
+        return _netAssets(currency) - _pendingDemand(currency);
+    }
+
+    /// @dev Admission limit max(0, E_a - Q_a - R_a), with each term subtracted in turn and floored at zero (see
+    ///      `admissibleCapacity` for why that equals max(0, N_a - Q_a - R_a - D_a) and never overflows).
+    function _admissible(Currency currency, uint256 eligible) internal view returns (uint256) {
+        return _sub0(_sub0(eligible, reserved[currency]), bufferFloor[currency]);
     }
 
     /// @dev D_a = ceil(P * N_a / S): what the pending queue would be owed in `currency` if it were finalized now.
@@ -1421,7 +1482,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     }
 
     /// @dev Exposure cap of one scope for a new allocation of `amount`: reverts unless the record is configured and
-    ///      (held + amount) * 10,000 <= maxReservedBps * eligible (see `allocate`). held + amount < 2^128 because
+    ///      (held + amount) * 10,000 <= maxReservedBps * eligible (see `reserveFor`). held + amount < 2^128 because
     ///      both are bounded by MAX_AMOUNT, and maxReservedBps * eligible <= 10,000 * 2^127, so neither product can
     ///      overflow. The reported `available` is floor(bps * eligible / 10,000) - held, floored at zero.
     function _checkExposure(
