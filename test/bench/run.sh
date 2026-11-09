@@ -63,7 +63,7 @@ if [ "${#vault_artifacts[@]}" -ne 1 ]; then
 fi
 for f in "${vault_artifacts[@]}"; do artifact_row "$f" "$vault_runs"; done
 
-for c in HookA_DynamicFee HookB_BoundedImpact VaultLens; do
+for c in HookA_DynamicFee HookB_BoundedImpact VaultLens CuratorAuthorization; do
   [ -d "out/$c.sol" ] || continue
   found=0
   for f in out/"$c".sol/*.json; do

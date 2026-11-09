@@ -36,6 +36,7 @@ gas numbers, however, include a PoolManager and hooks that are not the productio
 | `SharedCommitmentVault` | `vm.getCode("SharedCommitmentVault.sol:SharedCommitmentVault")`, the only vault artifact | the vault's restriction, or the default if there is none |
 | `HookA_DynamicFee`, `HookB_BoundedImpact` | `deployCodeTo` with the default-profile artifact | default (`optimizer_runs` in `foundry.toml`) |
 | `VaultLens` | `deployCode("VaultLens.sol:VaultLens")`, default-profile artifact (size and deployment only) | default |
+| `CuratorAuthorization` | `deployCode` with the default-profile artifact path (`ProductionArtifacts.authModule()`) | default |
 | `PoolManager` | `new PoolManager`, compiled in this file | default, which matches pinned v4-core's own `foundry.toml` (via-IR, 44,444,444 runs) |
 | `PoolSwapTest`, `PoolModifyLiquidityTest` | compiled in this file | default; test routers, included in every swap number |
 
@@ -43,7 +44,7 @@ gas numbers, however, include a PoolManager and hooks that are not the productio
 
 - the vault's artifact does not record the expected runs;
 - there is more than one vault artifact;
-- a hook or `VaultLens` has no default-profile artifact;
+- a hook, `VaultLens` or `CuratorAuthorization` has no default-profile artifact;
 - any of them exceeds the EIP-170 runtime limit of 24,576 bytes.
 
 A margin below the project target of 2,048 bytes is flagged `BELOW_TARGET` but does not fail the run.
@@ -69,8 +70,13 @@ Each test starts from the same fixture as `test/utils/VaultTestBase.sol`:
 | `redeem queued` | 1,000 shares fully queued (asset1 fully committed) |
 | `processQueue(1)` | finalizing one queued request after the commitment is released |
 | `claim` | paying out a finalized request |
-| `allocate (first in vault)` | the vault's first allocation; every aggregate slot goes from zero to non-zero |
-| `allocate (steady state, new curator)` | an allocation after another one exists, by a curator that has not allocated before |
+| `allocate (first in vault)` | the vault's first allocation, made by the curator through the module's direct path (`activateDirect` -> `reserveFor`); every aggregate slot goes from zero to non-zero |
+| `allocate (steady state, new curator)` | an allocation after another one exists, by a curator that has not allocated before, through the direct path |
+| `activate signed (EOA, ...)` | the same steady-state allocation as an EIP-712 instruction signed by an EOA and submitted by a relayer |
+| `activate signed (ERC-1271, ...)` | the same, with a contract-wallet curator that approves the digest from storage |
+| `invalidateNonces (new word)` / `(same word)` | a curator invalidates one nonce in an untouched bitmap word, then a second bit in it |
+| `setAuthModule (replace)` / `(guardian disable)` | owner installs a new module (the old one retires); guardian sets zero |
+| `deploy auth module (CREATE)` | CREATE of the module init code with its vault argument, plus the logged calldata cost |
 | `release (owner, before expiry)` | owner closes an unconsumed allocation early |
 | `freezeCurator` / `unfreezeCurator` | owner freezes a curator holding one live allocation / lifts the freeze |
 | `revokeCurator (10 live allocations)` | owner revokes a curator with ten live allocations; the cost does not depend on that number |
@@ -81,6 +87,12 @@ Each test starts from the same fixture as `test/utils/VaultTestBase.sol`:
 | `swap hookA, first in a new flow window` | the first HookA swap after the window rolled over: each record restarts from this swap's output |
 | `setRiskLimit (configure new record)` / `(change configured record)` | owner configures a record for the first time (two zero-to-non-zero slots), then changes it |
 | `swap native v4` | the same router and amount on a hookless concentrated-liquidity pool; a control that contains no project code |
+
+Since the authorization module was added, the rows `freezeCurator`, `cancelAllocation`, `release (owner, ...)`,
+`revokeCurator` and `redeem queued` read about 2,000 gas higher than in the 1B-2.2 run, although the vault calls
+themselves did not change (their call frames in `-vvvv` traces differ by 0 to 22 gas). Their setup now allocates through the module, so the vault's
+address is no longer warm in the test frame when the measured call starts; a real transaction to the vault always has
+it warm. Compare those rows using the call frame in the trace.
 
 Every fixture configures the flow and exposure records of the paths it uses (unconfigured paths fail closed). The
 `swap hookA` and `swap hookB` rows are therefore also the first consumption in a window: the records exist but hold
@@ -109,15 +121,23 @@ runtime hashes. Reading `out/` needs the read-only `fs_permissions` entry in `fo
 | `test_PA_exposureCaps` | at the cap and one unit above; after a deposit and after an instant redemption; an allocation above a tightened cap still executes |
 | `test_PA_flowUsageSurvivesLifecycle_lpExitsUnaffected` | freeze, unfreeze, revocation, cleanup and pause leave usage unchanged; instant LP exit while paused with every cap at zero |
 | `test_PA_failClosedAndTimestampBoundaries` | a production vault missing only its vault-wide record refuses to reserve; no window reset at 2^32; `FlowEpochOutOfRange` past the 40-bit epoch |
+| `test_PA_auth_signedEoaAnd1271_activateAndSwap` | EOA-signed and ERC-1271 instructions submitted by a relayer become exactly the signed allocations and are swapped through HookA and HookB; a wallet that withdraws its approval blocks new instructions but not its existing allocation |
+| `test_PA_auth_replayAndBindingMatrix` | wrong signer, 64-byte signature, another chain, another vault, an edited field, outside the time window, spent and invalidated nonces, stale generation, frozen and revoked curators; a reservation the vault rejects spends no nonce |
+| `test_PA_auth_disableReplaceAndLpPaths` | guardian disables the module: both activation paths stop, swaps, cancel, release, deposit, redeem, queue and claim work; a new module is installed, the old one cannot return, old signatures fail on the new domain |
+| `test_PA_auth_equivalenceCompetitionAndCaps` | signed and direct paths give the same allocation; two instructions competing for the last backing; exposure and flow caps bind signed allocations |
+| `test_PA_auth_compromisedModuleBounded` | a malicious module forging `reserveFor` is stopped by the ceiling, registration and floor checks and cannot cancel, consume or configure |
+| `test_PA_auth_reentrantWalletIsStatic` | a wallet that tries to cancel its own allocation from `isValidSignature` changes nothing |
 
 ## The functional suite also runs on production builds
 
 `test/utils/VaultTestBase.sol`, the fixture of nearly every functional, fuzz and invariant test, deploys the
-PoolManager, both hooks and `VaultLens` from their production artifact files (`ProductionArtifacts`), and the vault
-has a single (production) artifact. `test/unit/ProductionBuilds.t.sol` checks all five against their artifacts in the
-same way as above, and shows the check tells the 2,000-run hook build apart. The Reentrancy and 6/18-decimal fixtures
-are checked the same way. What is still compiled into test files: routers and test-only hooks (`AuthModeHook`,
-`ScriptedHook`, `MaliciousConsumerHook`), which are never deployed by the project.
+PoolManager, both hooks, `VaultLens` and `CuratorAuthorization` from their production artifact files
+(`ProductionArtifacts`), and the vault has a single (production) artifact. `test/unit/ProductionBuilds.t.sol` checks
+all six against their artifacts in the same way as above, and shows the check tells the 2,000-run hook build apart.
+The Reentrancy and 6/18-decimal fixtures are checked the same way; modules deployed inside tests (second vaults, the
+invariant handler's replacements) also come from the production artifact. What is still compiled into test files:
+routers and test-only contracts (`AuthModeHook`, `ScriptedHook`, `MaliciousConsumerHook`, `Mock1271Wallet`,
+`MaliciousAuthModule`), which are never deployed by the project.
 
 ## Running the production-build security suite (CI)
 
@@ -126,8 +146,8 @@ test/bench/security.sh            # forge build --force; ProductionBuilds; Produ
 FOUNDRY_PROFILE=default test/bench/security.sh   # same with 1,000 fuzz runs instead of 10,000
 ```
 
-The repository has no CI workflow; this script is the command a CI job should run. `run.sh` runs only the gas
-benchmark.
+`.github/workflows/security.yml` runs this script on pushes and pull requests (see that file for what it does and does
+not do). `run.sh` runs only the gas benchmark.
 
 Gas is the `gasleft()` difference around one external call made from the test contract, so it includes the call
 overhead of that call but not the 21,000 base cost of a transaction. Compare numbers only between runs made with the

@@ -1,0 +1,50 @@
+# Production-build security suite: formatting, sizes and gas on the production artifacts (test/bench/run.sh), then
+# the security tests and the complete suite on those artifacts (test/bench/security.sh). See test/bench/README.md.
+#
+# It only builds and tests. It deploys nothing, broadcasts nothing, publishes nothing, pushes nothing, needs no
+# secrets and makes no RPC calls (ffi is off and no test forks a chain). The token is read-only and is not kept in
+# the checkout. Actions are pinned to full commit SHAs and Foundry to an exact release.
+name: security
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
+        with:
+          version: v1.7.1
+          cache: false
+
+      - name: Formatting
+        run: forge fmt --check
+
+      - name: Artifact settings, sizes and gas (production builds)
+        run: test/bench/run.sh
+
+      - name: Vault keeps at least 2,048 bytes under EIP-170
+        run: |
+          runtime=$(( ($(jq -r '.deployedBytecode.object' out/SharedCommitmentVault.sol/SharedCommitmentVault.json | wc -c) - 3) / 2 ))
+          margin=$(( 24576 - runtime ))
+          echo "vault runtime ${runtime} bytes, margin ${margin} bytes"
+          test "$margin" -ge 2048
+
+      - name: Production-build security suite (CI fuzz profile)
+        run: test/bench/security.sh

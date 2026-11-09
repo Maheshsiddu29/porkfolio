@@ -20,6 +20,7 @@ import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVaul
 import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
 import {IBenchVault, IBenchHook} from "./IBench.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
+import {Mock1271Wallet} from "../utils/Mock1271Wallet.sol";
 
 /// @title Production-artifact gas and size benchmark
 /// @notice Measures size and gas on the bytecode that would be deployed, not on copies compiled for tests.
@@ -137,6 +138,7 @@ contract ProductionArtifactGasTest is Test {
         _logSize("HookA_DynamicFee", hookA, HOOK_A_ARTIFACT);
         _logSize("HookB_BoundedImpact", hookB, HOOK_B_ARTIFACT);
         _logSize("VaultLens", lens, LENS_ARTIFACT);
+        _logSize("CuratorAuthorization", address(auth), ProductionArtifacts.authModule());
         console2.log("BENCH runtime PoolManager (default profile):", address(manager).code.length);
     }
 
@@ -259,6 +261,78 @@ contract ProductionArtifactGasTest is Test {
         uint256 g = gasleft();
         auth.activateDirect(req);
         console2.log("BENCH allocate (steady state, new curator):", g - gasleft());
+    }
+
+    /// @notice Signed activation by an EOA curator that has not allocated before, submitted by a relayer, in the same
+    ///         storage state as `test_bench_allocate_steady`. The difference to that benchmark is the signature path:
+    ///         calldata, EIP-712 hashing and ecrecover.
+    function test_bench_activate_signedEoa() public {
+        _allocate(curator, keyA, c1, 100_000 ether);
+        (address curator2, uint256 key2) = makeAddrAndKey("curator2");
+        _registerFresh(curator2);
+        ICuratorAuthorization.AllocationAuthorization memory a = _authz(curator2, keyA, c1, 100_000 ether);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(key2, auth.hashAuthorization(a));
+        bytes memory sig = abi.encodePacked(r, s, v);
+        vm.prank(makeAddr("relayer"));
+        uint256 g = gasleft();
+        auth.activate(a, keyA, sig);
+        console2.log("BENCH activate signed (EOA, steady state, new curator):", g - gasleft());
+    }
+
+    /// @notice Same as the EOA case, with an ERC-1271 wallet curator that approves the digest from storage (a cold
+    ///         account, a cold slot read and the call overhead).
+    function test_bench_activate_signed1271() public {
+        _allocate(curator, keyA, c1, 100_000 ether);
+        Mock1271Wallet w = new Mock1271Wallet();
+        _registerFresh(address(w));
+        ICuratorAuthorization.AllocationAuthorization memory a = _authz(address(w), keyA, c1, 100_000 ether);
+        w.approve(auth.hashAuthorization(a), true);
+        vm.prank(makeAddr("relayer"));
+        uint256 g = gasleft();
+        auth.activate(a, keyA, "");
+        console2.log("BENCH activate signed (ERC-1271, steady state, new curator):", g - gasleft());
+    }
+
+    /// @notice First invalidation in a word (zero to non-zero) and a second bit in the same word.
+    function test_bench_invalidateNonces() public {
+        vm.prank(curator);
+        uint256 g = gasleft();
+        auth.invalidateNonces(0, 1);
+        console2.log("BENCH invalidateNonces (new word):", g - gasleft());
+        vm.prank(curator);
+        g = gasleft();
+        auth.invalidateNonces(0, 2);
+        console2.log("BENCH invalidateNonces (same word):", g - gasleft());
+    }
+
+    /// @notice Owner replaces the module (the old one retires); the guardian disables it.
+    function test_bench_setAuthModule() public {
+        address m2 = deployCode(ProductionArtifacts.authModule(), abi.encode(vault));
+        vm.prank(owner);
+        uint256 g = gasleft();
+        vault.setAuthModule(m2);
+        console2.log("BENCH setAuthModule (replace):", g - gasleft());
+        address guardian = makeAddr("guardian");
+        vm.prank(owner);
+        vault.setGuardian(guardian);
+        vm.prank(guardian);
+        g = gasleft();
+        vault.setAuthModule(address(0));
+        console2.log("BENCH setAuthModule (guardian disable):", g - gasleft());
+    }
+
+    /// @notice CREATE gas for the module (constructor argument: the vault).
+    function test_bench_deployAuthModule() public {
+        bytes memory initCode = abi.encodePacked(vm.getCode(ProductionArtifacts.authModule()), abi.encode(vault));
+        address deployed;
+        uint256 g = gasleft();
+        assembly ("memory-safe") {
+            deployed := create(0, add(initCode, 0x20), mload(initCode))
+        }
+        uint256 used = g - gasleft();
+        require(deployed != address(0), "deploy failed");
+        console2.log("BENCH deploy auth module (CREATE):", used);
+        console2.log("BENCH deploy auth module init-code calldata:", _calldataGas(initCode));
     }
 
     function test_bench_release_early() public {
@@ -467,6 +541,36 @@ contract ProductionArtifactGasTest is Test {
 
     /// @dev Configures `account` at `scope` in both assets with the widest limits (largest flow cap, 100% exposure).
     ///      Caller must already be pranking as the owner.
+    function _registerFresh(address c) internal {
+        vm.startPrank(owner);
+        vault.setCurator(c, true);
+        vault.setCuratorCeiling(c, c1, type(uint256).max);
+        _openLimits(ISharedCommitmentVault.RiskScope.Curator, c);
+        vm.stopPrank();
+    }
+
+    function _authz(address cur, PoolKey memory key, Currency out, uint128 maxOut)
+        internal
+        returns (ICuratorAuthorization.AllocationAuthorization memory)
+    {
+        return ICuratorAuthorization.AllocationAuthorization({
+            curator: cur,
+            generation: vault.getCurator(cur).generation,
+            vault: address(vault),
+            poolId: key.toId(),
+            hook: address(key.hooks),
+            currencyIn: out == key.currency1 ? key.currency0 : key.currency1,
+            currencyOut: out,
+            zeroForOne: out == key.currency1,
+            maxOut: maxOut,
+            minInPerOutX96: PRICE_1_1_X96,
+            expiry: uint64(block.timestamp + 1 days),
+            validAfter: uint64(block.timestamp),
+            deadline: uint64(block.timestamp + 1 hours),
+            nonce: nextNonce++
+        });
+    }
+
     function _openLimits(ISharedCommitmentVault.RiskScope scope, address account) internal {
         vault.setRiskLimit(scope, account, c0, type(uint104).max, 10_000);
         vault.setRiskLimit(scope, account, c1, type(uint104).max, 10_000);

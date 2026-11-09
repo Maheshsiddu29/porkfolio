@@ -23,6 +23,9 @@ import {IBenchVault, IBenchHook} from "./IBench.sol";
 import {ReentrantToken, ReentryAgent} from "../utils/ReentrantToken.sol";
 import {ScriptedHook} from "../utils/ScriptedHook.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
+import {Mock1271Wallet} from "../utils/Mock1271Wallet.sol";
+import {MaliciousAuthModule} from "../utils/MaliciousAuthModule.sol";
+import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 /// @title Production-artifact security tests
 /// @notice Security-relevant paths run against the exact bytecode that would be deployed: the vault, HookA, HookB and
@@ -40,8 +43,8 @@ import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
 ///      `forge build --skip test`) can remove them. Reading artifacts needs the read-only `fs_permissions` entry for
 ///      `./out` in foundry.toml.
 ///
-///      Test-only contracts used here (the router, `ScriptedHook`, `ReentrantToken`, `ReentryAgent`) are not
-///      deployed by the project; their build settings do not matter.
+///      Test-only contracts used here (the router, `ScriptedHook`, `ReentrantToken`, `ReentryAgent`, `Mock1271Wallet`,
+///      `MaliciousAuthModule`) are not deployed by the project; their build settings do not matter.
 contract ProductionArtifactSecurityTest is Test {
     using TransientStateLibrary for IPoolManager;
 
@@ -505,6 +508,309 @@ contract ProductionArtifactSecurityTest is Test {
     // Helpers
     // ------------------------------------------------------------------
 
+    // ------------------------------------------------------------------
+    // Curator authorization module (production build)
+    // ------------------------------------------------------------------
+
+    /// @notice A signed EOA instruction and an ERC-1271 wallet instruction, each submitted by a relayer, become
+    ///         exactly the signed allocations and are consumed through HookA and HookB. The wallet then withdraws its
+    ///         approval: a new instruction fails, while its existing allocation stays consumable and cancellable.
+    function test_PA_auth_signedEoaAnd1271_activateAndSwap() public {
+        ICuratorAuthorization.AllocationAuthorization memory a = _authz(curator, keyA, c1, 100_000 ether);
+        uint256 id = _activateSigned(a, keyA, _signAuth(_curatorKey(), a));
+        ISharedCommitmentVault.Allocation memory al = vault.getAllocation(id);
+        assertEq(al.curator, curator);
+        assertEq(al.consumer, hookA);
+        assertEq(al.maxOut, a.maxOut);
+        assertEq(al.expiry, a.expiry);
+        assertTrue(auth.isNonceUsed(curator, a.nonce));
+        _assertConservedSwap(keyA, true, id, 1000 ether);
+
+        Mock1271Wallet w = _walletCurator();
+        ICuratorAuthorization.AllocationAuthorization memory b = _authz(address(w), keyB, c0, 50_000 ether);
+        w.approve(auth.hashAuthorization(b), true);
+        uint256 wid = _activateSigned(b, keyB, "");
+        _assertConservedSwap(keyB, false, wid, 1000 ether);
+        ICuratorAuthorization.AllocationAuthorization memory b2 = _authz(address(w), keyB, c0, 50_000 ether);
+        vm.prank(stranger);
+        vm.expectRevert(ICuratorAuthorization.InvalidSignature.selector);
+        auth.activate(b2, keyB, "");
+        _swap(keyB, false, 1000 ether, wid);
+        w.exec(address(vault), abi.encodeCall(vault.cancelAllocation, (wid)));
+        assertTrue(vault.getAllocation(wid).released);
+        _assertAccounting();
+    }
+
+    /// @notice Replay and binding on the production module: wrong signer, a 64-byte signature, another chain,
+    ///         another vault, an edited field, outside the time window, a spent and an invalidated nonce, a stale
+    ///         generation, frozen and revoked curators, and a reservation the vault rejects (paused), which spends no
+    ///         nonce.
+    function test_PA_auth_replayAndBindingMatrix() public {
+        uint256 k = _curatorKey();
+        ICuratorAuthorization.AllocationAuthorization memory a = _authz(curator, keyA, c1, 10_000 ether);
+        bytes memory sig = _signAuth(k, a);
+        (, uint256 otherKey) = makeAddrAndKey("other");
+        bytes memory otherSig = _signAuth(otherKey, a);
+        _activateReverts(a, keyA, otherSig, abi.encodeWithSelector(ICuratorAuthorization.InvalidSignature.selector));
+        _activateReverts(
+            a, keyA, _first64(sig), abi.encodeWithSelector(ICuratorAuthorization.InvalidSignature.selector)
+        );
+        vm.chainId(130);
+        _activateReverts(a, keyA, sig, abi.encodeWithSelector(ICuratorAuthorization.InvalidSignature.selector));
+        vm.chainId(31_337);
+        ICuratorAuthorization.AllocationAuthorization memory e = _copyAuth(a);
+        e.vault = stranger;
+        _activateReverts(e, keyA, sig, abi.encodeWithSelector(ICuratorAuthorization.WrongVault.selector, stranger));
+        e = _copyAuth(a);
+        e.maxOut += 1;
+        _activateReverts(e, keyA, sig, abi.encodeWithSelector(ICuratorAuthorization.InvalidSignature.selector));
+        vm.warp(a.deadline + 1);
+        _activateReverts(
+            a, keyA, sig, abi.encodeWithSelector(ICuratorAuthorization.AuthorizationExpired.selector, a.deadline)
+        );
+        vm.warp(a.validAfter);
+
+        ICuratorAuthorization.AllocationAuthorization memory late = _authz(curator, keyA, c1, 10_000 ether);
+        late.validAfter = a.validAfter + 60;
+        bytes memory lateSig = _signAuth(k, late);
+        _activateReverts(
+            late,
+            keyA,
+            lateSig,
+            abi.encodeWithSelector(ICuratorAuthorization.AuthorizationNotYetValid.selector, late.validAfter)
+        );
+
+        vm.prank(guardian);
+        vault.setPaused(true);
+        _activateReverts(a, keyA, sig, abi.encodeWithSelector(ISharedCommitmentVault.Paused.selector));
+        assertFalse(auth.isNonceUsed(curator, a.nonce), "rejected reservation spends no nonce");
+        vm.prank(owner);
+        vault.setPaused(false);
+        _activateSigned(a, keyA, sig);
+        _activateReverts(
+            a, keyA, sig, abi.encodeWithSelector(ICuratorAuthorization.NonceAlreadyUsed.selector, curator, a.nonce)
+        );
+
+        ICuratorAuthorization.AllocationAuthorization memory inv = _authz(curator, keyA, c1, 10_000 ether);
+        bytes memory invSig = _signAuth(k, inv);
+        vm.prank(curator);
+        auth.invalidateNonces(inv.nonce >> 8, 1 << (inv.nonce & 0xff));
+        _activateReverts(
+            inv,
+            keyA,
+            invSig,
+            abi.encodeWithSelector(ICuratorAuthorization.NonceAlreadyUsed.selector, curator, inv.nonce)
+        );
+
+        ICuratorAuthorization.AllocationAuthorization memory g = _authz(curator, keyA, c1, 10_000 ether);
+        bytes memory gSig = _signAuth(k, g);
+        vm.prank(curator);
+        vault.bumpGeneration();
+        _activateReverts(
+            g,
+            keyA,
+            gSig,
+            abi.encodeWithSelector(
+                ISharedCommitmentVault.StaleGeneration.selector, curator, g.generation, g.generation + 1
+            )
+        );
+
+        vm.prank(guardian);
+        vault.freezeCurator(curator);
+        ICuratorAuthorization.AllocationAuthorization memory f = _authz(curator, keyA, c1, 10_000 ether);
+        bytes memory fSig = _signAuth(k, f);
+        _activateReverts(
+            f,
+            keyA,
+            fSig,
+            abi.encodeWithSelector(
+                ISharedCommitmentVault.CuratorRestricted.selector,
+                curator,
+                ISharedCommitmentVault.CuratorRestriction.Frozen
+            )
+        );
+        vm.prank(guardian);
+        vault.revokeCurator(curator);
+        _activateReverts(
+            f,
+            keyA,
+            fSig,
+            abi.encodeWithSelector(
+                ISharedCommitmentVault.CuratorRestricted.selector,
+                curator,
+                ISharedCommitmentVault.CuratorRestriction.Revoked
+            )
+        );
+    }
+
+    /// @notice The guardian disables the production module: signed and direct activation stop, while swaps,
+    ///         cancellation, release and every LP path keep working. The owner installs a new production module; the
+    ///         old one can never come back, old signatures fail on the new domain, and new ones work.
+    function test_PA_auth_disableReplaceAndLpPaths() public {
+        uint256 id = _allocate(curator, keyA, c1, 100_000 ether);
+        uint256 id2 = _allocate(curator2, keyB, c0, 100_000 ether);
+        ICuratorAuthorization.AllocationAuthorization memory a = _authz(curator, keyA, c1, 1000 ether);
+        bytes memory oldSig = _signAuth(_curatorKey(), a);
+        vm.prank(guardian);
+        vault.setAuthModule(address(0));
+
+        _activateReverts(
+            a, keyA, oldSig, abi.encodeWithSelector(ISharedCommitmentVault.NotAuthModule.selector, address(auth))
+        );
+        ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c1, 1000 ether);
+        vm.prank(curator);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.NotAuthModule.selector, address(auth)));
+        auth.activateDirect(r);
+
+        _swap(keyA, true, 1000 ether, id);
+        vm.prank(curator2);
+        vault.cancelAllocation(id2);
+        vm.prank(lp);
+        vault.deposit(1000 ether, type(uint256).max, type(uint256).max, lp);
+        vm.prank(lp);
+        (,,, uint256 req) = vault.redeem(500 ether, 0, 0, lp, true);
+        vault.processQueue(5);
+        if (req != 0) {
+            vm.prank(lp);
+            vault.claim(req);
+        }
+        vm.prank(guardian);
+        vault.release(id);
+
+        ICuratorAuthorization m2 = _deployAuth(vault);
+        vm.prank(owner);
+        vault.setAuthModule(address(m2));
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.AuthModuleRetired.selector, address(auth)));
+        vault.setAuthModule(address(auth));
+        vm.prank(stranger);
+        vm.expectRevert(ICuratorAuthorization.InvalidSignature.selector);
+        m2.activate(a, keyA, oldSig);
+        (uint8 v, bytes32 rr, bytes32 s) = vm.sign(_curatorKey(), m2.hashAuthorization(a));
+        vm.prank(stranger);
+        uint256 nid = m2.activate(a, keyA, abi.encodePacked(rr, s, v));
+        _swap(keyA, true, 500 ether, nid);
+        _assertAccounting();
+    }
+
+    /// @notice The same request through the signed and the direct path gives the same allocation and reservation
+    ///         changes. Two instructions competing for the last backing: the first wins, the second fails admission
+    ///         and keeps its nonce. A signature does not lift the exposure cap or the flow cap.
+    function test_PA_auth_equivalenceCompetitionAndCaps() public {
+        ICuratorAuthorization.AllocationAuthorization memory a = _authz(curator, keyB, c0, 25_000 ether);
+        bytes memory sig = _signAuth(_curatorKey(), a);
+        uint256 snap = vm.snapshotState();
+        uint256 idS = _activateSigned(a, keyB, sig);
+        bytes32 viaSigned =
+            keccak256(abi.encode(vault.getAllocation(idS), vault.reserved(c0), vault.curatorReserved(curator, c0)));
+        vm.revertToState(snap);
+        vm.prank(curator);
+        uint256 idD = auth.activateDirect(
+            ISharedCommitmentVault.AllocationRequest({
+                consumer: a.hook,
+                key: keyB,
+                currencyOut: a.currencyOut,
+                maxOut: a.maxOut,
+                minInPerOutX96: a.minInPerOutX96,
+                expiry: a.expiry,
+                nonce: a.nonce,
+                deadline: a.deadline
+            })
+        );
+        assertEq(idD, idS);
+        assertEq(
+            keccak256(abi.encode(vault.getAllocation(idD), vault.reserved(c0), vault.curatorReserved(curator, c0))),
+            viaSigned
+        );
+
+        uint256 room = vault.admissibleCapacity(c0);
+        ICuratorAuthorization.AllocationAuthorization memory big = _authz(curator, keyA, c0, uint128(room - 5));
+        ICuratorAuthorization.AllocationAuthorization memory rival = _authz(curator, keyA, c0, 10);
+        bytes memory bigSig = _signAuth(_curatorKey(), big);
+        bytes memory rivalSig = _signAuth(_curatorKey(), rival);
+        _activateSigned(big, keyA, bigSig);
+        _activateReverts(
+            rival, keyA, rivalSig, abi.encodeWithSelector(ISharedCommitmentVault.InsufficientBacking.selector, 10, 5)
+        );
+        assertFalse(auth.isNonceUsed(curator, rival.nonce));
+
+        _setLimit(CURATOR, curator2, c1, 300 ether, 100); // 1% exposure, 300 flow per window
+        uint256 cap = vault.getRiskLimit(CURATOR, curator2, c1).maxReservedBps
+            * (vault.backing(c1) - vault.claimableAssets(c1)) / 10_000;
+        (address c2, uint256 k2) = makeAddrAndKey("curator2");
+        assertEq(c2, curator2);
+        ICuratorAuthorization.AllocationAuthorization memory over = _authz(curator2, keyA, c1, uint128(cap + 1));
+        bytes memory overSig = _signAuth(k2, over);
+        _activateReverts(
+            over,
+            keyA,
+            overSig,
+            abi.encodeWithSelector(
+                ISharedCommitmentVault.ExposureCapExceeded.selector, CURATOR, curator2, c1, cap + 1, cap
+            )
+        );
+        ICuratorAuthorization.AllocationAuthorization memory ok = _authz(curator2, keyA, c1, uint128(cap));
+        uint256 id = _activateSigned(ok, keyA, _signAuth(k2, ok));
+        _swapRefusedByFlow(keyA, 1000 ether, id, CURATOR, curator2); // the flow cap binds a signed allocation
+    }
+
+    /// @notice A malicious module installed by mistake forges `reserveFor` against the production vault: every
+    ///         vault-side check still applies, it cannot touch allocations or limits, and the guardian removes it.
+    function test_PA_auth_compromisedModuleBounded() public {
+        MaliciousAuthModule mal = new MaliciousAuthModule(ISharedCommitmentVault(address(vault)));
+        vm.prank(owner);
+        vault.setAuthModule(address(mal));
+        vm.prank(owner);
+        vault.setCuratorCeiling(curator2, c1, 1000 ether);
+        ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c1, 1001 ether);
+        vm.expectRevert(
+            abi.encodeWithSelector(ISharedCommitmentVault.CuratorCeilingExceeded.selector, 1001 ether, 1000 ether)
+        );
+        mal.forge(r, curator2, 0);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.CuratorNotRegistered.selector, stranger));
+        mal.forge(_request(keyA, c1, 1 ether), stranger, 0);
+        r = _request(keyA, c1, 1 ether);
+        r.minInPerOutX96 = PRICE_1_1_X96 - 1;
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ISharedCommitmentVault.FloorBelowVaultMinimum.selector, PRICE_1_1_X96 - 1, PRICE_1_1_X96
+            )
+        );
+        mal.forge(r, curator2, 0);
+        uint256 id = mal.forge(_request(keyA, c1, 1000 ether), curator2, 0);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.NotAllocationCurator.selector, id, address(mal)));
+        mal.exec(address(vault), abi.encodeCall(vault.cancelAllocation, (id)));
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.ConsumerNotRegistered.selector, address(mal)));
+        mal.exec(address(vault), abi.encodeCall(vault.exchange, (keyA, true, id, 1 ether, 1 ether)));
+        vm.expectRevert(ISharedCommitmentVault.NotOwner.selector);
+        mal.exec(address(vault), abi.encodeCall(vault.setCuratorCeiling, (curator2, c1, type(uint256).max)));
+        vm.startPrank(guardian);
+        vault.setAuthModule(address(0));
+        vault.release(id);
+        vm.stopPrank();
+        _assertAccounting();
+    }
+
+    /// @notice A curator wallet that tries to cancel its own allocation from inside `isValidSignature` cannot: the
+    ///         call runs under `staticcall`, the wallet's strict mode rejects its own instruction, and the allocation
+    ///         is untouched.
+    function test_PA_auth_reentrantWalletIsStatic() public {
+        Mock1271Wallet w = _walletCurator();
+        ICuratorAuthorization.AllocationAuthorization memory a0 = _authz(address(w), keyB, c0, 5000 ether);
+        w.approve(auth.hashAuthorization(a0), true);
+        uint256 live = _activateSigned(a0, keyB, "");
+        ICuratorAuthorization.AllocationAuthorization memory a = _authz(address(w), keyB, c0, 5000 ether);
+        w.approve(auth.hashAuthorization(a), true);
+        w.setMode(Mock1271Wallet.Mode.ReenterStrict);
+        w.setReentry(address(vault), abi.encodeCall(vault.cancelAllocation, (live)));
+        vm.prank(stranger);
+        (bool ok, bytes memory ret) = address(auth).call{gas: 5_000_000}(abi.encodeCall(auth.activate, (a, keyB, "")));
+        assertFalse(ok);
+        assertEq(ret, abi.encodeWithSelector(ICuratorAuthorization.InvalidSignature.selector));
+        assertFalse(vault.getAllocation(live).released);
+        assertFalse(auth.isNonceUsed(address(w), a.nonce));
+    }
+
     ISharedCommitmentVault.RiskScope internal constant HOOK = ISharedCommitmentVault.RiskScope.Hook;
     ISharedCommitmentVault.RiskScope internal constant CURATOR = ISharedCommitmentVault.RiskScope.Curator;
     ISharedCommitmentVault.RiskScope internal constant VAULT = ISharedCommitmentVault.RiskScope.Vault;
@@ -621,6 +927,90 @@ contract ProductionArtifactSecurityTest is Test {
         assertTrue(vm.parseJsonBool(json, ".metadata.settings.viaIR"), string.concat(artifact, ": viaIR"));
         assertEq(vm.parseJsonString(json, ".metadata.settings.evmVersion"), "cancun", string.concat(artifact, ": evm"));
         assertEq(deployed.code.length, vm.getDeployedCode(artifact).length, string.concat(artifact, ": code"));
+    }
+
+    function _curatorKey() internal returns (uint256 k) {
+        address a;
+        (a, k) = makeAddrAndKey("curator");
+        assertEq(a, curator);
+    }
+
+    function _authz(address cur, PoolKey memory key, Currency out, uint128 maxOut)
+        internal
+        returns (ICuratorAuthorization.AllocationAuthorization memory)
+    {
+        uint256 now_ = vm.getBlockTimestamp();
+        return ICuratorAuthorization.AllocationAuthorization({
+            curator: cur,
+            generation: vault.getCurator(cur).generation,
+            vault: address(vault),
+            poolId: key.toId(),
+            hook: address(key.hooks),
+            currencyIn: out == key.currency1 ? key.currency0 : key.currency1,
+            currencyOut: out,
+            zeroForOne: out == key.currency1,
+            maxOut: maxOut,
+            minInPerOutX96: PRICE_1_1_X96,
+            expiry: uint64(now_ + 1 days),
+            validAfter: uint64(now_),
+            deadline: uint64(now_ + 1 hours),
+            nonce: nonce++
+        });
+    }
+
+    function _signAuth(uint256 k, ICuratorAuthorization.AllocationAuthorization memory a)
+        internal
+        view
+        returns (bytes memory)
+    {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(k, auth.hashAuthorization(a));
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _activateSigned(
+        ICuratorAuthorization.AllocationAuthorization memory a,
+        PoolKey memory key,
+        bytes memory sig
+    ) internal returns (uint256) {
+        vm.prank(stranger);
+        return auth.activate(a, key, sig);
+    }
+
+    function _activateReverts(
+        ICuratorAuthorization.AllocationAuthorization memory a,
+        PoolKey memory key,
+        bytes memory sig,
+        bytes memory err
+    ) internal {
+        vm.prank(stranger);
+        vm.expectRevert(err);
+        auth.activate(a, key, sig);
+    }
+
+    function _copyAuth(ICuratorAuthorization.AllocationAuthorization memory a)
+        internal
+        pure
+        returns (ICuratorAuthorization.AllocationAuthorization memory)
+    {
+        return abi.decode(abi.encode(a), (ICuratorAuthorization.AllocationAuthorization));
+    }
+
+    function _first64(bytes memory sig) internal pure returns (bytes memory out) {
+        out = new bytes(64);
+        for (uint256 i; i < 64; ++i) {
+            out[i] = sig[i];
+        }
+    }
+
+    /// @dev A contract-wallet curator registered with open limits.
+    function _walletCurator() internal returns (Mock1271Wallet w) {
+        w = new Mock1271Wallet();
+        vm.startPrank(owner);
+        vault.setCurator(address(w), true);
+        vault.setCuratorCeiling(address(w), c0, type(uint256).max);
+        vault.setCuratorCeiling(address(w), c1, type(uint256).max);
+        _openLimits(ISharedCommitmentVault.RiskScope.Curator, address(w));
+        vm.stopPrank();
     }
 
     function _deployAuth(IBenchVault v) internal returns (ICuratorAuthorization) {
