@@ -121,18 +121,37 @@ contract ExposureCapsTest is VaultTestBase {
         _assertEquations();
     }
 
-    /// @notice Queued redemptions are LP liabilities: D_a leaves eligible backing at once, before finalization.
+    /// @notice Queued redemptions are LP liabilities: D_a leaves eligible backing at once, before finalization, and
+    ///         the vault's own `allocate` (not only the lens) applies the smaller cap. All of asset0 is committed
+    ///         first, so the redemption queues entirely and N1 does not move; only D1 changes. With N1 = 1,000,000
+    ///         ether and D1 about 200,000 ether, 50% of E1 is about 400,000 ether, while 50% of N1 would be 500,000.
     function test_EX_pendingDemandReducesEligibleBacking() public {
-        _setBps(VAULT, address(0), 10_000);
-        uint256 lock = _alloc(curator, keyE1, 900_000 ether);
-        (,,, uint256 req) = _redeem(lp0, 500_000 ether, true);
+        ISharedCommitmentVault.AllocationRequest memory all0 =
+            _request(keyE1, c0, uint128(vault.admissibleCapacity(c0)));
+        vm.prank(curator);
+        uint256 lock0 = vault.allocate(all0);
+        (uint256 instant,,, uint256 req) = _redeem(lp0, 200_000 ether, true);
+        assertEq(instant, 0, "asset0 fully committed: everything queues");
         assertGt(req, 0);
         uint256 d = lens.pendingDemand(vault, c1);
         assertGt(d, 0);
-        assertEq(lens.eligibleBacking(vault, c1), lens.netAssets(vault, c1) - d);
-        assertEq(lens.exposureAvailable(vault, VAULT, address(0), c1), _sub0(_limit(10_000, c1), 900_000 ether));
+        assertEq(lens.netAssets(vault, c1), VAULT_FUNDING, "N1 unchanged by queueing");
+        assertEq(lens.eligibleBacking(vault, c1), VAULT_FUNDING - d);
+
+        _setBps(VAULT, address(0), 5000);
+        uint256 limit = _limit(5000, c1);
+        assertEq(limit, (VAULT_FUNDING - d) * 5000 / 10_000);
+        assertLt(limit, VAULT_FUNDING / 2, "queue demand lowered the cap");
+        assertEq(lens.exposureAvailable(vault, VAULT, address(0), c1), limit);
+        _allocReverts(curator, keyE1, uint128(limit + 1), VAULT, address(0), limit);
+        _alloc(curator, keyE1, uint128(limit));
+
+        // Cancelling the request removes the demand and restores the cap computed from N1 alone.
+        vm.prank(lp0);
+        vault.cancelRequest(req);
+        assertEq(lens.exposureAvailable(vault, VAULT, address(0), c1), VAULT_FUNDING / 2 - limit);
         vm.prank(curator);
-        vault.cancelAllocation(lock);
+        vault.cancelAllocation(lock0);
     }
 
     // ------------------------------------------------------------------
