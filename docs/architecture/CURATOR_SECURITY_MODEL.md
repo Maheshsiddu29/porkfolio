@@ -3,8 +3,9 @@
 **Status: IMPLEMENTED (local).** Step 1B-2.1 implemented the curator record, freeze, revocation, generation,
 cancellation and the shared close path in the vault (`PHASE1B2_1_REPORT.md`), with the differences listed in §1.1.
 Step 1B-2.3 implemented signed authorizations, nonces, `reserveFor` and the authorization module
-(`PHASE1B2_3_REPORT.md`), with the differences listed in §2.1. Where §2–§4 below still describe the proposal, §2.1 says
-what was built. It assumes architecture B from
+(`PHASE1B2_3_REPORT.md`), with the differences listed in §2.1. Step 1B-2.4 added the module installation check and
+the signature time rules (§2.2; operator-facing summary in `AUTH_SECURITY_RELEASE_NOTES.md`). Where §2–§4 below still
+describe the proposal, §2.1 and §2.2 say what was built. It assumes architecture B from
 `MODULAR_RISK_ENGINE.md` (vault + `CuratorAuthorization` module). It refines `PHASE1B_CURATOR_AUTH.md` and
 `CURATOR_REVOCATION.md`, and where they differ this document wins. Changes to earlier decisions are listed in §9.
 
@@ -87,10 +88,32 @@ live allocations, contrary to "deregistration leaves allocations consumable" (`C
 | `reserveFor(req, curator, generation, signed)`; vault skips the generation for direct calls | `reserveFor(req, curator, generation)`; the vault always compares it; on the direct path the module passes the generation it reads from the vault in the same call | one rule in the vault; no flag a module could misuse |
 | Direct path consumes a nonce | same: one bitmap per curator for both paths | an instruction a curator signed and then submits itself activates once, whichever path is first; retries are idempotent |
 | `setAuthModule(0)` by the guardian, owner may set any value | owner may install any module that was never installed; guardian may only set zero; **the module being replaced or disabled is retired for good** | keeps a retired module's unused signatures from ever regaining authority; a reversible stop of new allocations exists already (vault-scope exposure cap, deregistration, pause) |
-| — | the vault never calls the module (no `module.vault()` check at install) | no call cycle; a module built for another vault only ever calls that vault, so installing it here gives it nothing |
+| — | 1B-2.3: the vault never calls the module (no `module.vault()` check at install). **Changed in 1B-2.4:** one read-only `vault()` call at installation (§2.2) | no call cycle either way; the install check costs 91 bytes and leaves 2,052 bytes of EIP-170 margin |
 
-Order of an activation as built: signed-field checks (vault field, time window, pool id, hook, direction) → signature
-(`SignatureChecker`) → nonce bit → `vault.reserveFor` (last action). Any revert undoes the nonce bit.
+Order of an activation as built: signed-field checks (vault field, time-field consistency, clock, pool id, hook,
+direction) → signature (`SignatureChecker`) → nonce bit → `vault.reserveFor` (last action). Any revert undoes the nonce
+bit.
+
+### 2.2 Added in 1B-2.4 (SOURCE, `PHASE1B2_4_REPORT.md`)
+
+**Installation check.** `setAuthModule(m)` with `m != 0` makes one `staticcall` to `m.vault()` and reverts
+`InvalidAuthModule(m)` unless the call succeeds, returns at least 32 bytes, and the first word is exactly this vault's
+address. Installing the module that is already installed reverts `AuthModuleRetired` (installing retires the current
+module first). The check catches deployment mistakes only: a malicious module, or any contract with a `vault()` getter
+naming this vault (both hooks have one), passes it. Review and code verification stay mandatory.
+
+**Time rules for signed instructions** (no change to the EIP-712 type, domain or digest):
+
+| Rule | Error | Checked |
+|---|---|---|
+| validAfter <= deadline | `InvalidValidityWindow` | before the clock |
+| deadline − validAfter <= `MAX_VALIDITY_WINDOW` (1 day) | `ValidityWindowTooLong` | before the clock |
+| deadline < expiry (also on the direct path) | `ExpiryNotAfterDeadline` | before the clock |
+| validAfter <= now <= deadline | `AuthorizationNotYetValid`, `AuthorizationExpired` | then |
+| expiry <= now + `MAX_HORIZON` | `HorizonExceeded` (vault) | in the vault |
+
+All of them run before the curator's ERC-1271 wallet is called. Not bounded: how long before its window an instruction
+was signed. That needs a signed issuance time (a new type, version "2"); `AUTH_SECURITY_RELEASE_NOTES.md` §5.
 
 **Libraries.** OpenZeppelin 5.0.2 `EIP712`, `ECDSA` (through `SignatureChecker`) and `SignatureChecker`, the version
 already vendored under `lib/v4-periphery/lib/v4-core/lib/openzeppelin-contracts` (SOURCE, `package.json` 5.0.2).
@@ -148,7 +171,8 @@ check for unsigned requests, because the curator is present.
 | Another chain | `chainId` in the domain; separator rebuilt on fork | module (OZ) |
 | Another vault | `vault` field in the struct; the module's `vault` is immutable; the vault accepts only its configured module | module + vault |
 | Another module (old or new) | `verifyingContract` in the domain | module (OZ) |
-| Too early or too late | `validAfter ≤ now ≤ deadline` | module |
+| Too early or too late | `validAfter ≤ now ≤ deadline`; since 1B-2.4 also `validAfter ≤ deadline`, `deadline − validAfter ≤ 1 day`, `deadline < expiry` | module |
+| Signed long before use (future-dated window) | **not bounded**: the module cannot know the signing time; cancel with `invalidateNonces`, `bumpGeneration` or module retirement | — |
 | Signature from before a key compromise | the curator or the owner bumps `generation`; the vault rejects `generation ≠ current` | vault |
 | **Revival after unfreeze** | `unfreezeCurator` always increments `generation`, so every signature made before the freeze is dead | vault |
 | **Revival after deregister and re-register** | `setCurator(c, false)` increments `generation` | vault |
@@ -212,7 +236,8 @@ deregistered curator's unexpired allocation is **not** releasable by a stranger,
     else is affected.
   - OZ 5.0.2 `SignatureChecker` copies the return data, so the submitter pays for memory expansion (SOURCE). Relayers
     should set a gas limit.
-- The module → vault call is the module's last action. The vault never calls the module.
+- The module → vault call is the module's last action. The vault calls a module only once, read-only, when the owner
+  installs it (`vault()` through `staticcall`, 1B-2.4); never on any other path.
 
 ## 6. Gas (OBSERVED, prototype, `optimizer_runs` 200; `MODULAR_RISK_ENGINE.md` §8.2)
 

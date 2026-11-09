@@ -189,3 +189,21 @@ test/bench/run.sh
 - **Size.** Vault runtime 22,433 B (EIP-170 margin 2,143 B); module 6,812 B.
 
 Docs: `docs/architecture/PHASE1B2_3_REPORT.md`.
+
+## Phase 1B-2.4 — Authorization security closure
+
+```bash
+forge test --match-contract "ModuleInstallationTest|ActivationSafetyTest" -vv
+test/bench/security.sh       # now also fails if the vault's EIP-170 margin drops below 2,048 bytes
+```
+
+- **Install check.** `setAuthModule` reads `vault()` from the candidate (one `staticcall`) and refuses anything that
+  does not answer with this vault's address; re-installing the installed module is refused. This catches mistakes,
+  not malice: any contract that returns the right address passes, including the hooks.
+- **Time rules.** Signed instructions must satisfy validAfter <= deadline < expiry with a window of at most one day,
+  checked before the clock and before any wallet code; the direct path requires deadline < expiry. The EIP-712 type
+  is unchanged. How long before its window an instruction was signed is still not bounded.
+- **Size.** Vault runtime 22,524 B (EIP-170 margin 2,052 B); module 7,310 B. Swap and LP gas unchanged.
+
+Docs: `docs/architecture/PHASE1B2_4_REPORT.md`, `docs/architecture/AUTH_SECURITY_RELEASE_NOTES.md`,
+`docs/architecture/PHASE1B3_PLAN.md`.

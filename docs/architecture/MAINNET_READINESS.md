@@ -22,7 +22,7 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 | D-3 | Unichain supports every opcode used (`TSTORE`/`TLOAD`, `MCOPY`, `PUSH0`) | Not started | Verify on a fork against the live chain, not from documentation alone. |
 | D-4 | Canonical Unichain PoolManager address and bytecode confirmed against Uniswap's published deployment | Not started | — |
 | D-5 | No unreviewed dependency added; OZ used only for EIP-712 and signature checks (D12) | Done (local) | `CuratorAuthorization` imports only OZ 5.0.2 `EIP712` and `SignatureChecker` (and through them `ECDSA`, `MessageHashUtils`, `ShortStrings`), through an explicit `@openzeppelin/contracts/` remapping to the copy vendored in v4-core (1B-2.3). Keep enforcing in review. |
-| D-7 | CI runs the production-build security suite on every push and pull request | Partial | `.github/workflows/security.yml` (actions pinned by SHA, Foundry v1.7.1, read-only token, no secrets): `fmt --check`, `run.sh`, a 2,048-byte vault-margin check, `security.sh`. Every step was run locally; the workflow itself has not run on GitHub because nothing has been pushed (1B-2.3 report §10). |
+| D-7 | CI runs the production-build security suite on every push and pull request | Partial | `.github/workflows/security.yml` (actions pinned by SHA and re-checked with `git ls-remote` in 1B-2.4, Foundry v1.7.1, read-only token, no secrets): `fmt --check`, `run.sh`, `security.sh`. Since 1B-2.4 the size gate (vault margin >= 2,048 B, EIP-170, EIP-3860) is in `security.sh` and in `test_productionSizesWithinLimits`, so a local run reproduces the job. Every step was run locally; the workflow itself has **not run on GitHub** because nothing has been pushed. |
 
 ## 2. Stateful invariants and conservation
 
@@ -51,7 +51,8 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 | M-2 | Guardian disables the module in one call; allocations unchanged (INV-M8) | Done (local) | `test_ML_disableStopsOnlyNewActivations`, `test_PA_auth_disableReplaceAndLpPaths`, `invariant_moduleLifecycle`. A disable retires the module for good (resume = new module). |
 | M-3 | ERC-1271 wallet: reentrant, gas burner, return bomb, signer change | Done (local) | `Mock1271Wallet` modes in `CuratorAuthorization.t.sol` and `test_PA_auth_reentrantWalletIsStatic`. A write attempt under `staticcall` burns the gas forwarded to the wallet; the cost falls on the submitter. |
 | M-4 | Vault transient reentrancy lock on every state-changing entry point except `unlockCallback`; token-callback reentry test | Done (local) | Lock on the ten accounting entry points; configuration setters and `bumpGeneration` deliberately unlocked (`PHASE1B2_1_REPORT.md` §5). `Reentrancy.t.sol` with a callback token; mutants C15, C16 killed |
-| M-5 | No call cycle between contracts (static review plus a test that the vault never calls the module) | Done (local) | The vault has no reference to the module's interface (SOURCE); `test_ML_vaultNeverCallsModule` (`vm.expectCall` with count 0, checked non-vacuous). |
+| M-5 | No call cycle between contracts (static review plus a test that the vault calls the module only where intended) | Done (local) | Since 1B-2.4 the vault makes exactly one read-only call to a module, `vault()` at installation, and none on any other path: `test_ML_vaultCallsModuleOnlyAtInstall` (`vm.expectCall` counts). The module never receives a call from the vault while it runs. |
+| M-6 | Installing a module checks that it reports this vault; re-installing the installed module is refused | Done (local) | `setAuthModule` install check (1B-2.4): `ModuleInstallation.t.sol`, `test_PA_auth_moduleInstallCheck`, INV-M9. **Limit:** a malicious module or any contract with a matching `vault()` getter (both hooks) passes; review and code verification (X-2) remain required. |
 
 ## 5. Signatures, replay and revocation
 
@@ -61,6 +62,8 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 | S-2 | Revival: after unfreeze, deregister and re-register, revocation, generation bump | Done (local) | `test_CA_generationBumpInvalidatesOutstanding`, `_deregisterReregisterCannotRevive`, `_freezeUnfreezeAndRevoke`; retired modules: `test_ML_retiredModuleNeverReinstalled`; mutants L4, L5, V2 |
 | S-3 | Nonce single use across direct and signed paths (INV-C6) | Done (local) | `test_CA_signedAndDirectShareNonces`, `invariant_noncesSingleUse`; mutants A1–A4 |
 | S-4 | Domain separator rebuilt after a chain-id change (fork test with `vm.chainId`) | Done (local) | `test_CA_crossChainReplay` (`vm.chainId`; OZ rebuilds the separator). Not run on a real fork. |
+| S-5 | Signed instructions have consistent, bounded times: validAfter <= deadline < expiry, window <= 1 day | Done (local) | 1B-2.4: `ActivationSafety.t.sol` (boundaries, reference fuzz), INV-T1, `test_PA_auth_signatureTimeRules`. |
+| S-6 | Bound on how long before use an instruction may be signed (issuance time) | Not started | Needs a signed `issuedAt` field and a new EIP-712 type (version "2"); owner decision. Until then: `invalidateNonces`, `bumpGeneration`, module retirement (`AUTH_SECURITY_RELEASE_NOTES.md` §5). |
 
 ## 6. Pricing and trade splitting
 
@@ -105,7 +108,7 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 |---|---|---|---|
 | G-1 | Owner is a multisig (threshold and signers documented) | Not started | D3: required before real value |
 | G-2 | Loosening actions (floor down, ceiling up, cap up, unfreeze, register, module change) go through a timelock; tightening actions do not | Not started | — |
-| G-3 | Guardian is a separate key or multisig with documented response times; runbooks for curator compromise, hook compromise, module compromise, stale price | Partial | Curator runbook drafted (`CURATOR_SECURITY_MODEL.md` §4); module-compromise runbook drafted (`PHASE1B2_3_REPORT.md` §11) |
+| G-3 | Guardian is a separate key or multisig with documented response times; runbooks for curator compromise, hook compromise, module compromise, stale price | Partial | Curator runbook drafted (`CURATOR_SECURITY_MODEL.md` §4); module-compromise and exhausted-generation runbooks in `AUTH_SECURITY_RELEASE_NOTES.md` §3–§4 |
 | G-4 | Emergency drill on testnet: pause and halt within one block of the decision; LP exits keep working | Not started | — |
 | G-5 | Monitoring and alerts: floor proximity, flow-bucket saturation, queue length, `Q_a / N_a`, guardian actions | Not started | Off-chain |
 
@@ -125,7 +128,7 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 |---|---|---|---|
 | R-1 | Independent security review of the vault, authorization module, hooks, pricing libraries and deployment scripts at a frozen commit | Not started | Required before Gate 3 |
 | R-2 | Every finding fixed with a regression test, or accepted in writing with its risk stated | Not started | — |
-| R-3 | Public documentation of the trust model: owner powers, guardian powers, what is not guaranteed (`PHASE1B_PRICE_POLICY.md` §13) | Partial | In repository docs; no user-facing version |
+| R-3 | Public documentation of the trust model: owner powers, guardian powers, what is not guaranteed (`PHASE1B_PRICE_POLICY.md` §13) | Partial | In repository docs; `AUTH_SECURITY_RELEASE_NOTES.md` (1B-2.4) states the owner trust boundary and operator guidance; no user-facing version |
 
 **Not claimed anywhere:** an audit, formal verification, a guaranteed LP exit time beyond the documented bounds, or
 fair-market pricing.
