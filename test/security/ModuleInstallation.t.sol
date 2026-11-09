@@ -6,6 +6,7 @@ import {CuratorAuthorization} from "../../src/CuratorAuthorization.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
 import {AuthTestBase} from "../utils/AuthTestBase.sol";
+import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
 import {ModuleCandidate} from "../utils/ModuleCandidate.sol";
 import {MaliciousAuthModule} from "../utils/MaliciousAuthModule.sol";
 
@@ -77,6 +78,28 @@ contract ModuleInstallationTest is AuthTestBase {
         vm.prank(owner);
         vault.setAuthModule(address(cand));
         assertEq(vault.authModule(), address(cand));
+    }
+
+    /// @notice Two answers that only the call-success and length checks reject.
+    ///         (1) A candidate that reverts with exactly this vault's address as revert data. A failed call still
+    ///         copies its revert data into the output buffer, so without the success check it would read as the
+    ///         right answer.
+    ///         (2) A 31-byte answer, for a vault deployed at an address ending in 0xcf. The vault writes the selector
+    ///         0xfbfa77cf into the word it later reads, so the 32nd byte of that word is left over as 0xcf; without
+    ///         the length check, 31 correct bytes plus that leftover byte would read as the right answer.
+    function test_MI_failedOrShortAnswerCannotPassAsTheVault() public {
+        cand.set(ModuleCandidate.Mode.RevertWord, bytes32(uint256(uint160(address(vault)))));
+        _expectInstallRefused(address(cand));
+
+        address at = address(uint160(0xC0FFEE) << 136 | 0xcf);
+        deployCodeTo(ProductionArtifacts.VAULT, abi.encode(manager, owner, c0, c1), at);
+        cand.set(ModuleCandidate.Mode.Short, bytes32(uint256(uint160(at))));
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InvalidAuthModule.selector, address(cand)));
+        SharedCommitmentVault(at).setAuthModule(address(cand));
+        cand.set(ModuleCandidate.Mode.Answer, bytes32(uint256(uint160(at))));
+        vm.prank(owner);
+        SharedCommitmentVault(at).setAuthModule(address(cand)); // the full answer is accepted: the setup is sound
     }
 
     /// @notice A candidate whose getter burns all gas makes the owner's transaction fail and pay for it; nothing

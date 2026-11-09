@@ -12,7 +12,8 @@ contract ModuleCandidate {
 
     enum Mode {
         Answer, // returns `word` as one 32-byte word
-        Revert, // reverts
+        Revert, // reverts with an Error(string)
+        RevertWord, // reverts with exactly `word` as revert data
         Empty, // returns no data
         Short, // returns the first 31 bytes of `word`
         Long, // returns `word` followed by a second word
@@ -32,6 +33,12 @@ contract ModuleCandidate {
         Mode m = mode;
         bytes32 w = word;
         if (m == Mode.Revert) revert("candidate: no");
+        if (m == Mode.RevertWord) {
+            assembly ("memory-safe") {
+                mstore(0, w)
+                revert(0, 32)
+            }
+        }
         if (m == Mode.Empty) return "";
         if (m == Mode.Short) return abi.encodePacked(bytes31(w));
         if (m == Mode.Long) return abi.encode(w, bytes32(type(uint256).max));
