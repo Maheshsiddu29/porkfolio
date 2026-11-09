@@ -329,6 +329,42 @@ contract ProductionArtifactGasTest is Test {
         console2.log("BENCH swap hookA (router+PM+hook+vault):", g - gasleft());
     }
 
+    /// @notice Second HookA swap in the same flow window: the three flow records already hold this window's usage,
+    ///         so each update is a non-zero to non-zero write with no window change. With --isolate every call is
+    ///         its own transaction, so the slots are cold again, as for a later swap on-chain.
+    function test_bench_swap_hookA_sameWindow() public {
+        uint256 id = _allocate(curator, keyA, c1, 100_000 ether);
+        _swap(keyA, true, -1000 ether, abi.encode(id));
+        uint256 g = gasleft();
+        _swap(keyA, true, -1000 ether, abi.encode(id));
+        console2.log("BENCH swap hookA, same flow window:", g - gasleft());
+    }
+
+    /// @notice First HookA swap after the flow window rolled over: the stored usage belongs to an earlier window,
+    ///         so each record restarts from this swap's output (same storage cost as any other update).
+    function test_bench_swap_hookA_newWindow() public {
+        uint256 id = _allocate(curator, keyA, c1, 100_000 ether);
+        _swap(keyA, true, -1000 ether, abi.encode(id));
+        vm.warp((block.timestamp / 1 days + 1) * 1 days); // first second of the next window, before expiry
+        uint256 g = gasleft();
+        _swap(keyA, true, -1000 ether, abi.encode(id));
+        console2.log("BENCH swap hookA, first in a new flow window:", g - gasleft());
+    }
+
+    /// @notice Configuring a record for the first time (both slots zero to non-zero), and changing one that is
+    ///         already configured.
+    function test_bench_setRiskLimit() public {
+        address fresh = makeAddr("freshCurator");
+        vm.prank(owner);
+        uint256 g = gasleft();
+        vault.setRiskLimit(ISharedCommitmentVault.RiskScope.Curator, fresh, c1, 500_000 ether, 5000);
+        console2.log("BENCH setRiskLimit (configure new record):", g - gasleft());
+        vm.prank(owner);
+        g = gasleft();
+        vault.setRiskLimit(ISharedCommitmentVault.RiskScope.Curator, fresh, c1, 400_000 ether, 4000);
+        console2.log("BENCH setRiskLimit (change configured record):", g - gasleft());
+    }
+
     /// @notice Router + PoolManager + HookB + vault `exchange`, 1,000 tokens exact input, asset1 -> asset0.
     function test_bench_swap_hookB() public {
         uint256 id = _allocate(curator, keyB, c0, 100_000 ether);

@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
+import {console2} from "forge-std/console2.sol";
 
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
@@ -20,21 +21,22 @@ import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVaul
 import {IBenchVault, IBenchHook} from "./IBench.sol";
 import {ReentrantToken, ReentryAgent} from "../utils/ReentrantToken.sol";
 import {ScriptedHook} from "../utils/ScriptedHook.sol";
+import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
 
 /// @title Production-artifact security tests
 /// @notice Security-relevant paths run against the exact bytecode that would be deployed: the vault, HookA, HookB and
 ///         the pinned v4 PoolManager are each deployed from their production artifact file.
-/// @dev Why this file exists. Functional test files import the vault source, so Foundry compiles them, together with
-///      the hooks and the PoolManager they import, under the vault's optimizer profile (2,000 runs). Inside those
-///      files the hooks and the PoolManager are therefore 2,000-run builds, not the production builds (44,444,444
-///      runs). The vault itself has a single artifact, so it is the production build everywhere.
+/// @dev Why this file exists. It imports no project source, only interfaces, so it compiles under the default
+///      profile and talks to the vault only through its ABI; the functional suite (`VaultTestBase`) also deploys the
+///      production builds now, but compiles the vault source into its files. This file is the ABI-level check.
 ///
 ///      How production builds are guaranteed here. Contracts are deployed from explicit artifact paths
 ///      (`out/<File>.sol/<Name>.json`), not by name, so the result does not depend on the profile this file is
-///      compiled under. `test_PA_deployedCodeIsProductionArtifacts` reads the optimizer settings recorded in each of
-///      those artifact files and checks that each deployed code length equals its artifact's. It does not rely on the
-///      2,000-run test builds being present in `out/`: other tools (for example Slither's `forge build --skip test`)
-///      can remove them. Reading artifacts needs the read-only `fs_permissions` entry for `./out` in foundry.toml.
+///      compiled under. `test_PA_deployedCodeIsProductionArtifacts` reads the compiler settings recorded in each of
+///      those artifact files and checks that each deployed runtime code equals its artifact's with immutables masked.
+///      It does not rely on the 2,000-run test builds being present in `out/`: other tools (for example Slither's
+///      `forge build --skip test`) can remove them. Reading artifacts needs the read-only `fs_permissions` entry for
+///      `./out` in foundry.toml.
 ///
 ///      Test-only contracts used here (the router, `ScriptedHook`, `ReentrantToken`, `ReentryAgent`) are not
 ///      deployed by the project; their build settings do not matter.
@@ -141,12 +143,23 @@ contract ProductionArtifactSecurityTest is Test {
     // ------------------------------------------------------------------
 
     /// @notice Each contract under test came from an artifact compiled with its production settings (via-IR,
-    ///         cancun, no metadata hash, and the production optimizer runs), and the deployed code is that artifact's.
+    ///         cancun, no metadata hash, and the production optimizer runs), and the deployed runtime code is that
+    ///         artifact's byte for byte, immutables masked (`ProductionArtifacts.requireProduction`). The masked
+    ///         runtime hashes are logged so a CI run records exactly which builds it tested.
     function test_PA_deployedCodeIsProductionArtifacts() public view {
         _assertProduction(address(vault), VAULT_JSON, VAULT_RUNS);
         _assertProduction(hookA, HOOK_A_JSON, DEFAULT_RUNS);
         _assertProduction(hookB, HOOK_B_JSON, DEFAULT_RUNS);
         _assertProduction(address(manager), PM_JSON, DEFAULT_RUNS);
+        ProductionArtifacts.requireProduction(address(vault), VAULT_JSON, VAULT_RUNS);
+        ProductionArtifacts.requireProduction(hookA, HOOK_A_JSON, DEFAULT_RUNS);
+        ProductionArtifacts.requireProduction(hookB, HOOK_B_JSON, DEFAULT_RUNS);
+        ProductionArtifacts.requireProduction(address(manager), PM_JSON, DEFAULT_RUNS);
+        console2.log("runtime keccak256 (immutables masked):");
+        console2.logBytes32(ProductionArtifacts.artifactRuntimeHash(VAULT_JSON));
+        console2.logBytes32(ProductionArtifacts.artifactRuntimeHash(HOOK_A_JSON));
+        console2.logBytes32(ProductionArtifacts.artifactRuntimeHash(HOOK_B_JSON));
+        console2.logBytes32(ProductionArtifacts.artifactRuntimeHash(PM_JSON));
     }
 
     // ------------------------------------------------------------------
@@ -334,8 +347,263 @@ contract ProductionArtifactSecurityTest is Test {
     }
 
     // ------------------------------------------------------------------
+    // Hierarchical flow limits and exposure caps
+    // ------------------------------------------------------------------
+
+    /// @notice All three flow limits on production HookA and HookB. Each limit is driven to refusal by the route
+    ///         that bypasses the level below it: a second swap on the same hook (hook limit), the same curator on
+    ///         another hook (curator limit), another curator (vault limit). Each refusal reports exactly cap - used
+    ///         as available, and a new window restores trading.
+    function test_PA_flowLimits_allThreeLevels() public {
+        _setLimit(HOOK, hookA, c1, 1500 ether, 10_000);
+        _setLimit(CURATOR, curator, c1, 2500 ether, 10_000);
+        _setLimit(VAULT, address(0), c1, 3200 ether, 10_000);
+        uint256 a = _allocate(curator, keyA, c1, 100_000 ether);
+        uint256 b = _allocate(curator, keyB, c1, 100_000 ether);
+        uint256 c = _allocate(curator2, keyB, c1, 100_000 ether);
+
+        _swap(keyA, true, 1000 ether, a);
+        _swapRefusedByFlow(keyA, 1000 ether, a, HOOK, hookA);
+        _swap(keyB, true, 1000 ether, b);
+        _swapRefusedByFlow(keyB, 1000 ether, b, CURATOR, curator);
+        _swap(keyB, true, 1000 ether, c);
+        _swapRefusedByFlow(keyB, 1000 ether, c, VAULT, address(0));
+
+        uint256 total = _used(VAULT, address(0), c1);
+        assertEq(_used(HOOK, hookA, c1) + _used(HOOK, hookB, c1), total, "hooks sum to vault");
+        assertEq(_used(CURATOR, curator, c1) + _used(CURATOR, curator2, c1), total, "curators sum to vault");
+        assertEq(_used(VAULT, address(0), c0), 0, "other asset untouched");
+
+        vm.warp((block.timestamp / 1 days + 1) * 1 days); // first second of the next window
+        _swap(keyA, true, 1000 ether, a);
+        assertLt(_used(VAULT, address(0), c1), total, "new window restarted usage");
+        _assertAccounting();
+    }
+
+    /// @notice A hook that splits one swap into two `exchange` calls is charged for both; if the total exceeds the
+    ///         limit the whole swap reverts and no record changes. Usage then accumulates across transactions.
+    function test_PA_flowLimits_splitTradesAndRollback() public {
+        _setLimit(HOOK, address(scripted), c1, 1000 ether, 10_000);
+        bytes memory r =
+            scripted.exec(address(vault), abi.encodeCall(vault.allocate, (_request(keyS, c1, 10_000 ether))));
+        uint256 id = abi.decode(r, (uint256));
+        ScriptedHook.Call[] memory none = new ScriptedHook.Call[](0);
+        scripted.script(none, none, none, 500 ether);
+        ISharedCommitmentVault.RiskLimit memory before = vault.getRiskLimit(VAULT, address(0), c1);
+        _swapReverts(keyS, true, 1001 ether, id, _flowErr(HOOK, address(scripted), c1, 500 ether, 499 ether));
+        assertEq(keccak256(abi.encode(vault.getRiskLimit(VAULT, address(0), c1))), keccak256(abi.encode(before)));
+        assertEq(_used(HOOK, address(scripted), c1), 0, "first half rolled back");
+        _swap(keyS, true, 600 ether, id); // two exchanges: 100 + 500
+        assertEq(_used(HOOK, address(scripted), c1), 600 ether);
+        scripted.script(none, none, none, 0);
+        _swap(keyS, true, 400 ether, id); // a separate transaction
+        assertEq(_used(HOOK, address(scripted), c1), 1000 ether, "accumulates across transactions");
+        _swapReverts(keyS, true, 1, id, _flowErr(HOOK, address(scripted), c1, 1, 0));
+    }
+
+    /// @notice Exposure cap on production builds: at the cap, one unit above, after a deposit and after an instant
+    ///         redemption. An allocation left above a tightened cap stays consumable.
+    function test_PA_exposureCaps() public {
+        _setLimit(VAULT, address(0), c1, type(uint104).max, 2500); // E = 1,000,000 ether: limit 250,000 ether
+        _allocateRefusedByExposure(curator, keyA, 250_000 ether + 1, VAULT, address(0), 250_000 ether);
+        uint256 a = _allocate(curator, keyA, c1, 250_000 ether);
+        _allocateRefusedByExposure(curator2, keyB, 1, VAULT, address(0), 0);
+
+        vm.prank(lp);
+        vault.deposit(1_000_000 ether, type(uint256).max, type(uint256).max, lp); // E doubles
+        _allocate(curator2, keyB, c1, 250_000 ether);
+        vm.prank(lp);
+        vault.redeem(1_000_000 ether, 0, 0, lp, false); // E back to 1,000,000 ether; 500,000 ether stay reserved
+        assertEq(vault.reserved(c1), 500_000 ether);
+        _allocateRefusedByExposure(curator, keyA, 1, VAULT, address(0), 0);
+        vm.prank(guardian);
+        vault.setRiskLimit(HOOK, hookA, c1, type(uint104).max, 0);
+        _swap(keyA, true, 1000 ether, a); // existing commitment still executes
+        assertEq(vault.hookReserved(hookA, c1), 250_000 ether - vault.getAllocation(a).consumed);
+        _assertAccounting();
+    }
+
+    /// @notice Freeze, unfreeze, revocation and pause on production builds never change recorded usage, and LP
+    ///         exits keep working with every flow record exhausted.
+    function test_PA_flowUsageSurvivesLifecycle_lpExitsUnaffected() public {
+        _setLimit(CURATOR, curator, c1, 1500 ether, 10_000);
+        uint256 a = _allocate(curator, keyA, c1, 100_000 ether);
+        _swap(keyA, true, 1000 ether, a);
+        bytes32 snap = _flowSnap();
+        vm.prank(guardian);
+        vault.freezeCurator(curator);
+        vm.prank(owner);
+        vault.unfreezeCurator(curator);
+        assertEq(_flowSnap(), snap);
+        _swapRefusedByFlow(keyA, 1000 ether, a, CURATOR, curator);
+        vm.startPrank(guardian);
+        vault.revokeCurator(curator);
+        vault.setRiskLimit(VAULT, address(0), c0, 0, 10_000);
+        vault.setRiskLimit(VAULT, address(0), c1, 0, 10_000);
+        vault.setPaused(true);
+        vm.stopPrank();
+        snap = _flowSnap();
+        vm.prank(stranger);
+        vault.release(a); // revoked curator: anyone may clean up
+        vm.prank(lp);
+        (uint256 instant,,,) = vault.redeem(10_000 ether, 0, 0, lp, false);
+        assertEq(instant, 10_000 ether, "instant exit while paused with every flow cap at zero");
+        assertEq(_flowSnap(), snap, "closes and LP exits changed no record");
+    }
+
+    /// @notice A second production vault with only the vault-wide record missing refuses to reserve (fail closed),
+    ///         and window arithmetic on production builds survives 2^32 and fails closed past the 40-bit epoch.
+    function test_PA_failClosedAndTimestampBoundaries() public {
+        IBenchVault v = IBenchVault(deployCode(VAULT_JSON, abi.encode(manager, owner, c0, c1)));
+        vm.startPrank(owner);
+        v.setConsumer(hookA, true);
+        v.setCurator(curator, true);
+        v.setSellFloor(c1, PRICE_1_1_X96);
+        v.setCuratorCeiling(curator, c1, type(uint256).max);
+        v.setRiskLimit(HOOK, hookA, c1, 1 ether, 10_000);
+        v.setRiskLimit(CURATOR, curator, c1, 1 ether, 10_000);
+        vm.stopPrank();
+        _fund(owner, address(v), 1000 ether);
+        vm.prank(owner);
+        v.initialDeposit(1000 ether, 1000 ether, owner);
+        ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, 1 ether);
+        vm.prank(curator);
+        vm.expectRevert(
+            abi.encodeWithSelector(ISharedCommitmentVault.RiskLimitNotConfigured.selector, VAULT, address(0), c1)
+        );
+        v.allocate(req);
+
+        _setLimit(CURATOR, curator, c1, 1500 ether, 10_000);
+        vm.warp(2 ** 32 - 10);
+        uint256 a = _allocate(curator, keyA, c1, 100_000 ether);
+        _swap(keyA, true, 1000 ether, a);
+        vm.warp(2 ** 32 + 10); // same window: no reset at the 32-bit wrap
+        _swapRefusedByFlow(keyA, 1000 ether, a, CURATOR, curator);
+
+        vm.warp((uint256(type(uint40).max) + 1) * 1 days);
+        a = _allocate(curator, keyA, c1, 100_000 ether);
+        _swapReverts(
+            keyA,
+            true,
+            1000 ether,
+            a,
+            abi.encodeWithSelector(ISharedCommitmentVault.FlowEpochOutOfRange.selector, uint256(type(uint40).max) + 1)
+        );
+    }
+
+    // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
+
+    ISharedCommitmentVault.RiskScope internal constant HOOK = ISharedCommitmentVault.RiskScope.Hook;
+    ISharedCommitmentVault.RiskScope internal constant CURATOR = ISharedCommitmentVault.RiskScope.Curator;
+    ISharedCommitmentVault.RiskScope internal constant VAULT = ISharedCommitmentVault.RiskScope.Vault;
+
+    function _setLimit(ISharedCommitmentVault.RiskScope scope, address account, Currency c, uint256 cap, uint16 bps)
+        internal
+    {
+        vm.prank(owner);
+        vault.setRiskLimit(scope, account, c, cap, bps);
+    }
+
+    /// @dev Current-window usage, from the stored record (all tests here stay within known windows).
+    function _used(ISharedCommitmentVault.RiskScope scope, address account, Currency c)
+        internal
+        view
+        returns (uint256)
+    {
+        ISharedCommitmentVault.RiskLimit memory r = vault.getRiskLimit(scope, account, c);
+        return r.epoch == block.timestamp / 1 days ? r.flowUsed : 0;
+    }
+
+    function _flowErr(
+        ISharedCommitmentVault.RiskScope scope,
+        address account,
+        Currency c,
+        uint256 requested,
+        uint256 available
+    ) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(
+            ISharedCommitmentVault.FlowLimitExceeded.selector, scope, account, c, requested, available
+        );
+    }
+
+    /// @dev Expects a swap selling token1 through a production hook to be refused by the given flow record. The
+    ///      hook's exact output is not known in advance, so the wrapped reason is decoded: it must be
+    ///      FlowLimitExceeded for this record, with `available` equal to cap - used read just before, and with a
+    ///      requested amount above that. No record may change.
+    function _swapRefusedByFlow(
+        PoolKey memory key,
+        uint256 amountIn,
+        uint256 id,
+        ISharedCommitmentVault.RiskScope scope,
+        address account
+    ) internal {
+        ISharedCommitmentVault.RiskLimit memory r = vault.getRiskLimit(scope, account, c1);
+        uint256 used = _used(scope, account, c1);
+        uint256 available = r.flowCap > used ? r.flowCap - used : 0;
+        bytes32 snap = _flowSnap();
+        vm.prank(trader);
+        try router.swap(
+            key,
+            SwapParams({
+                zeroForOne: true, amountSpecified: -int256(amountIn), sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            abi.encode(id)
+        ) {
+            assertTrue(false, "swap was not refused");
+        } catch (bytes memory err) {
+            assertEq(bytes4(err), CustomRevert.WrappedError.selector, "not a wrapped hook revert");
+            (address hook,, bytes memory reason,) = abi.decode(_tail(err), (address, bytes4, bytes, bytes));
+            assertEq(hook, address(key.hooks));
+            assertEq(bytes4(reason), ISharedCommitmentVault.FlowLimitExceeded.selector, "not a flow refusal");
+            (ISharedCommitmentVault.RiskScope s_, address a_, Currency c_, uint256 req, uint256 avail) =
+                abi.decode(_tail(reason), (ISharedCommitmentVault.RiskScope, address, Currency, uint256, uint256));
+            assertEq(uint8(s_), uint8(scope), "scope");
+            assertEq(a_, account, "account");
+            assertEq(Currency.unwrap(c_), Currency.unwrap(c1), "currency");
+            assertEq(avail, available, "available != cap - used");
+            assertGt(req, avail);
+        }
+        assertEq(_flowSnap(), snap, "a refused swap changed a record");
+    }
+
+    function _allocateRefusedByExposure(
+        address who,
+        PoolKey memory key,
+        uint128 maxOut,
+        ISharedCommitmentVault.RiskScope scope,
+        address account,
+        uint256 available
+    ) internal {
+        ISharedCommitmentVault.AllocationRequest memory req = _request(key, c1, maxOut);
+        vm.prank(who);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ISharedCommitmentVault.ExposureCapExceeded.selector, scope, account, c1, maxOut, available
+            )
+        );
+        vault.allocate(req);
+    }
+
+    /// @dev Hash of every flow record the fixture uses, in both assets.
+    function _flowSnap() internal view returns (bytes32 h) {
+        address[6] memory accounts = [hookA, hookB, address(scripted), curator, curator2, address(0)];
+        for (uint256 i; i < 6; ++i) {
+            ISharedCommitmentVault.RiskScope scope = i < 3 ? HOOK : i < 5 ? CURATOR : VAULT;
+            h = keccak256(
+                abi.encode(h, vault.getRiskLimit(scope, accounts[i], c0), vault.getRiskLimit(scope, accounts[i], c1))
+            );
+        }
+    }
+
+    function _tail(bytes memory data) internal pure returns (bytes memory out) {
+        out = new bytes(data.length - 4);
+        for (uint256 i; i < out.length; ++i) {
+            out[i] = data[i + 4];
+        }
+    }
 
     function _assertProduction(address deployed, string memory artifact, uint256 runs) internal view {
         string memory json = vm.readFile(artifact);

@@ -77,16 +77,24 @@ Each test starts from the same fixture as `test/utils/VaultTestBase.sol`:
 | `release (revoked curator, stranger, per allocation)` | permissionless cleanup of one partially consumed allocation of a revoked curator |
 | `cancelAllocation (after partial consumption)` | the curator cancels its own partially consumed allocation |
 | `swap hookA` / `swap hookB` | router + PoolManager + hook + vault `exchange`; 1,000 tokens exact input |
+| `swap hookA, same flow window` | a second HookA swap in the same flow window: the three flow records are updated without a window change |
+| `swap hookA, first in a new flow window` | the first HookA swap after the window rolled over: each record restarts from this swap's output |
+| `setRiskLimit (configure new record)` / `(change configured record)` | owner configures a record for the first time (two zero-to-non-zero slots), then changes it |
 | `swap native v4` | the same router and amount on a hookless concentrated-liquidity pool; a control that contains no project code |
+
+Every fixture configures the flow and exposure records of the paths it uses (unconfigured paths fail closed). The
+`swap hookA` and `swap hookB` rows are therefore also the first consumption in a window: the records exist but hold
+no usage for the current window.
 
 ## Security tests on production builds
 
 `ProductionArtifactSecurity.t.sol` runs security-relevant paths on production bytecode. Unlike the gas benchmark, it
 deploys every project contract and the PoolManager from an explicit artifact file, for example
 `out/HookA_DynamicFee.sol/HookA_DynamicFee.json`, so the build under test does not depend on the profile the test file
-is compiled under. `test_PA_deployedCodeIsProductionArtifacts` checks each deployed code length against its production
-artifact and against the 2,000-run build of the same contract. Reading `out/` needs the read-only `fs_permissions`
-entry in `foundry.toml`.
+is compiled under. `test_PA_deployedCodeIsProductionArtifacts` checks, for each contract, the compiler settings recorded
+in its artifact (optimizer runs, via-IR, cancun, no metadata hash) and that the deployed runtime code equals the
+artifact's byte for byte once immutable ranges are masked (`test/utils/ProductionArtifacts.sol`); it logs the masked
+runtime hashes. Reading `out/` needs the read-only `fs_permissions` entry in `foundry.toml`.
 
 | Test | What runs on production builds |
 |---|---|
@@ -96,8 +104,30 @@ entry in `foundry.toml`.
 | `test_PA_partialConsumptionThenCancellation` | cancel after a partial HookB fill; exact remainder; no asset moves; double cancel and later swaps fail |
 | `test_PA_maliciousHookAndTokenReentrancy` | a registered hook cancels between two fills (swap reverts atomically) and redeems mid-swap (`AlreadyUnlocked`); a pair-token callback cannot re-enter the vault during a deposit (`ReentrantCall`) |
 | `test_PA_lpWithdrawalDuringRestrictedTrading` | LP exits while paused, halted, frozen and then revoked: queueing, permissionless cleanup, finalization, claim, instant exit |
+| `test_PA_flowLimits_allThreeLevels` | the hook, curator and vault flow limits each refuse a HookA/HookB swap, reached through the route that bypasses the level below; the refusal reports exactly cap - used; hooks and curators sum to the vault; a new window restores trading |
+| `test_PA_flowLimits_splitTradesAndRollback` | a hook splitting one swap into two exchanges is charged for both; an over-limit split reverts and leaves every record unchanged; usage accumulates across transactions |
+| `test_PA_exposureCaps` | at the cap and one unit above; after a deposit and after an instant redemption; an allocation above a tightened cap still executes |
+| `test_PA_flowUsageSurvivesLifecycle_lpExitsUnaffected` | freeze, unfreeze, revocation, cleanup and pause leave usage unchanged; instant LP exit while paused with every cap at zero |
+| `test_PA_failClosedAndTimestampBoundaries` | a production vault missing only its vault-wide record refuses to reserve; no window reset at 2^32; `FlowEpochOutOfRange` past the 40-bit epoch |
 
-These tests run in the ordinary `forge test` suite; `run.sh` runs only the gas benchmark.
+## The functional suite also runs on production builds
+
+`test/utils/VaultTestBase.sol`, the fixture of nearly every functional, fuzz and invariant test, deploys the
+PoolManager, both hooks and `VaultLens` from their production artifact files (`ProductionArtifacts`), and the vault
+has a single (production) artifact. `test/unit/ProductionBuilds.t.sol` checks all five against their artifacts in the
+same way as above, and shows the check tells the 2,000-run hook build apart. The Reentrancy and 6/18-decimal fixtures
+are checked the same way. What is still compiled into test files: routers and test-only hooks (`AuthModeHook`,
+`ScriptedHook`, `MaliciousConsumerHook`), which are never deployed by the project.
+
+## Running the production-build security suite (CI)
+
+```sh
+test/bench/security.sh            # forge build --force; ProductionBuilds; ProductionArtifactSecurity; full suite
+FOUNDRY_PROFILE=default test/bench/security.sh   # same with 1,000 fuzz runs instead of 10,000
+```
+
+The repository has no CI workflow; this script is the command a CI job should run. `run.sh` runs only the gas
+benchmark.
 
 Gas is the `gasleft()` difference around one external call made from the test contract, so it includes the call
 overhead of that call but not the 21,000 base cost of a transaction. Compare numbers only between runs made with the
