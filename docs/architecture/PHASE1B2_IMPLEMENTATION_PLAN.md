@@ -1,8 +1,9 @@
 # Porkfolio — Phase 1B-2 Implementation Plan
 
 **Status: IN PROGRESS.** D17 (architecture B), D18 (fail closed), D19 (vault at 2,000 runs) and D21 (exposure cap)
-are approved. Steps 1B-2.0 (`PHASE1B2_STEP1_REPORT.md`), 1B-2.1 (`PHASE1B2_1_REPORT.md`) and 1B-2.2
-(`PHASE1B2_2_REPORT.md`, waiting for review) are done; later steps have not started. This plan replaces the 1B-2 rows of
+are approved. Steps 1B-2.0 (`PHASE1B2_STEP1_REPORT.md`), 1B-2.1 (`PHASE1B2_1_REPORT.md`), 1B-2.2
+(`PHASE1B2_2_REPORT.md`) and 1B-2.3 (`PHASE1B2_3_REPORT.md`, waiting for review) are done; 1B-2.4 has not started.
+This plan replaces the 1B-2 rows of
 `PHASE1B_THREATS_AND_PLAN.md` §3. Every step follows `CLAUDE.md`:
 
 - 2–4 coherent commits;
@@ -10,7 +11,7 @@ are approved. Steps 1B-2.0 (`PHASE1B2_STEP1_REPORT.md`), 1B-2.1 (`PHASE1B2_1_REP
 - each commit builds and passes the full suite;
 - a stop for review at the end of each step.
 
-**The trust boundary changes only in step 1B-2.3, and that step does not start without explicit approval.**
+**The trust boundary changes only in step 1B-2.3.** The owner approved starting it with the Phase 1B-2.3 task.
 
 ## Decisions needed before starting
 
@@ -85,7 +86,7 @@ Measured vault runtime at 2,000 runs: 19,520 B (margin 5,056 B).
 
 **Stop for review.**
 
-## 1B-2.2 Hierarchical flow limits and exposure cap (DONE, waiting for review)
+## 1B-2.2 Hierarchical flow limits and exposure cap (DONE, approved)
 
 As built: `eaf44d8` (functional fixture on production builds), `7e96529` (risk-limit records, flow checks, exposure
 checks, `hookReserved`, `setRiskLimit`), `5a8c688` (invariants), `ef29ff9` (production-artifact tests, window gas,
@@ -109,7 +110,25 @@ Measured vault runtime at 2,000 runs: 22,361 B (margin 2,215 B).
 
 **Stop for review** with the measured swap gas against the prototype's +19,163.
 
-## 1B-2.3 Authorization module (**trust boundary change; needs D17 approval**)
+## 1B-2.3 Authorization module (DONE, waiting for review)
+
+As built: `1106025` (module, `reserveFor`, `setAuthModule`, suite migrated), `aa45c42` (signature, replay, nonce,
+generation, ERC-1271 and lifecycle tests), `890b84c` (invariants INV-C3, C6, M2, M8), `c9db475` (production-artifact
+tests, activation gas, CI workflow). Deviations from the rows below, explained in `PHASE1B2_3_REPORT.md` §10:
+
+- **Domain name "Porkfolio Vault"**, as the task specified, not "Porkfolio Curator Authorization".
+- **`reserveFor(req, curator, generation)` without a `signed` flag.** The vault always compares the generation; on
+  the direct path the module passes the current one, read in the same call.
+- **One-way retirement.** `setAuthModule` retires the module it replaces, including on a guardian disable; a retired
+  module can never be installed again. There is no separate enable flag.
+- **No `module.vault()` check in the vault**: the vault never calls the module (and the size budget did not allow it,
+  measured in §1 of the report).
+- **The signed struct names every field the task asked for** (both currencies, direction, hook, pool id, vault,
+  generation, window and nonce) plus the allocation's expiry.
+- **Admission computed from E_a once** (same result, one `_pendingDemand` instead of two): needed for the size
+  budget, measured.
+
+Measured vault runtime at 2,000 runs: 22,433 B (margin 2,143 B). Module 6,812 B (44,444,444 runs).
 
 | # | Commit | Content | Tests |
 |---|---|---|---|

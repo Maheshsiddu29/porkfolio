@@ -1,9 +1,10 @@
 # Porkfolio — Curator Security Model (Signed Permissions, Freeze, Revocation)
 
-**Status: PARTLY IMPLEMENTED.** Step 1B-2.1 implemented the curator record, freeze, revocation, generation,
+**Status: IMPLEMENTED (local).** Step 1B-2.1 implemented the curator record, freeze, revocation, generation,
 cancellation and the shared close path in the vault (`PHASE1B2_1_REPORT.md`), with the differences listed in §1.1.
-Signed authorizations, nonces, `reserveFor` and the authorization module (§2, §5, and the module rows of §3 and §4) are
-**not implemented**. It assumes architecture B from
+Step 1B-2.3 implemented signed authorizations, nonces, `reserveFor` and the authorization module
+(`PHASE1B2_3_REPORT.md`), with the differences listed in §2.1. Where §2–§4 below still describe the proposal, §2.1 says
+what was built. It assumes architecture B from
 `MODULAR_RISK_ENGINE.md` (vault + `CuratorAuthorization` module). It refines `PHASE1B_CURATOR_AUTH.md` and
 `CURATOR_REVOCATION.md`, and where they differ this document wins. Changes to earlier decisions are listed in §9.
 
@@ -68,14 +69,28 @@ live allocations, contrary to "deregistration leaves allocations consumable" (`C
 "unfreeze resumes consumption" (§4 below). The two jobs are therefore done by different mechanisms:
 
 - **Unactivated instructions:** `generation`, which only rises. Example: a curator signs at generation 7; the guardian
-  deregisters it (8); the owner re-registers it (still 8). An instruction tagged 7 can never match again. No signed
-  path exists yet, so nothing on-chain reads the generation in this step; 1B-2.3's `reserveFor` will compare it.
+  deregisters it (8); the owner re-registers it (still 8). An instruction tagged 7 can never match again. Since
+  1B-2.3, `reserveFor` compares it on every activation (`StaleGeneration`).
 - **Existing allocations:** the terminal `Revoked` restriction, checked by `exchange` on every call. Because `Revoked`
   never changes and `released` is never cleared, a revoked curator's allocations can never execute again, and no
   allocation id can be reopened (ids only increase). An execution generation stored per allocation would add a field
   and a comparison on every swap and would protect nothing that terminal revocation does not already protect.
 
 ## 2. EIP-712 authorization
+
+### 2.1 As built in 1B-2.3 (SOURCE, `src/CuratorAuthorization.sol`, `SharedCommitmentVault.reserveFor`)
+
+| Proposal below | As built | Why |
+|---|---|---|
+| Domain name "Porkfolio Curator Authorization" | **"Porkfolio Vault"**, version "1", chain id, verifying contract = module | the task fixed the established domain name; the verifying contract still makes it module-specific |
+| Struct `CuratorAuthorization(...)` without `currencyIn`, `zeroForOne` | `AllocationAuthorization(address curator, uint32 generation, address vault, bytes32 poolId, address hook, address currencyIn, address currencyOut, bool zeroForOne, uint128 maxOut, uint160 minInPerOutX96, uint64 expiry, uint64 validAfter, uint64 deadline, uint256 nonce)` | the task asked for both assets and the direction to be signed; the module checks they agree with the submitted PoolKey |
+| `reserveFor(req, curator, generation, signed)`; vault skips the generation for direct calls | `reserveFor(req, curator, generation)`; the vault always compares it; on the direct path the module passes the generation it reads from the vault in the same call | one rule in the vault; no flag a module could misuse |
+| Direct path consumes a nonce | same: one bitmap per curator for both paths | an instruction a curator signed and then submits itself activates once, whichever path is first; retries are idempotent |
+| `setAuthModule(0)` by the guardian, owner may set any value | owner may install any module that was never installed; guardian may only set zero; **the module being replaced or disabled is retired for good** | keeps a retired module's unused signatures from ever regaining authority; a reversible stop of new allocations exists already (vault-scope exposure cap, deregistration, pause) |
+| — | the vault never calls the module (no `module.vault()` check at install) | no call cycle; a module built for another vault only ever calls that vault, so installing it here gives it nothing |
+
+Order of an activation as built: signed-field checks (vault field, time window, pool id, hook, direction) → signature
+(`SignatureChecker`) → nonce bit → `vault.reserveFor` (last action). Any revert undoes the nonce bit.
 
 **Libraries.** OpenZeppelin 5.0.2 `EIP712`, `ECDSA` (through `SignatureChecker`) and `SignatureChecker`, the version
 already vendored under `lib/v4-periphery/lib/v4-core/lib/openzeppelin-contracts` (SOURCE, `package.json` 5.0.2).
@@ -161,7 +176,7 @@ As built (1B-2.1): both close entry points call one internal `_close`; `Allocati
 (`Expired`, `Emergency`, `Canceled`, `CuratorRevoked`; `release` picks them in that order of precedence). A frozen or
 deregistered curator's unexpired allocation is **not** releasable by a stranger, because a freeze may be lifted.
 `revokeCurator` also deregisters. The `setAuthModule` and `invalidateNonces` rows are not implemented.
-| `setAuthModule(0)` | owner or guardian | all activation stops | everything already reserved |
+| `setAuthModule(0)` | owner or guardian | all activation stops; the module is retired and can never be installed again (as built, §2.1) | everything already reserved |
 
 **How frozen allocations stay backed.**
 
@@ -216,10 +231,10 @@ deregistered curator's unexpired allocation is **not** releasable by a stranger,
 |---|---|---|---|
 | INV-C1 | `generation[c]` never decreases | handler ghost; `invariant_generationMonotonic` | implemented |
 | INV-C2 | `Revoked` never changes | `invariant_revokedIsTerminal` | implemented (also: stays unregistered) |
-| INV-C3 | No allocation is created with a signed generation ≠ current | `invariant_activationRequiresRegisteredCurator` (extends R6) | not yet (no signed path) |
+| INV-C3 | No allocation is created with a signed generation ≠ current | `invariant_signedActivationUsesCurrentGeneration` | implemented in 1B-2.3 |
 | INV-C4 | No consumption while Frozen or Revoked | `invariant_noConsumptionWhenFrozenOrRevoked` | implemented (also: no creation unless registered and unrestricted) |
 | INV-C5 | Freeze and unfreeze never change `Q_a`, `curatorReserved`, `B_a`, `W_a`, shares or the queue | differential | implemented as `invariant_curatorActionsMoveNothing`, for every curator action and owner/guardian rotation |
-| INV-C6 | Each `(curator, nonce)` is used at most once, across both paths | `invariant_noncesSingleUse` | not yet (module) |
+| INV-C6 | Each `(curator, nonce)` is used at most once, across both paths | `invariant_noncesSingleUse` | implemented in 1B-2.3 (per module; also: no bit is ever cleared) |
 
 Negative and adversarial tests (`test/security/CuratorAuth.t.sol`, `AuthLifecycle.t.sol`):
 

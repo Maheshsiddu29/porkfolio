@@ -3,8 +3,9 @@
 **Status: ARCHITECTURE (Phase 1B-2A). The owner approved option B (D17) and `optimizer_runs = 2,000` for the vault
 (D19), D18 (fail closed) and D21 (exposure cap). Implemented so far: step 1B-2.0, the vault's optimizer profile and
 `VaultLens` (§8.3, `PHASE1B2_STEP1_REPORT.md`); step 1B-2.1, curator states, cancellation and the reentrancy lock
-(`PHASE1B2_1_REPORT.md`); step 1B-2.2, flow limits and exposure caps (§7 note, `PHASE1B2_2_REPORT.md`). The
-authorization module and everything after it are still proposals.** Labels: SOURCE (read from the code at
+(`PHASE1B2_1_REPORT.md`); step 1B-2.2, flow limits and exposure caps (§7 note, `PHASE1B2_2_REPORT.md`); step 1B-2.3,
+the authorization module and `reserveFor` (§4.8, `PHASE1B2_3_REPORT.md`). Cumulative pricing and everything after it are
+still proposals.** Labels: SOURCE (read from the code at
 `4b5e514`), OBSERVED (measured in this milestone; method in §9), ESTIMATE (derived, not measured; how to measure it is
 stated), PROPOSAL, DECISION (needs the owner's approval).
 
@@ -163,6 +164,23 @@ Cost (ESTIMATE): two `TSTORE` and one `TLOAD` at 100 gas each, plus dispatch, un
 - **Outstanding signatures:** they die with the old module (the domain binds `verifyingContract`). Nonce bitmaps do not
   migrate. They do not need to: no message signed for the old domain verifies under the new one.
 - Before real value, module changes go through the multisig and timelock path (`MAINNET_READINESS.md` G-1, G-2).
+
+### 4.8 As built in 1B-2.3 (SOURCE, OBSERVED)
+
+The boundary is as §4.1–§4.7 describe, with these differences (details in `PHASE1B2_3_REPORT.md`):
+
+- `reserveFor(req, curator, generation)` has no `signed` flag: the vault always compares the generation; the module's
+  direct path passes the value it reads from the vault in the same call.
+- `setAuthModule` retires the module it replaces, also when the guardian sets zero. A retired module can never be
+  installed again, so a guardian disable is permanent for that module instance; resuming means deploying a new
+  module (curators re-sign for its domain). A reversible stop of new allocations already exists: the guardian can
+  lower the vault-scope exposure caps to zero, and the owner can raise them again.
+- The vault never calls the module, not even at installation (`test_ML_vaultNeverCallsModule` asserts zero calls
+  across deposits, redemptions, queue, claims, swaps, cancellation and module changes).
+- Size: vault 22,433 B at 2,000 runs (margin 2,143 B), measured before implementation against alternatives (report
+  §1); module 6,812 B at 44,444,444 runs.
+- Gas: swap and LP paths unchanged; a direct allocation costs 9,295 gas more than the old `allocate` (module hop,
+  generation read, event); a signed EOA activation 19,743 more than a direct one (report §9).
 
 ## 5. Call sequences
 

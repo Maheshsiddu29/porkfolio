@@ -165,3 +165,27 @@ test/bench/run.sh
 - **Size.** Vault runtime 22,361 B (EIP-170 margin 2,215 B).
 
 Docs: `docs/architecture/PHASE1B2_2_REPORT.md`.
+
+## Phase 1B-2.3 — EIP-712 curator authorization module
+
+```bash
+forge test --match-contract "CuratorAuthorizationTest|AuthModuleLifecycleTest" -vv
+test/bench/security.sh       # production-build security suite (also run by .github/workflows/security.yml)
+FOUNDRY_INVARIANT_RUNS=256 FOUNDRY_INVARIANT_DEPTH=128 forge test --match-contract VaultInvariants
+test/bench/run.sh
+```
+
+- **Separate module.** `CuratorAuthorization` verifies a curator's EIP-712 instruction (EOA or ERC-1271 wallet;
+  domain "Porkfolio Vault", version 1) or takes the curator from `msg.sender` on the direct path, spends the
+  instruction's nonce from one bitmap per curator, and asks its vault to `reserveFor` the allocation. Anyone may
+  submit a signed instruction; no field can be changed after signing.
+- **The vault decides.** `reserveFor` accepts only the installed module and checks registration, restriction,
+  generation, hook, pool, pair, direction, floors, ceiling, admission, exposure caps and deadline on its own state.
+  The old `allocate` entry point is gone, so every allocation passes through this boundary.
+- **Off the hot paths.** The vault never calls the module. Swaps, cancellation, release and every LP path work the
+  same with the module disabled; swap and LP gas are unchanged.
+- **Lifecycle.** The owner installs or replaces the module; the guardian can only disable it. A module that was
+  replaced or disabled is retired for good, so its unused signatures can never come back.
+- **Size.** Vault runtime 22,433 B (EIP-170 margin 2,143 B); module 6,812 B.
+
+Docs: `docs/architecture/PHASE1B2_3_REPORT.md`.
