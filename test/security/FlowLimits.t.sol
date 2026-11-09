@@ -333,7 +333,7 @@ contract FlowLimitsTest is VaultTestBase {
         vm.warp(t);
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyE1, c1, 1000 ether);
         req.expiry = type(uint64).max;
-        req.deadline = type(uint64).max;
+        req.deadline = type(uint64).max - 1; // the module requires deadline < expiry
         vm.prank(curator);
         uint256 id = auth.activateDirect(req);
         _expectSwapRevert(e1, abi.encodeWithSelector(ISharedCommitmentVault.FlowEpochOutOfRange.selector, t / W));
@@ -436,7 +436,7 @@ contract FlowLimitsTest is VaultTestBase {
         vm.prank(owner);
         vault.release(b);
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyE1, c1, 100 ether);
-        req.expiry = uint64(block.timestamp + 1);
+        (req.deadline, req.expiry) = (uint64(block.timestamp), uint64(block.timestamp + 1));
         vm.prank(curator);
         uint256 d = auth.activateDirect(req);
         vm.warp(block.timestamp + 1);

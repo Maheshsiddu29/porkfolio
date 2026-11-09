@@ -33,8 +33,10 @@ interface ICuratorAuthorization {
     /// @param expiry         Unix time from which the allocation can no longer be consumed. Required by the vault
     ///                       (at most MAX_HORIZON after activation); this is the allocation's lifetime, not the
     ///                       instruction's.
-    /// @param validAfter     Earliest Unix time at which the instruction may be activated (inclusive).
-    /// @param deadline       Latest Unix time at which the instruction may be activated (inclusive).
+    /// @param validAfter     Earliest Unix time at which the instruction may be activated (inclusive). At most
+    ///                       `deadline`.
+    /// @param deadline       Latest Unix time at which the instruction may be activated (inclusive). At most
+    ///                       MAX_VALIDITY_WINDOW after `validAfter`, and before `expiry`.
     /// @param nonce          Any unused number chosen by the curator; nonces need not be used in order.
     struct AllocationAuthorization {
         address curator;
@@ -55,6 +57,13 @@ interface ICuratorAuthorization {
 
     /// @notice The vault address in the signed message is not this module's vault.
     error WrongVault(address signedVault);
+    /// @notice The instruction's `validAfter` is later than its `deadline`, so it could never be activated.
+    error InvalidValidityWindow(uint64 validAfter, uint64 deadline);
+    /// @notice The instruction's activation window (deadline - validAfter) is longer than MAX_VALIDITY_WINDOW.
+    error ValidityWindowTooLong(uint64 validAfter, uint64 deadline);
+    /// @notice The allocation's `expiry` is not after the instruction's `deadline`, so an activation inside the window
+    ///         could create an allocation that is already expired or about to expire.
+    error ExpiryNotAfterDeadline(uint64 expiry, uint64 deadline);
     /// @notice `block.timestamp` is before the instruction's `validAfter`.
     error AuthorizationNotYetValid(uint64 validAfter);
     /// @notice `block.timestamp` is after the instruction's `deadline`.
@@ -100,6 +109,11 @@ interface ICuratorAuthorization {
     /// @param wordPos Bitmap word: nonces wordPos * 256 to wordPos * 256 + 255.
     /// @param mask Bits to set; bit i stands for nonce wordPos * 256 + i.
     function invalidateNonces(uint256 wordPos, uint256 mask) external;
+
+    /// @notice Longest activation window a signed instruction may have: deadline - validAfter, in seconds (one day).
+    /// @dev Bounds how long an instruction stays usable once it becomes valid. It does not bound how long before its
+    ///      window the instruction was signed; see the contract's documentation.
+    function MAX_VALIDITY_WINDOW() external view returns (uint64);
 
     /// @notice The vault this module reserves capacity in. Fixed at deployment.
     function vault() external view returns (IVaultState);

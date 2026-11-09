@@ -431,10 +431,11 @@ contract CuratorAuthorizationTest is AuthTestBase {
         vm.expectRevert(abi.encodeWithSelector(ICuratorAuthorization.AuthorizationExpired.selector, t + 200));
         _activate(a, keyA, sig);
 
-        // Expiry beyond the horizon at activation time fails in the vault; the same signature works later.
+        // Expiry beyond the horizon at activation time fails in the vault; the same signature works later in its
+        // window (the window itself is at most MAX_VALIDITY_WINDOW = one day).
         uint256 now_ = vm.getBlockTimestamp(); // via-IR may reuse a block.timestamp read from before vm.warp
         ICuratorAuthorization.AllocationAuthorization memory b = _authz(signer, keyA, c1, 1000 ether);
-        (b.deadline, b.expiry) = (uint64(now_ + 3 days), uint64(now_ + 31 days));
+        (b.deadline, b.expiry) = (uint64(now_ + 1 days), uint64(now_ + 30 days + 12 hours));
         bytes memory sigB = _sign(signerKey, b);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -442,7 +443,7 @@ contract CuratorAuthorizationTest is AuthTestBase {
             )
         );
         _activate(b, keyA, sigB);
-        vm.warp(now_ + 2 days);
+        vm.warp(now_ + 12 hours);
         _activate(b, keyA, sigB);
     }
 

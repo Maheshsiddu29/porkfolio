@@ -281,9 +281,14 @@ contract VaultSecurityTest is VaultTestBase {
         );
         auth.activateDirect(req);
 
+        // An expiry that is not in the future is caught by the module first, because it is not after the deadline
+        // (which the vault requires to be now or later). The vault's own InvalidExpiry check is still reached by a
+        // module that skips this rule: test_ML_compromisedModuleBoundedByVault.
         req.expiry = uint64(block.timestamp);
         vm.prank(curator);
-        vm.expectRevert(ISharedCommitmentVault.InvalidExpiry.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(ICuratorAuthorization.ExpiryNotAfterDeadline.selector, req.expiry, req.deadline)
+        );
         auth.activateDirect(req);
 
         req.expiry = uint64(block.timestamp + 30 days); // exactly at horizon is allowed

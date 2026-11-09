@@ -331,6 +331,9 @@ contract AuthModuleLifecycleTest is AuthTestBase {
             mal, r, curator, gen, abi.encodeWithSelector(ISharedCommitmentVault.InstructionExpired.selector, r.deadline)
         );
         r = _request(keyA, c1, 1000 ether);
+        (r.deadline, r.expiry) = (uint64(block.timestamp), uint64(block.timestamp)); // the module would refuse this
+        _forgeReverts(mal, r, curator, gen, abi.encodeWithSelector(ISharedCommitmentVault.InvalidExpiry.selector));
+        r = _request(keyA, c1, 1000 ether);
         r.expiry = uint64(block.timestamp + 31 days);
         _forgeReverts(
             mal,

@@ -53,6 +53,22 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 /// submitter's transaction more expensive. A wallet's answer matters only at activation: once the allocation exists,
 /// a later change of the wallet's signing policy does not alter it (the curator can cancel it in the vault).
 ///
+/// Time fields. A signed instruction carries three times, all Unix seconds chosen by the curator: `validAfter` and
+/// `deadline` bound when it may be activated (both inclusive), and `expiry` is when the resulting allocation stops
+/// being consumable. This contract requires validAfter <= deadline < expiry and deadline - validAfter <=
+/// MAX_VALIDITY_WINDOW, before looking at the clock. So every instruction that activates produces an allocation that
+/// is still live when the activation window closes, and once an instruction becomes valid it stays usable for at
+/// most one day. Example: validAfter = 1,000, deadline = 4,600 and expiry = 90,000 is accepted at any time from 1,000
+/// to 4,600; deadline = 87,401 (window one second over a day) is rejected, as is expiry = 4,600. The vault then
+/// requires expiry <= activation time + MAX_HORIZON. The direct path applies only deadline < expiry: the curator is
+/// the caller, so there is no instruction for anyone else to hold.
+///
+/// What the window bound does not cover. The contract cannot know when an instruction was signed: all three times
+/// are the signer's choice. A curator can sign an instruction whose window opens in a year; it is valid then, for at
+/// most a day. Bounding how old a signature may be when it is used needs a signed issuance time, which this message
+/// type does not have. Until then, outstanding instructions are cancelled with `invalidateNonces` (one nonce at a
+/// time) or the vault's `bumpGeneration` (all of them), and die when this module is retired.
+///
 /// Order of an activation: check the signed fields against the submitted pool and the clock, verify the signature,
 /// set the nonce bit (reverting if already set), then call the vault, which is the last action. There is no
 /// reentrancy guard: the only foreign code that runs is the wallet inside `staticcall`, and the vault never calls
@@ -70,6 +86,9 @@ contract CuratorAuthorization is ICuratorAuthorization, EIP712 {
     );
 
     /// @inheritdoc ICuratorAuthorization
+    uint64 public constant MAX_VALIDITY_WINDOW = 1 days;
+
+    /// @inheritdoc ICuratorAuthorization
     IVaultState public immutable vault;
 
     /// @inheritdoc ICuratorAuthorization
@@ -83,8 +102,9 @@ contract CuratorAuthorization is ICuratorAuthorization, EIP712 {
     }
 
     /// @inheritdoc ICuratorAuthorization
-    /// @dev Checks, in order: `auth.vault` is this module's vault; validAfter <= block.timestamp <= deadline (both
-    ///      inclusive); `key` hashes to `auth.poolId` and its `hooks` is `auth.hook`; the signed currencies and
+    /// @dev Checks, in order: `auth.vault` is this module's vault; validAfter <= deadline; deadline - validAfter <=
+    ///      MAX_VALIDITY_WINDOW; deadline < expiry; validAfter <= block.timestamp <= deadline (both inclusive); `key`
+    ///      hashes to `auth.poolId` and its `hooks` is `auth.hook`; the signed currencies and
     ///      `zeroForOne` describe one direction of `key` (zeroForOne: currency0 in, currency1 out); the signature is
     ///      valid for `auth.curator`; the nonce is unused. Then sets the nonce bit and calls
     ///      `vault.reserveFor(req, auth.curator, auth.generation)`, where `req` carries the signed hook, key,
@@ -95,6 +115,13 @@ contract CuratorAuthorization is ICuratorAuthorization, EIP712 {
         returns (uint256 allocationId)
     {
         if (auth.vault != address(vault)) revert WrongVault(auth.vault);
+        // The time fields must be consistent before the clock is consulted. The subtraction cannot underflow: the
+        // first check guarantees deadline >= validAfter.
+        if (auth.validAfter > auth.deadline) revert InvalidValidityWindow(auth.validAfter, auth.deadline);
+        if (auth.deadline - auth.validAfter > MAX_VALIDITY_WINDOW) {
+            revert ValidityWindowTooLong(auth.validAfter, auth.deadline);
+        }
+        _requireExpiryAfterDeadline(auth.expiry, auth.deadline);
         if (block.timestamp < auth.validAfter) revert AuthorizationNotYetValid(auth.validAfter);
         if (block.timestamp > auth.deadline) revert AuthorizationExpired(auth.deadline);
         if (PoolId.unwrap(key.toId()) != PoolId.unwrap(auth.poolId)) revert PoolKeyMismatch();
@@ -130,11 +157,15 @@ contract CuratorAuthorization is ICuratorAuthorization, EIP712 {
     ///      the nonce and the other reverts, so one instruction never becomes two allocations. It also makes a
     ///      retried submission idempotent. The generation passed to the vault is the one the vault holds now (read
     ///      in this call), so the vault's generation check always passes here; registration, restriction and every
-    ///      financial check apply exactly as for a signed activation. `req.deadline` is checked by the vault.
+    ///      financial check apply exactly as for a signed activation. Like the signed path, it requires
+    ///      `req.deadline` < `req.expiry` (`ExpiryNotAfterDeadline`), so the same request has the same outcome on both
+    ///      paths. There is no `validAfter` and no window bound here: the request is the curator's own transaction.
+    ///      `req.deadline` is checked against the clock by the vault.
     function activateDirect(ISharedCommitmentVault.AllocationRequest calldata req)
         external
         returns (uint256 allocationId)
     {
+        _requireExpiryAfterDeadline(req.expiry, req.deadline);
         _useNonce(msg.sender, req.nonce);
         uint32 generation = vault.getCurator(msg.sender).generation;
         allocationId = vault.reserveFor(req, msg.sender, generation);
@@ -166,6 +197,13 @@ contract CuratorAuthorization is ICuratorAuthorization, EIP712 {
     /// @inheritdoc ICuratorAuthorization
     function isNonceUsed(address curator, uint256 nonce) external view returns (bool) {
         return nonceBitmap[curator][nonce >> 8] & (1 << (nonce & 0xff)) != 0;
+    }
+
+    /// @dev Reverts with `ExpiryNotAfterDeadline` unless the allocation outlives the activation window
+    ///      (deadline < expiry). Without it, an instruction activated near its deadline could produce an allocation
+    ///      that is already expired, or that lives only a few seconds, while still spending the curator's nonce.
+    function _requireExpiryAfterDeadline(uint64 expiry, uint64 deadline) internal pure {
+        if (expiry <= deadline) revert ExpiryNotAfterDeadline(expiry, deadline);
     }
 
     /// @dev Sets bit `nonce % 256` of word `nonce / 256` in the curator's bitmap, reverting with `NonceAlreadyUsed`
