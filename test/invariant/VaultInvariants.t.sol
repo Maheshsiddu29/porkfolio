@@ -25,6 +25,8 @@ import {ISharedCommitmentVault, AUTH_MODULE_ID} from "../../src/interfaces/IShar
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {AuthModeHook} from "../utils/AuthModeHook.sol";
 import {ClaimDonor} from "../utils/ClaimDonor.sol";
+import {HookA_DynamicFee} from "../../src/hooks/HookA_DynamicFee.sol";
+import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
 
 /// @notice Random action sequences against the real PoolManager: allocations by three curators (direct and EIP-712
 ///         signed, through the authorization module, with fresh, colliding, stale and invalidated nonces and
@@ -144,6 +146,19 @@ contract VaultHandler is Test {
     uint256 public drainsOk;
     uint256 public zeroAssetStatesSeen;
 
+    // Cumulative pricing (INV-P2, INV-P4). The ghosts replay every successful Hook A / Hook B swap and every
+    // reconfiguration with their own decay arithmetic, independent of the hooks' storage.
+    address internal hookOwner;
+    uint256[2] internal ghostLevelA; // Hook A level, [0] selling currency0, as of ghostLevelAt
+    uint256[2] internal ghostLevelAt;
+    int256 internal ghostPosB; // Hook B position as of ghostPosBAt
+    uint256 internal ghostPosBAt;
+    uint256 public pricingMismatches; // INV-P2: a stored level or position differed from the ghost replay
+    uint256 public capViolations; // INV-P4: a successful swap left |x| beyond the cap and further out than before
+    uint256 public pricingSwapsOk;
+    uint256 public pricingReverts;
+    uint256 public reconfigurationsOk;
+
     constructor(
         SharedCommitmentVault vault_,
         IPoolManager manager_,
@@ -226,6 +241,132 @@ contract VaultHandler is Test {
     // ------------------------------------------------------------------
     // Curator / trader / third-party actions
     // ------------------------------------------------------------------
+
+    /// @dev Called once by the invariant contract's setUp (not a fuzz target).
+    function setPricing(address hookOwner_) external {
+        hookOwner = hookOwner_;
+        ghostLevelAt = [block.timestamp, block.timestamp];
+        ghostPosBAt = block.timestamp;
+    }
+
+    /// @notice A Hook A or Hook B swap of a size the pricing can accept (up to 12,000), in either direction. Uses a
+    ///         live allocation for that hook and direction, opening one (through any curator that can allocate) when
+    ///         there is none. The general `swap` action draws up to 150,000, which Hook B's position cap mostly
+    ///         refuses.
+    function pricingSwap(bool useA, bool zeroForOne, uint256 amountIn, uint256 idSeed) external {
+        PoolKey memory key = useA ? keyA : keyB;
+        Currency out = zeroForOne ? c1 : c0;
+        uint256 id = _liveAllocation(key, out, idSeed);
+        if (id == 0) {
+            // allocate's seed bits: bit 0 picks Hook B, bit 1 picks currency1 out, bits 4-5 = 1 pick a curator that
+            // can allocate. Called externally so that its body is not inlined here (via-IR stack depth).
+            this.allocate((useA ? 0 : 1) | (zeroForOne ? 2 : 0) | (1 << 4), 200_000 ether, 1 days);
+            id = _liveAllocation(key, out, idSeed);
+            if (id == 0) return;
+        }
+        if (_swap(key, zeroForOne, bound(amountIn, 1e15, 12_000 ether), id)) pricingSwapsOk++;
+        else pricingReverts++;
+    }
+
+    /// @dev An unreleased, unexpired allocation for `key` selling `out`, searched from `seed`; 0 if none.
+    function _liveAllocation(PoolKey memory key, Currency out, uint256 seed) internal view returns (uint256) {
+        uint256 n = allocationIds.length;
+        for (uint256 k; k < n; ++k) {
+            uint256 id = allocationIds[(seed + k) % n];
+            ISharedCommitmentVault.Allocation memory a = vault.getAllocation(id);
+            if (a.consumer == address(key.hooks) && a.currencyOut == out && !a.released && a.expiry > block.timestamp) {
+                return id;
+            }
+        }
+        return 0;
+    }
+
+    /// @notice Hook owner changes a pool's pricing parameters (reference price kept at 1:1 so that the vault's 1:1
+    ///         floors stay meaningful). The ghost first applies the decay elapsed under the old parameters and, for a
+    ///         Hook B depth change, rescales the position by new depth / old depth, truncating toward zero.
+    function hookReconfigure(uint256 seed) external {
+        if (seed % 2 == 0) {
+            HookA_DynamicFee h = HookA_DynamicFee(address(keyA.hooks));
+            for (uint256 i; i < 2; ++i) {
+                ghostLevelA[i] = _ghostLevelA(i == 0);
+                ghostLevelAt[i] = block.timestamp;
+            }
+            uint24 base = uint24(bound(seed >> 8, 0, 2000));
+            uint24 max = uint24(bound(seed >> 40, base, 20_000));
+            uint128 k0 = uint128(bound(seed >> 72, 1000 ether, 50_000 ether));
+            uint128 k1 = uint128(bound(seed >> 120, 1000 ether, 50_000 ether));
+            uint32[4] memory windows = [uint32(0), 600, 3600, 86_400];
+            vm.prank(hookOwner);
+            h.configurePool(keyA, uint160(FixedPoint96.Q96), base, max, k0, k1, windows[(seed >> 200) % 4]);
+        } else {
+            HookB_BoundedImpact h = HookB_BoundedImpact(address(keyB.hooks));
+            (,,, uint96 oldDepth,) = h.poolConfig(keyB.toId());
+            int256 x = _ghostPosB();
+            uint96 depth = uint96(bound(seed >> 8, 200_000 ether, 5_000_000 ether));
+            if (depth != oldDepth) x = x * int256(uint256(depth)) / int256(uint256(oldDepth));
+            ghostPosB = x;
+            ghostPosBAt = block.timestamp;
+            uint24 impact = uint24(bound(seed >> 104, 1000, 100_000));
+            uint32[4] memory windows = [uint32(0), 600, 3600, 86_400];
+            vm.prank(hookOwner);
+            h.configurePool(keyB, uint160(FixedPoint96.Q96), depth, impact, windows[(seed >> 200) % 4]);
+        }
+        reconfigurationsOk++;
+    }
+
+    /// @notice Ghost Hook A level now: the replayed level after linear decay at K / window per second.
+    function ghostLevelANow(bool zeroForOne) external view returns (uint256) {
+        return _ghostLevelA(zeroForOne);
+    }
+
+    /// @notice Ghost Hook B position now: the replayed position after linear decay toward zero at cap / window.
+    function ghostPosBNow() external view returns (int256) {
+        return _ghostPosB();
+    }
+
+    function _ghostLevelA(bool zeroForOne) internal view returns (uint256) {
+        (,,, uint32 window, uint128 k0, uint128 k1) = HookA_DynamicFee(address(keyA.hooks)).poolConfig(keyA.toId());
+        uint256 i = zeroForOne ? 0 : 1;
+        return _decay(ghostLevelA[i], zeroForOne ? k0 : k1, window, block.timestamp - ghostLevelAt[i]);
+    }
+
+    function _ghostPosB() internal view returns (int256) {
+        (,, uint32 window,, uint96 cap) = HookB_BoundedImpact(address(keyB.hooks)).poolConfig(keyB.toId());
+        uint256 m = _decay(
+            ghostPosB >= 0 ? uint256(ghostPosB) : uint256(-ghostPosB), cap, window, block.timestamp - ghostPosBAt
+        );
+        return ghostPosB >= 0 ? int256(m) : -int256(m);
+    }
+
+    /// @dev Linear decay toward zero; written here independently of CumulativePricing.decayed.
+    function _decay(uint256 level, uint256 rate, uint256 window, uint256 dt) internal pure returns (uint256) {
+        if (window == 0 || dt == 0) return level;
+        uint256 d = rate * dt / window;
+        return d >= level ? 0 : level - d;
+    }
+
+    /// @dev After a successful swap through Hook A or Hook B: advance the ghost by the swap's own amounts and compare
+    ///      it with the hook's stored state (INV-P2); check Hook B's cap (INV-P4).
+    function _afterPricedSwap(PoolKey memory key, bool zeroForOne, uint256 amountIn, uint256 amountOut) internal {
+        if (address(key.hooks) == address(keyA.hooks)) {
+            uint256 i = zeroForOne ? 0 : 1;
+            ghostLevelA[i] = _ghostLevelA(zeroForOne) + amountIn;
+            ghostLevelAt[i] = block.timestamp;
+            if (HookA_DynamicFee(address(keyA.hooks)).flowLevel(keyA, zeroForOne) != ghostLevelA[i]) {
+                pricingMismatches++;
+            }
+        } else if (address(key.hooks) == address(keyB.hooks)) {
+            int256 before = _ghostPosB();
+            ghostPosB = zeroForOne ? before + int256(amountOut) : before - int256(amountIn);
+            ghostPosBAt = block.timestamp;
+            HookB_BoundedImpact h = HookB_BoundedImpact(address(keyB.hooks));
+            if (h.positionOf(keyB) != ghostPosB) pricingMismatches++;
+            (,,,, uint96 cap) = h.poolConfig(keyB.toId());
+            uint256 absAfter = ghostPosB >= 0 ? uint256(ghostPosB) : uint256(-ghostPosB);
+            uint256 absBefore = before >= 0 ? uint256(before) : uint256(-before);
+            if (absAfter > cap && absAfter >= absBefore) capViolations++;
+        }
+    }
 
     function allocate(uint256 seed, uint256 maxOut, uint256 lifetime) external {
         PoolKey memory key = seed % 2 == 0 ? keyA : keyB;
@@ -1191,6 +1332,8 @@ contract VaultHandler is Test {
             ghostBacking[cout] -= uint256(int256(outDelta));
             swapsOk++;
             ok = true;
+            // forge-lint: disable-next-line(unsafe-typecast)
+            _afterPricedSwap(key, zeroForOne, amountIn, uint256(int256(outDelta)));
             if (restricted) restrictedConsumption = true;
             if (ghostClosed[id]) closeMismatch = true; // a closed allocation was consumed
             _checkEffectiveFloor(p, zeroForOne, feff);
@@ -1349,7 +1492,8 @@ contract VaultInvariantsTest is VaultTestBase {
         handler.setAuth(auth, cs, keys);
         handler.setLifecycle(cs, makeAddr("owner2"), makeAddr("guardian2"));
 
-        bytes4[] memory selectors = new bytes4[](39);
+        handler.setPricing(hookOwner);
+        bytes4[] memory selectors = new bytes4[](42);
         selectors[0] = VaultHandler.allocate.selector;
         selectors[1] = VaultHandler.swap.selector;
         selectors[2] = VaultHandler.warp.selector;
@@ -1389,11 +1533,31 @@ contract VaultInvariantsTest is VaultTestBase {
         selectors[36] = VaultHandler.moduleDisable.selector;
         selectors[37] = VaultHandler.moduleTryReinstall.selector;
         selectors[38] = VaultHandler.moduleTryInstallInvalid.selector;
+        selectors[39] = VaultHandler.pricingSwap.selector;
+        selectors[40] = VaultHandler.pricingSwap.selector; // weighted x2: most general swaps are too large for Hook B
+        selectors[41] = VaultHandler.hookReconfigure.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
 
     /// Real ERC-6909 balance == B_a + donations (no phantom or missing claims; donations never counted).
+    /// @notice INV-P2: Hook A's two flow levels and Hook B's position equal an independent replay of every
+    ///         successful swap and reconfiguration (amounts in, outputs, linear decay, depth rescaling). Failed swaps
+    ///         must not have moved them. Checked after every handler call and, through the mismatch counter, at the
+    ///         moment of each swap.
+    function invariant_pricingStateMatchesReplay() public view {
+        assertEq(handler.pricingMismatches(), 0, "stored state differed from the replay after a swap");
+        assertEq(hookA.flowLevel(keyA, true), handler.ghostLevelANow(true), "Hook A level, selling currency0");
+        assertEq(hookA.flowLevel(keyA, false), handler.ghostLevelANow(false), "Hook A level, selling currency1");
+        assertEq(hookB.positionOf(keyB), handler.ghostPosBNow(), "Hook B position");
+    }
+
+    /// @notice INV-P4: no successful swap leaves Hook B's position beyond the cap unless it moved toward zero (a cap
+    ///         tightened under an open position allows only inward trades).
+    function invariant_hookBPositionWithinCap() public view {
+        assertEq(handler.capViolations(), 0);
+    }
+
     function invariant_backingEqualsRealClaims() public view {
         assertEq(vault.backing(c0) + handler.ghostDonated(c0), _claims(address(vault), c0));
         assertEq(vault.backing(c1) + handler.ghostDonated(c1), _claims(address(vault), c1));
@@ -1797,6 +1961,12 @@ contract VaultInvariantsTest is VaultTestBase {
         );
         console2.log("flowRefusals:", handler.flowRefusals());
         console2.log(
+            "pricing swaps ok/refused, reconfigurations:",
+            handler.pricingSwapsOk(),
+            handler.pricingReverts(),
+            handler.reconfigurationsOk()
+        );
+        console2.log(
             "register/deregister/freeze:", handler.registrationsOk(), handler.deregistrationsOk(), handler.freezesOk()
         );
         console2.log("unfreeze/revoke/bump:", handler.unfreezesOk(), handler.revokesOk(), handler.bumpsOk());
@@ -1806,6 +1976,31 @@ contract VaultInvariantsTest is VaultTestBase {
             handler.restrictedSwapsRejected(),
             handler.rotations()
         );
+    }
+
+    /// @notice The pricing actions are not vacuous: swaps on both hooks in both directions, reconfigurations of both
+    ///         hooks, and time passing, then every pricing invariant.
+    function test_handler_pricingProgress() public {
+        handler.allocate(0, 100_000 ether, 1 days); // Hook A, out token0
+        handler.allocate(1, 100_000 ether, 1 days); // Hook B, out token0
+        handler.allocate(2, 100_000 ether, 1 days); // Hook A, out token1
+        handler.allocate(3, 100_000 ether, 1 days); // Hook B, out token1
+        handler.pricingSwap(true, true, 5000 ether, 0);
+        handler.pricingSwap(true, false, 3000 ether, 0);
+        handler.pricingSwap(false, false, 2000 ether, 0);
+        handler.warp(600);
+        handler.pricingSwap(false, false, 1000 ether, 0);
+        handler.hookReconfigure(0);
+        handler.hookReconfigure(1);
+        handler.warp(1200);
+        handler.pricingSwap(true, true, 4000 ether, 0);
+        handler.pricingSwap(false, false, 500 ether, 0);
+        assertGe(handler.pricingSwapsOk(), 5);
+        assertEq(handler.reconfigurationsOk(), 2);
+        assertLt(hookB.positionOf(keyB), 0);
+        assertGt(hookA.flowLevel(keyA, true), 0);
+        invariant_pricingStateMatchesReplay();
+        invariant_hookBPositionWithinCap();
     }
 
     /// @notice Guards against a vacuous campaign: a fixed handler sequence must actually exercise every path,
