@@ -272,7 +272,7 @@ contract VaultHandler is Test {
     function _liveAllocation(PoolKey memory key, Currency out, uint256 seed) internal view returns (uint256) {
         uint256 n = allocationIds.length;
         for (uint256 k; k < n; ++k) {
-            uint256 id = allocationIds[(seed + k) % n];
+            uint256 id = allocationIds[(seed % n + k) % n]; // seed may be type(uint256).max
             ISharedCommitmentVault.Allocation memory a = vault.getAllocation(id);
             if (a.consumer == address(key.hooks) && a.currencyOut == out && !a.released && a.expiry > block.timestamp) {
                 return id;
