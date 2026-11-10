@@ -1,6 +1,8 @@
 # Porkfolio — Cumulative Pricing Specification
 
-**Status: SPECIFICATION FOR REVIEW (Phase 1B-2A). Not implemented. The current hooks are unchanged.** It answers the
+**Status: IMPLEMENTED IN PHASE 1B-3, with the deviations listed in `PHASE1B3_REPORT.md` §2** (Hook A state in input
+units per direction, one integer cost function for both Hook B directions, Hook B position rescaled on a depth change,
+symmetric Hook B cap). The text below is the specification as reviewed; the report is authoritative where they differ. It answers the
 problem measured in `TRADE_SPLITTING.md`, where both hooks price each swap independently. Labels: SOURCE, OBSERVED,
 MODEL (exact rational model, script output quoted), PROPOSAL.
 

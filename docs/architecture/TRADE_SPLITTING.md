@@ -1,6 +1,8 @@
 # Porkfolio — Trade Splitting in Hook A and Hook B (Analysis)
 
-**Status: ANALYSIS FOR REVIEW. No pricing formula is changed by this document.** Labels follow
+**Status: ANALYSIS OF THE PRICING BEFORE PHASE 1B-3.** Sections 1–6 describe the per-swap formulas that Phase 1B-3
+replaced and keep their measured numbers as the "before" record. Section 8 gives the "after". No pricing formula is
+changed by this document. Labels follow
 `PHASE1B_PRICE_POLICY.md`: SOURCE (read from code), OBSERVED (measured by a test through the real PoolManager),
 MODEL (exact integer model of the code, cross-checked against OBSERVED values), PROPOSAL.
 
@@ -163,3 +165,24 @@ Candidate directions, for the human pricing decision only:
   and could express its cap as a bound on cumulative consumption.
 
 Both directions change pricing semantics and are deliberately not done here.
+
+## 8. After Phase 1B-3 (cumulative pricing)
+
+Both hooks now price from per-pool state in hook storage (`PHASE1B3_REPORT.md`, `CUMULATIVE_PRICING_SPEC.md`). The
+characterisation tests in `TradeSplitting.t.sol` were inverted on the same fixture:
+
+| Scenario | Before (OBSERVED, §4) | After (OBSERVED) |
+|---|---|---|
+| Hook A, 8,000 in, 1 / 2 / 8 swaps | 7,967.2 / 7,974.416 / 7,979.82 out | **7,981.6** in every case (fee 18.4) |
+| Hook B, 1,000 in, 1 / 10 swaps | 999 / 999.8946 out | **999.000999…** in both cases |
+| Hook B cap binding (5% at full quota vs 1% cap / depth 200,000 with a 1% cap), 5,000 in | 1 swap reverts, 5 swaps execute | 1, 5, 10 and 100 swaps in one transaction all revert; as separate transactions the pieces stop at the cap (19 of 100 pieces of 50) |
+
+- At a 1:1 reference every conversion is exact, so the split receives exactly the single trade's output. At other
+  prices a split of Hook A into n pieces receives at most n − 1 raw units less (one rounding per conversion; reached
+  at the price 2^96 − 1, `testFuzz_HAP_splitVersusSingle`). A split of Hook B selling currency1 is exact; selling
+  currency0 it loses at most the exact-input remainders of the pieces.
+- Allocation shopping (§6.5) is gone: the price does not depend on the allocation or curator
+  (`test_HBP_allocationAndCuratorDoNotAffectPrice`, `test_HAP_freshAllocationDoesNotResetFee`).
+- Still not prevented by pricing: splitting across different hooks (`test_ADV_crossHookSplit_boundedByVaultFlowLimit`);
+  the vault's flow limits bound it. Waiting for decay is the intended way for prices to recover, and is bounded by
+  the decay rate.

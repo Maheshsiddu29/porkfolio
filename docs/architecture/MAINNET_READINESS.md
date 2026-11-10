@@ -69,8 +69,10 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 
 | ID | Item | Status | Evidence or gap |
 |---|---|---|---|
-| P-1 | Current behaviour characterised | Done | `TRADE_SPLITTING.md`, `TradeSplitting.t.sol` |
-| P-2 | Cumulative pricing implemented with split-invariance fuzz, aggregate cap, round trip, decay and stale-price tests | Not started | `CUMULATIVE_PRICING_SPEC.md` §7 |
+| P-1 | Per-swap behaviour characterised (before Phase 1B-3) | Done | `TRADE_SPLITTING.md` §1–6 (numbers kept); the tests now assert the cumulative behaviour |
+| P-2 | Cumulative pricing implemented with split-invariance fuzz, aggregate cap, round trip, decay and stale-price tests | Done (local) | `PHASE1B3_REPORT.md`; `CumulativePricing.t.sol` (unit and integration), `PricingAdversarial.t.sol`, `TradeSplitting.t.sol`, INV-P2/INV-P4, Python model `simulations/pricing/` |
+| P-5 | Owner decision on Hook B reversals under D14 floors (refused until the position decays) and on decay windows | Not started | `PHASE1B3_REPORT.md` §8 |
+| P-6 | Loosening delay for hook pricing parameters (`hookOwner` is trusted; no timelock) | Not started | `PHASE1B3_PLAN.md` D-P3 (deferred) |
 | P-3 | Vault floors and the directional consistency check (D14) | Done | `PricePolicy.t.sol`, `invariant_directionalFloorsConsistent` |
 | P-4 | Reference-price update procedure and staleness monitoring (off-chain) | Not started | Floors and `P` are static, set by governance |
 

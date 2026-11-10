@@ -1,6 +1,7 @@
 # Porkfolio — Phase 1B-3 Plan: Cumulative Pricing in Hook A and Hook B
 
-**Status: PLAN FOR REVIEW. Nothing here is implemented.** It turns `CUMULATIVE_PRICING_SPEC.md` (the model) into
+**Status: EXECUTED in Phase 1B-3 (local branch `phase-1b-3-cumulative-pricing`); see `PHASE1B3_REPORT.md` for what
+was built, where it departs from this plan, and the evidence.** The plan is kept as reviewed. It turns `CUMULATIVE_PRICING_SPEC.md` (the model) into
 an implementation sequence, and lists the decisions the owner must take first. It answers the splitting problem
 measured in `TRADE_SPLITTING.md`. Labels: SOURCE, MODEL, PROPOSAL, DECISION (needs the owner).
 

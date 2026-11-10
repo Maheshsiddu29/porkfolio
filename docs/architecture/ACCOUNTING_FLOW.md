@@ -104,17 +104,18 @@ compromised whitelisted hook cannot take output without paying input.
 
 ### 3.3 Delta and balance ledger (numbers from `test_happyPath_hookA_zeroForOne`)
 
-X = 1000e18, Y = 999.05e18 (fee 950 pips at 10% post-trade utilisation).
+X = 1000e18, Y = 999.275e18 (Hook A fee 0.725e18: the pool's flow level moves from 0 to 1,000 with K = 10,000,
+so the fee is 1,000 × 0.05% + 0.45% × 1,000² / (2 × 10,000) = 0.5 + 0.225; Phase 1B-3 cumulative pricing).
 
 | Step | δ hook c0 | δ hook c1 | δ router c0 | δ router c1 | vault claims c0 | vault claims c1 |
 |---|---|---|---|---|---|---|
 | start | 0 | 0 | 0 | 0 | 1,000,000 | 1,000,000 |
 | hook `mint` | −X | 0 | 0 | 0 | 1,000,000 | 1,000,000 |
-| vault `exchange` | −X | 0 | 0 | 0 | 1,001,000 | 999,000.95 |
-| hook `burn` | −X | +Y | 0 | 0 | 1,001,000 | 999,000.95 |
+| vault `exchange` | −X | 0 | 0 | 0 | 1,001,000 | 999,000.725 |
+| hook `burn` | −X | +Y | 0 | 0 | 1,001,000 | 999,000.725 |
 | PM applies hookDelta (+X, −Y) | 0 | 0 | 0 | 0 | — | — |
 | PM applies callerDelta (−X, +Y) | 0 | 0 | −X | +Y | — | — |
-| router settle c0 / take c1 | 0 | 0 | 0 | 0 | 1,001,000 | 999,000.95 |
+| router settle c0 / take c1 | 0 | 0 | 0 | 0 | 1,001,000 | 999,000.725 |
 
 End state per currency: PoolManager ERC-20 balance change = vault ERC-6909 claim change (c0: +X / +X, c1: −Y / −Y).
 The swapper's PoolManager delta is exactly (−X, +Y). This is asserted in the happy-path and fuzz tests.
