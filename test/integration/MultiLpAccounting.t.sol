@@ -23,6 +23,8 @@ contract MultiLpAccountingTest is VaultTestBase {
         vault.setCuratorCeiling(curator, c0, type(uint256).max);
         vault.setCuratorCeiling(curator, c1, type(uint256).max);
         vm.stopPrank();
+        // Swaps here move hundreds of thousands of tokens to shift LP baskets; pricing is tested elsewhere.
+        _deepenHookB();
     }
 
     // ------------------------------------------------------------------

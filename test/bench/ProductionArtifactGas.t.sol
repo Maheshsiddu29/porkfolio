@@ -18,7 +18,7 @@ import {PoolModifyLiquidityTest} from "@uniswap/v4-core/src/test/PoolModifyLiqui
 
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
-import {IBenchVault, IBenchHook} from "./IBench.sol";
+import {IBenchVault, IBenchHookA, IBenchHookB} from "./IBench.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
 import {Mock1271Wallet} from "../utils/Mock1271Wallet.sol";
 
@@ -99,8 +99,8 @@ contract ProductionArtifactGasTest is Test {
         manager.initialize(keyB, SQRT_PRICE_1_1);
 
         vm.startPrank(hookOwner);
-        IBenchHook(hookA).configurePool(keyA, PRICE_1_1_X96, 500, 5000);
-        IBenchHook(hookB).configurePool(keyB, PRICE_1_1_X96, 10_000, 20_000);
+        IBenchHookA(hookA).configurePool(keyA, PRICE_1_1_X96, 500, 5000, 10_000 ether, 10_000 ether, 1 hours);
+        IBenchHookB(hookB).configurePool(keyB, PRICE_1_1_X96, 1_000_000 ether, 20_000, 1 hours);
         vm.stopPrank();
 
         vm.startPrank(owner);

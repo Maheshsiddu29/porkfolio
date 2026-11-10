@@ -262,7 +262,7 @@ contract PricePolicyTest is VaultTestBase {
 
         _tradeExpect(id, c1, 1000 ether, 1000 ether, _belowFloor(1000 ether, _required(1000 ether, tight)));
         // Hook A's own pricing is no longer enough: the vault rejects its quote.
-        uint256 quoted = hookA.quote(keyA, true, 1000 ether, hookAId);
+        uint256 quoted = hookA.quote(keyA, true, 1000 ether);
         _expectSwapRevert(
             address(hookA),
             abi.encodeWithSelector(

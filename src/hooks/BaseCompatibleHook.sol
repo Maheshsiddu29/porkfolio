@@ -17,7 +17,8 @@ import {ISharedCommitmentVault} from "../interfaces/ISharedCommitmentVault.sol";
 
 /// @title BaseCompatibleHook
 /// @notice Shared swap plumbing for hooks that fill every swap on their pool from the SharedCommitmentVault instead
-///         of from pool liquidity. A concrete hook only supplies the price (`_quote`).
+///         of from pool liquidity. A concrete hook supplies the price (`_quote`) and stores its pricing state
+///         (`_commit`).
 /// @dev Swap flow, exact input of X, quoted output Y. All steps run inside `beforeSwap` while the swapper's router
 ///      holds the PoolManager unlock:
 ///
@@ -53,13 +54,29 @@ import {ISharedCommitmentVault} from "../interfaces/ISharedCommitmentVault.sol";
 ///      swaps the operator grant has nothing to act on, and the vault only uses it inside `exchange`, which only the
 ///      hook itself can call for its allocations.
 ///
-///      Who chooses the allocation. The swapper passes the allocation id as `hookData`. Any swapper may use any
+///      Who chooses the allocation. The swapper passes the allocation id in `hookData`. Any swapper may use any
 ///      allocation made out to this hook for this pool: an allocation reserves capacity for the hook, not for a
-///      trader. The vault decides whether the trade is allowed.
+///      trader. The vault decides whether the trade is allowed. The allocation does not affect the price: concrete
+///      hooks price from their own per-pool state, so choosing a different allocation or curator changes nothing.
 ///
-///      Limits of this design. Only exact-input swaps are supported. The swap's `sqrtPriceLimitX96` is not enforced,
-///      because the pool's curve never runs, so swappers must protect themselves with a minimum-output check in their
-///      router. The pool's LP fee setting is never applied.
+///      Pricing state. A concrete hook prices with `_quote`, a view that returns the output and the hook's new
+///      pricing state, and stores that state with `_commit` only after `vault.exchange` has returned. If the vault,
+///      the PoolManager settlement or the swapper's payment fails, the whole transaction reverts, so a failed swap
+///      never changes the state. Nothing can swap on the same pool between `_quote` and `_commit`: the only external
+///      calls in between are `poolManager.mint`, `vault.exchange` (non-reentrant, and it calls only the
+///      PoolManager's ERC-6909 functions, which make no callbacks) and `poolManager.burn`.
+///
+///      Exact input and price limits. Only exact-input swaps are supported. The swap's `sqrtPriceLimitX96` is
+///      ignored: this hook takes the whole amount, so the PoolManager passes zero to the pool's swap function,
+///      which returns before it reads the limit (`Pool.swap`, pinned v4-core), and the pool's price never moves.
+///      The pool's LP fee setting is never applied either.
+///
+///      Minimum output. `hookData` may carry a minimum output: `abi.encode(allocationId, minAmountOut)` (64
+///      bytes) makes the swap revert with `InsufficientOutput` if the quote is below `minAmountOut`. The 32-byte
+///      form `abi.encode(allocationId)` sets no minimum. The bound protects only swappers whose router or
+///      integration encodes it; it is not a general slippage guarantee. Routers that check the amount received
+///      after the swap (for example the v4 `V4Router`'s `amountOutMinimum`) protect their users independently of
+///      this field, because the hook's output reaches the swapper as an ordinary PoolManager delta.
 ///
 ///      Permissions: beforeSwap, beforeSwapReturnDelta, and beforeAddLiquidity (only to reject native liquidity,
 ///      which could never be traded because every swap is intercepted). The deployed address must encode exactly
@@ -92,8 +109,13 @@ abstract contract BaseCompatibleHook is IHooks {
     error ZeroAddress();
     /// @notice The input or the quoted output exceeds 2^127 - 1.
     error AmountTooLarge();
-    /// @notice `hookData` was not exactly one ABI-encoded uint256 allocation id.
+    /// @notice `hookData` was neither `abi.encode(allocationId)` (32 bytes) nor
+    ///         `abi.encode(allocationId, minAmountOut)` (64 bytes).
     error InvalidHookData();
+    /// @notice The quoted output is below the minimum the swapper put in `hookData`.
+    /// @param amountOut Raw output the hook would have paid.
+    /// @param minAmountOut Raw minimum the swapper asked for.
+    error InsufficientOutput(uint256 amountOut, uint256 minAmountOut);
     /// @notice The quote rounded down to zero output; the swap is refused instead of taking input for nothing.
     error ZeroOutput();
 
@@ -148,20 +170,27 @@ abstract contract BaseCompatibleHook is IHooks {
         p.beforeSwapReturnDelta = true;
     }
 
-    /// @notice Strategy-specific pricing: output owed for `amountIn` of input on this pool and allocation.
-    /// @dev Implementations may read the allocation from the vault to adjust the price, and may revert to refuse a
-    ///      trade. They do not need to check the vault's price floor or quota: `exchange` enforces both on the exact
-    ///      amounts, so a quote that is too generous to the swapper simply makes the swap revert.
-    /// @param key Pool being swapped on.
+    /// @notice Strategy-specific pricing: output owed for `amountIn` of input on this pool right now, and the pricing
+    ///         state the hook will store if the swap succeeds.
+    /// @dev A view: it must not write the state, because the vault may still reject the trade. Implementations may
+    ///      revert to refuse a trade. They do not need to check the vault's price floor or quota: `exchange` enforces
+    ///      both on the exact amounts, so a quote that is too generous to the swapper simply makes the swap revert.
+    /// @param id Pool being swapped on.
     /// @param zeroForOne True if the swapper sells currency0.
-    /// @param amountIn Raw input amount.
-    /// @param allocationId Allocation the swapper chose.
+    /// @param amountIn Raw input amount, at most 2^127 - 1.
     /// @return amountOut Raw output to request from the vault.
-    function _quote(PoolKey calldata key, bool zeroForOne, uint256 amountIn, uint256 allocationId)
+    /// @return newState Hook-defined encoding of the pricing state after this trade, passed back to `_commit`.
+    function _quote(PoolId id, bool zeroForOne, uint256 amountIn)
         internal
         view
         virtual
-        returns (uint256 amountOut);
+        returns (uint256 amountOut, uint256 newState);
+
+    /// @notice Store the pricing state `_quote` computed, after the vault has filled the trade.
+    /// @param id Pool the swap ran on.
+    /// @param zeroForOne True if the swapper sold currency0.
+    /// @param newState The value `_quote` returned for this swap.
+    function _commit(PoolId id, bool zeroForOne, uint256 newState) internal virtual;
 
     /// @notice Output at a fixed reference price before any fee or impact, rounded down in favour of the vault.
     /// @dev Selling currency0: amountIn * price / 2^96. Selling currency1: amountIn * 2^96 / price. FullMath keeps
@@ -183,12 +212,15 @@ abstract contract BaseCompatibleHook is IHooks {
 
     /// @notice Fills the whole swap from the vault and tells the PoolManager to skip the pool's own curve.
     /// @dev See the contract documentation for the four settlement steps and why the deltas net to zero.
-    ///      Rejects exact-output swaps, zero-amount swaps, inputs above 2^127 - 1, `hookData` that is not exactly 32
-    ///      bytes, and quotes of zero. Every vault-side rule (registration, allocation binding, expiry, quota, price floor, pause, halt)
-    ///      is enforced inside `vault.exchange`; any failure there reverts the swap.
+    ///      Rejects exact-output swaps, zero-amount swaps, inputs above 2^127 - 1, `hookData` that is not 32 or 64
+    ///      bytes, quotes of zero and quotes below the swapper's minimum. Every vault-side rule (registration,
+    ///      allocation binding, expiry, quota, price floor, flow and exposure limits, pause, halt) is enforced inside
+    ///      `vault.exchange`; any failure there reverts the swap. The pricing state is stored after `exchange`
+    ///      returns.
     /// @param key Pool being swapped on.
-    /// @param params Swap parameters. `amountSpecified` must be negative (exact input).
-    /// @param hookData abi.encode(uint256 allocationId).
+    /// @param params Swap parameters. `amountSpecified` must be negative (exact input). `sqrtPriceLimitX96` is
+    ///        ignored (see the contract documentation).
+    /// @param hookData abi.encode(uint256 allocationId) or abi.encode(uint256 allocationId, uint256 minAmountOut).
     /// @return Selector confirming the call.
     /// @return Hook delta (+amountIn specified, -amountOut unspecified).
     /// @return LP fee override; always 0 (unused, the pool's curve does not run).
@@ -204,14 +236,24 @@ abstract contract BaseCompatibleHook is IHooks {
         // Bound before negation: avoids int256.min overflow and keeps the value castable to int128.
         // forge-lint: disable-next-line(unsafe-typecast) MAX_AMOUNT = 2^127-1 fits in int256.
         if (params.amountSpecified < -int256(MAX_AMOUNT)) revert AmountTooLarge();
-        if (hookData.length != 32) revert InvalidHookData();
+
+        uint256 allocationId;
+        uint256 minAmountOut;
+        if (hookData.length == 32) {
+            allocationId = abi.decode(hookData, (uint256));
+        } else if (hookData.length == 64) {
+            (allocationId, minAmountOut) = abi.decode(hookData, (uint256, uint256));
+        } else {
+            revert InvalidHookData();
+        }
 
         uint256 amountIn = uint256(-params.amountSpecified);
-        uint256 allocationId = abi.decode(hookData, (uint256));
+        PoolId id = key.toId();
 
-        uint256 amountOut = _quote(key, params.zeroForOne, amountIn, allocationId);
+        (uint256 amountOut, uint256 newState) = _quote(id, params.zeroForOne, amountIn);
         if (amountOut == 0) revert ZeroOutput();
         if (amountOut > MAX_AMOUNT) revert AmountTooLarge();
+        if (amountOut < minAmountOut) revert InsufficientOutput(amountOut, minAmountOut);
 
         (Currency cin, Currency cout) =
             params.zeroForOne ? (key.currency0, key.currency1) : (key.currency1, key.currency0);
@@ -222,8 +264,10 @@ abstract contract BaseCompatibleHook is IHooks {
         vault.exchange(key, params.zeroForOne, allocationId, amountIn, amountOut);
         // 3. Burn the output claims: hook delta[out] = +amountOut.
         poolManager.burn(address(this), cout.toId(), amountOut);
+        // The vault has filled the trade: store the pricing state it was quoted from.
+        _commit(id, params.zeroForOne, newState);
 
-        emit SharedLiquiditySwap(key.toId(), allocationId, params.zeroForOne, amountIn, amountOut);
+        emit SharedLiquiditySwap(id, allocationId, params.zeroForOne, amountIn, amountOut);
 
         // 4. Hand both deltas to the swapper; the hook's own deltas return to zero.
         // Both casts are safe: amountIn, amountOut <= int128.max.

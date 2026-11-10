@@ -42,9 +42,32 @@ interface IBenchVault is IVaultState {
     function isConsumer(address consumer) external view returns (bool);
 }
 
-/// @notice `configurePool` has the same parameter types on both hooks (price, then two pip values).
-interface IBenchHook {
-    function configurePool(PoolKey calldata key, uint160 priceX96, uint24 a, uint24 b) external;
+/// @notice HookA_DynamicFee's configuration and pricing views.
+interface IBenchHookA {
+    function configurePool(
+        PoolKey calldata key,
+        uint160 priceX96,
+        uint24 baseFeePips,
+        uint24 maxFeePips,
+        uint128 scale0,
+        uint128 scale1,
+        uint32 decayWindow
+    ) external;
+    function quote(PoolKey calldata key, bool zeroForOne, uint256 amountIn) external view returns (uint256);
+    function flowLevel(PoolKey calldata key, bool zeroForOne) external view returns (uint256);
+}
+
+/// @notice HookB_BoundedImpact's configuration and pricing views.
+interface IBenchHookB {
+    function configurePool(
+        PoolKey calldata key,
+        uint160 priceX96,
+        uint96 depth,
+        uint24 maxImpactPips,
+        uint32 decayWindow
+    ) external;
+    function quote(PoolKey calldata key, bool zeroForOne, uint256 amountIn) external view returns (uint256);
+    function positionOf(PoolKey calldata key) external view returns (int256);
 }
 
 /// @notice The public `vault()` getter that the hooks and the authorization module share.

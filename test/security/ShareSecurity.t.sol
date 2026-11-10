@@ -28,6 +28,8 @@ contract ShareSecurityTest is VaultTestBase {
         vault.setCuratorCeiling(curator, c0, type(uint256).max);
         vault.setCuratorCeiling(curator, c1, type(uint256).max);
         vm.stopPrank();
+        // Swaps here move hundreds of thousands of tokens to shift LP baskets; pricing is tested elsewhere.
+        _deepenHookB();
     }
 
     // ==================================================================
@@ -221,7 +223,9 @@ contract ShareSecurityTest is VaultTestBase {
         vm.prank(lp0);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InsufficientLiquidity.selector, 1, 0));
         vault.redeem(1, 0, 0, lp0, false);
-        _swap(keyA, true, 1_005_025 ether, id2); // ~all of the commitment at the 50 bps max fee
+        // ~all of the commitment: 1,005,002.51 in pays 27.5 for the first 10,000 of flow and 50 bps above it,
+        // leaving 999,999.99745 out.
+        _swap(keyA, true, 1_005_002.51 ether, id2);
         assertGt(vault.getAllocation(id2).consumed, 999_999 ether);
         assertEq(lens.freeInventory(vault, c1), 0);
         assertEq(vault.backing(c1), 500_000 ether + vault.reserved(c1), "only claimable + unconsumed remain");

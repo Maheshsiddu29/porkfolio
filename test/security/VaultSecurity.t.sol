@@ -96,7 +96,7 @@ contract VaultSecurityTest is VaultTestBase {
         PoolKey memory keyA2 = PoolKey(c0, c1, 10_000, 200, IHooks(address(hookA)));
         manager.initialize(keyA2, SQRT_PRICE_1_1);
         vm.prank(hookOwner);
-        hookA.configurePool(keyA2, PRICE_1_1_X96, 500, 5000);
+        _configureHookA(hookA, keyA2, PRICE_1_1_X96);
 
         uint256 id = _allocate(keyA, c1, QUOTA);
         _expectSwapRevert(address(hookA), abi.encodeWithSelector(ISharedCommitmentVault.PoolMismatch.selector));
@@ -142,7 +142,7 @@ contract VaultSecurityTest is VaultTestBase {
         uint256 id = _allocate(keyA, c1, 1000 ether);
         _swap(keyA, true, 900 ether, id);
         uint256 remaining = 1000 ether - vault.getAllocation(id).consumed;
-        uint256 out = hookA.quote(keyA, true, 200 ether, id);
+        uint256 out = hookA.quote(keyA, true, 200 ether);
         assertGt(out, remaining);
 
         _expectSwapRevert(
@@ -226,7 +226,7 @@ contract VaultSecurityTest is VaultTestBase {
         vm.prank(curator);
         uint256 id = auth.activateDirect(req);
 
-        uint256 out = hookA.quote(keyA, true, 100 ether, id);
+        uint256 out = hookA.quote(keyA, true, 100 ether);
         uint256 requiredIn = (out * req.minInPerOutX96 + FixedPoint96.Q96 - 1) / FixedPoint96.Q96;
         _expectSwapRevert(
             address(hookA),
@@ -431,12 +431,24 @@ contract VaultSecurityTest is VaultTestBase {
         new HookA_DynamicFee(manager, vault, hookOwner);
     }
 
+    /// @notice The only accepted forms are abi.encode(allocationId) (32 bytes) and abi.encode(allocationId,
+    ///         minAmountOut) (64 bytes). Every other length is refused before any pricing or vault call.
     function test_invalidHookData() public {
-        _expectSwapRevert(address(hookA), abi.encodeWithSelector(BaseCompatibleHook.InvalidHookData.selector));
-        _swapRaw(keyA, true, -1 ether, "");
-
-        _expectSwapRevert(address(hookA), abi.encodeWithSelector(BaseCompatibleHook.InvalidHookData.selector));
-        _swapRaw(keyA, true, -1 ether, abi.encode(uint256(1), uint256(2)));
+        bytes[4] memory bad = [
+            bytes(""),
+            abi.encodePacked(uint8(1)),
+            abi.encodePacked(uint256(1), uint8(2)),
+            abi.encode(uint256(1), uint256(2), uint256(3))
+        ];
+        for (uint256 i; i < bad.length; ++i) {
+            _expectSwapRevert(address(hookA), abi.encodeWithSelector(BaseCompatibleHook.InvalidHookData.selector));
+            _swapRaw(keyA, true, -1 ether, bad[i]);
+        }
+        // 64 bytes is the minimum-output form: decoded, priced, then refused by the vault for an unknown id.
+        _expectSwapRevert(
+            address(hookA), abi.encodeWithSelector(ISharedCommitmentVault.UnknownAllocation.selector, uint256(1))
+        );
+        _swapRaw(keyA, true, -1 ether, abi.encode(uint256(1), uint256(0)));
     }
 
     function test_amountBounds_int128() public {
@@ -454,13 +466,23 @@ contract VaultSecurityTest is VaultTestBase {
         _swap(keyA, true, 1, id); // 1 wei * (1 - fee) rounds down to 0
     }
 
+    /// @notice Depth 1,000,000 with a 2% cap allows a position of 9,852.457... The exact input that reaches the
+    ///         cap, C_hat(cap), executes; one more raw unit of input would end past it and reverts, and once at the
+    ///         cap any further sale of currency1 reverts. Values from simulations/pricing/cumulative.py.
     function test_hookB_impactBound() public {
-        uint256 id = _allocate(keyB, c1, 1000 ether);
-        // impact = 10_000 * 2001/1000 pips = 20_010 > max 20_000
+        uint256 cap = 9_852_457_023_325_690_846_726;
+        uint256 id = _allocate(keyB, c1, 20_000 ether);
         _expectSwapRevert(
-            address(hookB), abi.encodeWithSelector(HookB_BoundedImpact.ImpactBoundExceeded.selector, 20_010, 20_000)
+            address(hookB), abi.encodeWithSelector(HookB_BoundedImpact.ImpactBoundExceeded.selector, int256(0), cap)
         );
-        _swap(keyB, true, 2001 ether, id);
+        _swap(keyB, true, 9_950_493_836_207_795_336_339, id);
+
+        _swap(keyB, true, 9_950_493_836_207_795_336_338, id);
+        assertEq(hookB.positionOf(keyB), int256(cap));
+        _expectSwapRevert(
+            address(hookB), abi.encodeWithSelector(HookB_BoundedImpact.ImpactBoundExceeded.selector, int256(cap), cap)
+        );
+        _swap(keyB, true, 1 ether, id);
     }
 
     function test_hookCallbacks_onlyPoolManager() public {
@@ -586,7 +608,7 @@ contract VaultSecurityTest is VaultTestBase {
         keyC = PoolKey(c0, c1, 3000, 60, IHooks(address(hookC)));
         manager.initialize(keyC, SQRT_PRICE_1_1);
         vm.prank(hookOwner);
-        hookC.configurePool(keyC, PRICE_1_1_X96, 500, 5000);
+        _configureHookA(hookC, keyC, PRICE_1_1_X96);
     }
 
     function _setupMalicious() internal returns (MaliciousConsumerHook m, PoolKey memory keyM, uint256 id) {

@@ -97,8 +97,8 @@ abstract contract VaultTestBase is Test {
         manager.initialize(keyB, SQRT_PRICE_1_1);
 
         vm.startPrank(hookOwner);
-        hookA.configurePool(keyA, PRICE_1_1_X96, 500, 5000); // 5 bps -> 50 bps with utilisation
-        hookB.configurePool(keyB, PRICE_1_1_X96, 10_000, 20_000); // 1% impact at full quota, max 2%
+        _configureHookA(hookA, keyA, PRICE_1_1_X96);
+        _configureHookB(hookB, keyB, PRICE_1_1_X96);
         vm.stopPrank();
 
         vm.startPrank(owner);
@@ -139,6 +139,36 @@ abstract contract VaultTestBase is Test {
     // ------------------------------------------------------------------
 
     uint256 internal constant MAX_FLOW_CAP = type(uint104).max;
+
+    // Shared hook pricing parameters (1:1 tokens of 18 decimals).
+    // Hook A: fee rate 5 bps at no recent flow, rising linearly to 50 bps at 10,000 tokens of flow in one direction;
+    // a level of 10,000 decays to zero in one hour.
+    uint24 internal constant A_BASE_FEE = 500;
+    uint24 internal constant A_MAX_FEE = 5000;
+    uint128 internal constant A_SCALE = 10_000 ether;
+    uint32 internal constant A_WINDOW = 1 hours;
+    // Hook B: depth 1,000,000 tokens (a 1,000-token trade from zero pays about 0.1%), marginal impact capped at 2%,
+    // which caps the position at about 9,852 tokens; a position at the cap decays to zero in one hour.
+    uint96 internal constant B_DEPTH = 1_000_000 ether;
+    uint24 internal constant B_MAX_IMPACT = 20_000;
+    uint32 internal constant B_WINDOW = 1 hours;
+
+    /// @dev Configures `hook` for `key` with the shared Hook A parameters. Caller must be pranking as `hookOwner`.
+    function _configureHookA(HookA_DynamicFee hook, PoolKey memory key, uint160 priceX96) internal {
+        hook.configurePool(key, priceX96, A_BASE_FEE, A_MAX_FEE, A_SCALE, A_SCALE, A_WINDOW);
+    }
+
+    /// @dev Reconfigures the fixture's Hook B pool with depth 100,000,000 (position cap about 985,000 tokens) for
+    ///      suites that use Hook B to move large amounts through the vault and test LP accounting, not pricing.
+    function _deepenHookB() internal {
+        vm.prank(hookOwner);
+        hookB.configurePool(keyB, PRICE_1_1_X96, 100_000_000 ether, B_MAX_IMPACT, B_WINDOW);
+    }
+
+    /// @dev Configures `hook` for `key` with the shared Hook B parameters. Caller must be pranking as `hookOwner`.
+    function _configureHookB(HookB_BoundedImpact hook, PoolKey memory key, uint160 priceX96) internal {
+        hook.configurePool(key, priceX96, B_DEPTH, B_MAX_IMPACT, B_WINDOW);
+    }
 
     /// @dev Configures `account` at `scope` in both assets with the widest limits: the largest flow cap and 100%
     ///      exposure. At 100% the exposure caps never bind before the admission rule does (each scope holds part of

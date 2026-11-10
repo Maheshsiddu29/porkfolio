@@ -31,9 +31,9 @@ contract SharedLiquiditySwapTest is VaultTestBase {
         uint256 id = _allocate(keyA, c1, QUOTA);
         uint256 amountIn = 1000 ether;
 
-        // utilisation after trade = 1000/10000 = 10% -> fee = 500 + 4500*0.1 = 950 pips
-        uint256 expectedOut = amountIn * (1e6 - 950) / 1e6;
-        assertEq(hookA.quote(keyA, true, amountIn, id), expectedOut, "quote");
+        // Level 0 -> 1,000 with K = 10,000: fee = 1,000 * 0.05% + 0.45% * 1,000^2 / (2 * 10,000) = 0.5 + 0.225.
+        uint256 expectedOut = amountIn - 0.725 ether;
+        assertEq(hookA.quote(keyA, true, amountIn), expectedOut, "quote");
 
         uint256 t0Before = token0.balanceOf(trader);
         uint256 t1Before = token1.balanceOf(trader);
@@ -62,8 +62,8 @@ contract SharedLiquiditySwapTest is VaultTestBase {
     function test_happyPath_hookB_oneForZero() public {
         uint256 id = _allocate(keyB, c0, QUOTA);
         uint256 amountIn = 1000 ether;
-        // impact = ceil(1000 * 10_000 / 10_000) = 1000 pips
-        uint256 expectedOut = amountIn * (1e6 - 1000) / 1e6;
+        // Position 0 -> -1,000 on depth V = 1,000,000: out = floor(V * 1,000 / (V + 1,000)) = 999.000999...
+        uint256 expectedOut = 999_000_999_000_999_000_999;
 
         BalanceDelta delta = _swap(keyB, false, amountIn, id);
 
@@ -82,6 +82,10 @@ contract SharedLiquiditySwapTest is VaultTestBase {
         _swap(keyA, true, 100 ether, a01);
         _swap(keyA, false, 100 ether, a10);
         _swap(keyB, true, 100 ether, b01);
+        // Hook B's reverse leg is priced on the same curve segment, above the 1:1 reference while the position is
+        // positive, and the vault's 1:1 floor refuses it (see test_HB_reverseLegNeedsFloorRoom). After the decay
+        // window the position is back at zero and the reverse direction trades below the reference again.
+        vm.warp(vm.getBlockTimestamp() + B_WINDOW);
         _swap(keyB, false, 100 ether, b10);
 
         assertGt(vault.getAllocation(a01).consumed, 0);
@@ -147,7 +151,7 @@ contract SharedLiquiditySwapTest is VaultTestBase {
         assertLt(remainingA, 600 ether);
 
         // A cannot go beyond its own quota even though free backing exists ...
-        uint256 tooMuchOut = hookA.quote(keyA, true, 600 ether, idA);
+        uint256 tooMuchOut = hookA.quote(keyA, true, 600 ether);
         _expectSwapRevert(
             address(hookA),
             abi.encodeWithSelector(ISharedCommitmentVault.QuotaExceeded.selector, tooMuchOut, remainingA)
@@ -197,11 +201,11 @@ contract SharedLiquiditySwapTest is VaultTestBase {
         steps[0] = BatchSwapRouter.Step(keyA, true, 1000 ether, abi.encode(id));
         steps[1] = BatchSwapRouter.Step(keyA, true, 1000 ether, abi.encode(id));
 
-        // First swap: util = ceil(1e6 * 1000/1500) = 666_667 pips; fee = 500 + ceil(4500 * 0.666667) = 3501 pips.
-        uint256 out1 = 1000 ether * (1e6 - 3501) / 1e6;
-        assertEq(hookA.quote(keyA, true, 1000 ether, id), out1);
-        // Second swap: utilisation capped at 100% -> fee 5000 pips; exceeds the 1500 - out1 remaining.
-        uint256 out2 = 1000 ether * (1e6 - 5000) / 1e6;
+        // First swap: level 0 -> 1,000, fee 0.725. Second: level 1,000 -> 2,000, fee F(2,000) - F(1,000) =
+        // 1.9 - 0.725 = 1.175, output 998.825, more than the 1,500 - 999.275 left in the allocation.
+        uint256 out1 = 999.275 ether;
+        assertEq(hookA.quote(keyA, true, 1000 ether), out1);
+        uint256 out2 = 998.825 ether;
 
         vm.prank(trader);
         _expectSwapRevert(
@@ -226,7 +230,7 @@ contract SharedLiquiditySwapTest is VaultTestBase {
         steps[0] = BatchSwapRouter.Step(keyA, true, 1000 ether, abi.encode(id));
         uint256[] memory minOut = new uint256[](1);
         minOut[0] = 1000 ether; // impossible: fee is non-zero
-        uint256 out = hookA.quote(keyA, true, 1000 ether, id);
+        uint256 out = hookA.quote(keyA, true, 1000 ether);
 
         vm.prank(trader);
         vm.expectRevert(abi.encodeWithSelector(BatchSwapRouter.InsufficientOutput.selector, 0, out, minOut[0]));
@@ -255,7 +259,7 @@ contract SharedLiquiditySwapTest is VaultTestBase {
 
     function _checkSwapAccounting(address hook, bool zeroForOne, uint256 amountIn, uint256 id) internal {
         bool isA = hook == address(hookA);
-        uint256 quoted = isA ? hookA.quote(keyA, zeroForOne, amountIn, id) : hookB.quote(keyB, zeroForOne, amountIn, id);
+        uint256 quoted = isA ? hookA.quote(keyA, zeroForOne, amountIn) : hookB.quote(keyB, zeroForOne, amountIn);
         (uint256 inBefore, uint256 outBefore) =
             zeroForOne ? (vault.backing(c0), vault.backing(c1)) : (vault.backing(c1), vault.backing(c0));
 

@@ -9,17 +9,14 @@ import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {BatchSwapRouter} from "../utils/BatchSwapRouter.sol";
 
-/// @notice Characterization tests for trade splitting. They pin how both hooks price one trade versus the same
-///         total input split into several swaps inside ONE transaction (one PoolManager unlock, via
-///         BatchSwapRouter), on identical starting state. They document current behaviour; they do not assert
-///         that the behaviour is desirable. See docs/architecture/TRADE_SPLITTING.md.
-/// @dev Expected outputs are exact values from an independent integer model of the hook formulas at a 1:1
-///      reference price (gross == amountIn), with `consumed` advancing by each piece's net output:
-///        HookA: u = ceil((consumed + gross) * 1e6 / maxOut), fee = base + ceil((max - base) * u / 1e6),
-///               out = floor(gross * (1e6 - fee) / 1e6)
-///        HookB: impact = ceil(gross * k / (maxOut - consumed)), out = floor(gross * (1e6 - impact) / 1e6)
-///      Each split run is compared against the single-trade run from the same state snapshot, and every
-///      split piece still passes the vault's 1:1 floor (otherwise the batch would revert).
+/// @notice Trade splitting: one trade versus the same total input split into several swaps inside ONE transaction
+///         (one PoolManager unlock, via BatchSwapRouter), from identical starting state. These scenarios pinned the
+///         per-swap pricing that splitting used to beat (docs/architecture/TRADE_SPLITTING.md records those numbers:
+///         Hook A 7,967.2 -> 7,979.82 over 8 pieces, Hook B 999 -> 999.8946 over 10 pieces, and a cap that refused one
+///         swap of 5,000 but accepted five of 1,000). They now assert the opposite: the split receives no more than the
+///         single trade, and the cap bounds the aggregate.
+/// @dev Expected outputs are exact values from simulations/pricing/cumulative.py with the shared fixture parameters
+///      (1:1 reference price, so the conversion is exact and the split and single outputs are equal to the wei).
 contract TradeSplittingTest is VaultTestBase {
     uint128 internal constant QUOTA = 10_000 ether;
 
@@ -36,68 +33,85 @@ contract TradeSplittingTest is VaultTestBase {
         }
     }
 
-    /// @notice HookA charges post-trade utilisation on the whole trade. Splitting 8,000 into 8 pieces charges the
-    ///         early pieces at lower utilisation: total cost falls from 32.8 to 20.18 (-38%). The limit as n grows
-    ///         is about half the utilisation component (model: 18.39 at n = 1,000).
-    function test_TS_hookA_splitPaysLessFee() public {
+    /// @notice Hook A charges the integral of its fee rate over the flow, so the pieces' fees telescope: 8,000 in
+    ///         pays 18.4 in fees as one swap, two swaps or eight swaps, and receives exactly 7,981.6 each time.
+    function test_TS_hookA_splitPaysSameFee() public {
         uint256 id = _allocate(keyA, c1, QUOTA);
         uint256 snap = vm.snapshotState();
 
         uint256 single = _batch(keyA, 8000 ether, 1, id);
-        assertEq(single, 7967.2 ether, "single: fee 4,100 pips");
+        assertEq(single, 7981.6 ether, "single: fee 18.4");
+        assertEq(hookA.flowLevel(keyA, true), 8000 ether);
         vm.revertToState(snap);
 
-        uint256 two = _batch(keyA, 8000 ether, 2, id);
-        assertEq(two, 7974.416 ether, "2 pieces");
+        assertEq(_batch(keyA, 8000 ether, 2, id), single, "2 pieces");
         vm.revertToState(snap);
 
-        uint256 eight = _batch(keyA, 8000 ether, 8, id);
-        assertEq(eight, 7979.82 ether, "8 pieces");
-        assertGt(eight, two);
-        assertGt(two, single);
+        assertEq(_batch(keyA, 8000 ether, 8, id), single, "8 pieces");
+        assertEq(hookA.flowLevel(keyA, true), 8000 ether, "same final level");
         _assertAccountingConsistent();
     }
 
-    /// @notice HookB charges impact on each trade relative to remaining capacity, so splitting cuts the impact
-    ///         paid roughly by the number of pieces: 1,000 in one swap costs 1.0; in 10 swaps it costs 0.1054.
-    function test_TS_hookB_splitAvoidsImpact() public {
+    /// @notice Hook B prices the position, not the trade: 1,000 in moves the position to 999.000999... whether as one
+    ///         swap or ten, and the output is identical.
+    function test_TS_hookB_splitPaysSameImpact() public {
         uint256 id = _allocate(keyB, c1, QUOTA);
         uint256 snap = vm.snapshotState();
 
         uint256 single = _batch(keyB, 1000 ether, 1, id);
-        assertEq(single, 999 ether, "single: impact 1,000 pips");
+        assertEq(single, 999_000_999_000_999_000_999, "single");
+        assertEq(hookB.positionOf(keyB), int256(single));
         vm.revertToState(snap);
 
-        uint256 ten = _batch(keyB, 1000 ether, 10, id);
-        assertEq(ten, 999.8946 ether, "10 pieces");
+        assertEq(_batch(keyB, 1000 ether, 10, id), single, "10 pieces");
+        assertEq(hookB.positionOf(keyB), int256(single), "same final position");
         _assertAccountingConsistent();
     }
 
-    /// @notice The impact cap is per swap, not per allocation or per transaction. With the cap binding
-    ///         (impact at full quota 5% > cap 1%), one swap of 5,000 reverts with ImpactBoundExceeded(25,000,
-    ///         10,000), while the same 5,000 as five swaps in one transaction all pass the cap (largest piece
-    ///         8,301 pips) and execute.
-    function test_TS_hookB_capIsPerSwap_splitBypassesIt() public {
+    /// @notice The impact cap bounds the aggregate position. Depth 200,000 with a 1% cap allows |x| <= 992.56: one
+    ///         swap of 5,000 reverts, and so does every split of it into 5, 10 or 100 swaps in one transaction. Spread
+    ///         over separate transactions at one timestamp, the pieces execute only until the cap: 19 of 100.
+    function test_TS_hookB_capIsAggregate_splitCannotBypassIt() public {
         vm.prank(hookOwner);
-        hookB.configurePool(keyB, PRICE_1_1_X96, 50_000, 10_000);
+        hookB.configurePool(keyB, PRICE_1_1_X96, 200_000 ether, 10_000, B_WINDOW);
+        uint256 cap = 992_561_958_002_172_866_945;
+        (,,,, uint96 storedCap) = hookB.poolConfig(keyB.toId());
+        assertEq(storedCap, cap);
         uint256 id = _allocate(keyB, c1, QUOTA);
 
-        BatchSwapRouter.Step[] memory one = new BatchSwapRouter.Step[](1);
-        one[0] = BatchSwapRouter.Step(keyB, true, 5000 ether, abi.encode(id));
-        _expectSwapRevert(
-            address(hookB), abi.encodeWithSelector(HookB_BoundedImpact.ImpactBoundExceeded.selector, 25_000, 10_000)
-        );
-        vm.prank(trader);
-        batchRouter.run(one, new uint256[](0), BatchSwapRouter.Mode.Settle);
+        uint256[4] memory ns = [uint256(1), 5, 10, 100];
+        for (uint256 k; k < ns.length; ++k) {
+            uint256 n = ns[k];
+            BatchSwapRouter.Step[] memory steps = new BatchSwapRouter.Step[](n);
+            for (uint256 i; i < n; ++i) {
+                steps[i] = BatchSwapRouter.Step(keyB, true, 5000 ether / n, abi.encode(id));
+            }
+            vm.prank(trader);
+            vm.expectRevert(); // the piece that crosses the cap reverts the whole unlock
+            batchRouter.run(steps, new uint256[](0), BatchSwapRouter.Mode.Settle);
+            assertEq(hookB.positionOf(keyB), 0, "nothing executed");
+        }
 
-        uint256 five = _batch(keyB, 5000 ether, 5, id);
-        assertEq(five, 4967.778 ether, "5 pieces, all within the per-swap cap");
-        assertEq(vault.getAllocation(id).consumed, five);
+        uint256 executed;
+        for (uint256 i; i < 100; ++i) {
+            int256 x = hookB.positionOf(keyB);
+            if (i == 19) {
+                _expectSwapRevert(
+                    address(hookB), abi.encodeWithSelector(HookB_BoundedImpact.ImpactBoundExceeded.selector, x, cap)
+                );
+                _swap(keyB, true, 50 ether, id);
+                break;
+            }
+            executed += uint256(int256(_swap(keyB, true, 50 ether, id).amount1()));
+        }
+        assertEq(hookB.positionOf(keyB), 945_508_833_043_045_533_714, "19 pieces, below the cap");
+        assertEq(executed, 945_508_833_043_045_533_714);
+        assertEq(vault.getAllocation(id).consumed, executed);
         _assertAccountingConsistent();
     }
 
-    /// @notice Measured cost of splitting: gas of n pieces in one unlock versus one swap. Logged, not asserted;
-    ///         the economic threshold depends on the gas price and token value, which these tests do not model.
+    /// @notice Measured cost of splitting: gas of n pieces in one unlock versus one swap. Logged, not asserted.
+    ///         Splitting no longer saves fees, so this is now pure overhead for a splitter.
     function test_TS_gasPerExtraPiece() public {
         uint256 id = _allocate(keyB, c1, QUOTA);
         uint256 snap = vm.snapshotState();

@@ -20,7 +20,7 @@ import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
 
 /// @notice The two production hooks (HookA_DynamicFee, HookB_BoundedImpact) under vault-enforced floors,
 ///         through the real PoolManager, in both directions, on an 18/18 pair (fixture) and a 6/18 USDC/WETH pair.
-///         The hooks are unchanged: every rejection below comes from the vault, never from hook-side checks.
+///         Every rejection below comes from the vault, never from hook-side checks.
 contract HookPriceBandsTest is VaultTestBase {
     uint256 internal constant Q96 = FixedPoint96.Q96;
     address internal guardian = makeAddr("guardian");
@@ -53,6 +53,9 @@ contract HookPriceBandsTest is VaultTestBase {
             for (uint256 d; d < 2; ++d) {
                 bool zeroForOne = d == 0;
                 Currency out = zeroForOne ? c1 : c0;
+                // Hook B prices a reversal above the 1:1 reference while its position is non-zero, and the 1:1
+                // floors refuse that; once the position has decayed back to zero both directions quote below 1:1.
+                if (d == 1) vm.warp(vm.getBlockTimestamp() + B_WINDOW);
                 uint256 id = _allocate(keys[h], out, 50_000 ether);
                 (uint256 a0, uint256 a1) = _vaultClaims(vault, c0, c1);
                 _swap(keys[h], zeroForOne, 1000 ether, id);
@@ -85,7 +88,7 @@ contract HookPriceBandsTest is VaultTestBase {
         Currency out = zeroForOne ? c1 : c0;
         uint256 id = _allocate(key, out, 50_000 ether);
         uint256 x = 1000 ether;
-        uint256 y = useHookA ? hookA.quote(key, zeroForOne, x, id) : hookB.quote(key, zeroForOne, x, id);
+        uint256 y = useHookA ? hookA.quote(key, zeroForOne, x) : hookB.quote(key, zeroForOne, x);
         uint256 fAt = x * Q96 / y; // largest floor the quote satisfies: ceil(y * fAt / 2^96) <= x
         assertGe(fAt, Q96);
         assertTrue(_meets(x, y, fAt) && !_meets(x, y, fAt + 1), "boundary");
@@ -112,11 +115,11 @@ contract HookPriceBandsTest is VaultTestBase {
     ///         direction that would sell token1 too cheaply, while the direction favourable to LPs still executes.
     function test_HB_hookOwnerMispricing_isDirectional() public {
         vm.prank(hookOwner);
-        hookA.configurePool(keyA, uint160(2 * Q96), 500, 5000);
+        _configureHookA(hookA, keyA, uint160(2 * Q96));
         uint256 id1 = _allocate(keyA, c1, 50_000 ether);
         uint256 id0 = _allocate(keyA, c0, 50_000 ether);
 
-        uint256 y = hookA.quote(keyA, true, 1000 ether, id1); // ~1990 token1 for 1000 token0
+        uint256 y = hookA.quote(keyA, true, 1000 ether); // ~1990 token1 for 1000 token0
         _expectSwapRevert(
             address(hookA), abi.encodeWithSelector(ISharedCommitmentVault.PriceBelowFloor.selector, 1000 ether, y)
         );
@@ -135,7 +138,9 @@ contract HookPriceBandsTest is VaultTestBase {
         uint256 start0 = token0.balanceOf(trader);
         uint256 start1 = token1.balanceOf(trader);
         uint256 value = vault.backing(c0) + vault.backing(c1);
-        uint256 x = 10_000 ether;
+        // Every cycle sells currency1 to Hook B, moving its position further negative; 5 cycles of 1,000 stay within
+        // the fixture's position cap of about 9,852.
+        uint256 x = 1000 ether;
         for (uint256 i; i < 5; ++i) {
             uint256 before1 = token1.balanceOf(trader);
             _swap(keyA, true, x, id1);
@@ -201,9 +206,12 @@ contract HookPriceBands6x18Test is VaultTestBase {
 
         // Hooks reference 3,000 USDC per WETH, as raw currency1 per raw currency0.
         uint160 ref = _c1PerC0X96(3000);
+        // Hook B depth in currency1 units worth about 1,000 WETH (3,000,000 USDC): a 1 WETH trade moves the price by
+        // about 0.2%. Hook B charges nothing at a zero position (the first unit trades at the reference), so with a
+        // reference rounded down and floors pivoting exactly at 3,000 the impact is what keeps trades inside them.
         vm.startPrank(hookOwner);
-        hA.configurePool(kA, ref, 500, 5000);
-        hB.configurePool(kB, ref, 10_000, 20_000);
+        _configureHookA(hA, kA, ref);
+        hB.configurePool(kB, ref, x1 == cU ? 3_000_000e6 : 1000 ether, B_MAX_IMPACT, B_WINDOW);
         vm.stopPrank();
 
         vm.startPrank(owner);
@@ -313,7 +321,9 @@ contract HookPriceBands6x18Test is VaultTestBase {
             assertTrue(dOut > 2950e6 && dOut < 3000e6, "~2,985 USDC for 1 WETH");
             assertGe(dIn, FullMath.mulDivRoundingUp(dOut, lens.effectiveFloorX96(v, idU), Q96));
 
-            // Trader sells 3,000 USDC: the vault sells WETH.
+            // Trader sells 3,000 USDC: the vault sells WETH. On Hook B this reverses the previous trade, which is
+            // priced above the reference until the position decays, and the pivot floors refuse it before then.
+            vm.warp(vm.getBlockTimestamp() + B_WINDOW);
             uint256 idW = _alloc(keys[h], cW, 500 ether);
             (dIn, dOut) = _sell(keys[h], cU, 3000e6, idW);
             assertEq(dIn, 3000e6);
@@ -332,7 +342,7 @@ contract HookPriceBands6x18Test is VaultTestBase {
         assertGe(dIn, FullMath.mulDivRoundingUp(dOut, _sellWethFloor(2850), Q96));
 
         uint256 idU = _alloc(kA, cU, 1_000_000e6);
-        uint256 y = hA.quote(kA, cW == x0, 1 ether, idU);
+        uint256 y = hA.quote(kA, cW == x0, 1 ether);
         _expectSwapRevert(
             address(hA),
             abi.encodeWithSelector(
