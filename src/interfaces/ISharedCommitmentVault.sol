@@ -5,6 +5,13 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
+// Identity value of an authorization module: what `authModuleId()` returns, and what `setAuthModule` requires.
+// It names a role, "authorization module of a Porkfolio vault, calling `reserveFor` as declared here" ("v1" is the
+// version of that interface, not of a module build). It is public, not a secret and not a proof: any contract can
+// return it. A replacement module for a deployed vault must return this same value, because the vault's copy is
+// fixed in its bytecode.
+bytes32 constant AUTH_MODULE_ID = keccak256("porkfolio.vault.auth-module.v1");
+
 /// @title ISharedCommitmentVault
 /// @notice Types, errors, events and the hook-facing entry point of the shared two-asset reserve.
 /// @dev Registered hooks consume capacity that curators reserved for them through `exchange`, a claim-for-claim swap
@@ -219,8 +226,8 @@ interface ISharedCommitmentVault {
     /// @notice This module was installed earlier and then replaced or disabled, so it can never be installed again;
     ///         or it is the module installed now (installing retires the current module first).
     error AuthModuleRetired(address module);
-    /// @notice The candidate module did not answer `vault()` with this vault's address: no code, no such getter, a
-    ///         reverting getter, a short answer, or another address.
+    /// @notice The candidate module did not answer `authModuleId()` with AUTH_MODULE_ID and `vault()` with this
+    ///         vault's address: no code, a missing or reverting getter, a short answer, or another value.
     error InvalidAuthModule(address module);
     /// @notice `unlockCallback` was called by something other than the PoolManager.
     error NotPoolManager();

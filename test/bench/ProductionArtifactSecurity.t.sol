@@ -17,9 +17,9 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 
-import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
+import {ISharedCommitmentVault, AUTH_MODULE_ID} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
-import {IBenchVault, IBenchHook} from "./IBench.sol";
+import {IBenchVault, IBenchHook, IBenchVaultBound} from "./IBench.sol";
 import {ReentrantToken, ReentryAgent} from "../utils/ReentrantToken.sol";
 import {ScriptedHook} from "../utils/ScriptedHook.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
@@ -695,47 +695,181 @@ contract ProductionArtifactSecurityTest is Test {
         _assertAccounting();
     }
 
-    /// @notice The vault's installation check on the production builds. Refused with `InvalidAuthModule`, changing
-    ///         nothing: the production module built for another production vault, an address without code, the
-    ///         PoolManager, the vault itself, and candidates whose `vault()` reverts, returns 31 bytes, or returns this
-    ///         address with dirty upper bits. Installing the installed module again is refused with
-    ///         `AuthModuleRetired`. Accepted: the production HookA, whose `vault()` getter names this vault. It
-    ///         creates nothing as a module, its consumer role is unaffected, and installing a real module retires it
-    ///         as a module only. The check is a guard against mistakes, not a proof that the candidate is a module.
+    /// @notice The vault's installation check on the production builds, one candidate of each kind. The numbers
+    ///         follow the review checklist for this check.
+    ///         Refused with `InvalidAuthModule`: (2) HookA and (3) HookB, whose `vault()` getters name this vault but
+    ///         which have no module identity; (4) the PoolManager; (5) the vault itself; (6) an EOA; (7) an empty
+    ///         contract (every call succeeds with no data); (8) a contract with the right `vault()` but no
+    ///         `authModuleId()`; (9) the production module built for another production vault, and a candidate with
+    ///         the right identity and another vault; (10) malformed answers: empty, 31 bytes, the call data echoed
+    ///         back, dirty upper bits; (11) a wrong identity word; (12) reverting getters, including a revert whose
+    ///         data is exactly the expected word; (13) a getter that burns all gas; (14) a fallback that gives one
+    ///         fixed word to every selector. Each refusal leaves the installed module installed, not retired, and
+    ///         working, and emits nothing.
+    ///         Accepted: (1) the production module built for this vault.
     function test_PA_auth_moduleInstallCheck() public {
         IBenchVault v2 = IBenchVault(deployCode(VAULT_JSON, abi.encode(manager, owner, c0, c1)));
-        ModuleCandidate cand = new ModuleCandidate();
         bytes32 self = bytes32(uint256(uint160(address(vault))));
-        address[5] memory fixed_ =
-            [address(_deployAuth(v2)), makeAddr("no code"), address(manager), address(vault), address(cand)];
-        cand.set(ModuleCandidate.Mode.Revert, self);
+        address empty = makeAddr("empty contract");
+        vm.etch(empty, hex"00");
+        address[8] memory fixed_ = [
+            hookA,
+            hookB,
+            address(manager),
+            address(vault),
+            makeAddr("eoa"),
+            empty,
+            address(_deployAuth(v2)),
+            address(scripted)
+        ];
         for (uint256 i; i < fixed_.length; ++i) {
             _installRefused(fixed_[i]);
         }
-        cand.set(ModuleCandidate.Mode.Short, self);
+        assertEq(IBenchVaultBound(hookA).vault(), address(vault), "the hooks do name this vault");
+        assertEq(IBenchVaultBound(hookB).vault(), address(vault));
+
+        ModuleCandidate cand = new ModuleCandidate();
+        // (8) right vault(), no identity getter
+        cand.set(ModuleCandidate.Mode.Answer, self);
+        cand.setId(ModuleCandidate.Mode.Revert, bytes32(0));
         _installRefused(address(cand));
+        // (9) right identity, another vault
+        cand.setId(ModuleCandidate.Mode.Answer, AUTH_MODULE_ID);
+        cand.set(ModuleCandidate.Mode.Answer, bytes32(uint256(uint160(address(v2)))));
+        _installRefused(address(cand));
+        // (10) malformed vault() answers
+        ModuleCandidate.Mode[3] memory bad =
+            [ModuleCandidate.Mode.Empty, ModuleCandidate.Mode.Short, ModuleCandidate.Mode.Echo];
+        for (uint256 i; i < bad.length; ++i) {
+            cand.set(bad[i], self);
+            _installRefused(address(cand));
+        }
         cand.set(ModuleCandidate.Mode.Answer, self | bytes32(uint256(1) << 160));
         _installRefused(address(cand));
+        // (10) malformed identity answers
+        cand.set(ModuleCandidate.Mode.Answer, self);
+        for (uint256 i; i < bad.length; ++i) {
+            cand.setId(bad[i], AUTH_MODULE_ID);
+            _installRefused(address(cand));
+        }
+        // (11) unexpected identity values
+        bytes32[3] memory wrongIds =
+            [keccak256("porkfolio.vault.auth-module.v2"), AUTH_MODULE_ID ^ bytes32(uint256(1)), self];
+        for (uint256 i; i < wrongIds.length; ++i) {
+            cand.setId(ModuleCandidate.Mode.Answer, wrongIds[i]);
+            _installRefused(address(cand));
+        }
+        // (12) reverting getters, plain and with the expected word as revert data
+        cand.setId(ModuleCandidate.Mode.Revert, AUTH_MODULE_ID);
+        _installRefused(address(cand));
+        cand.setId(ModuleCandidate.Mode.RevertWord, AUTH_MODULE_ID);
+        _installRefused(address(cand));
+        cand.setId(ModuleCandidate.Mode.Answer, AUTH_MODULE_ID);
+        cand.set(ModuleCandidate.Mode.Revert, self);
+        _installRefused(address(cand));
+        cand.set(ModuleCandidate.Mode.RevertWord, self);
+        _installRefused(address(cand));
+        // (13) gas burners, on either question
+        cand.set(ModuleCandidate.Mode.BurnGas, self);
+        _installRefusedWithGas(address(cand));
+        cand.set(ModuleCandidate.Mode.Answer, self);
+        cand.setId(ModuleCandidate.Mode.BurnGas, AUTH_MODULE_ID);
+        _installRefusedWithGas(address(cand));
+        // (14) a fallback with one fixed answer for every selector
+        cand.setId(ModuleCandidate.Mode.Answer, AUTH_MODULE_ID);
+        cand.setSameAnswerForAll(true);
+        cand.set(ModuleCandidate.Mode.Answer, self);
+        _installRefused(address(cand));
+        cand.set(ModuleCandidate.Mode.Answer, AUTH_MODULE_ID);
+        _installRefused(address(cand));
+
+        // Nothing changed: the module installed at setup is still installed, not retired, and working.
+        assertEq(vault.authModule(), address(auth));
+        uint256 id = _allocate(curator, keyA, c1, 50_000 ether);
+        _swap(keyA, true, 1000 ether, id);
+
+        // (1) the production module for this vault is accepted and works; the one it replaces retires.
+        assertEq(auth.authModuleId(), AUTH_MODULE_ID);
+        ICuratorAuthorization m2 = _deployAuth(vault);
+        vm.prank(owner);
+        vault.setAuthModule(address(m2));
+        assertEq(vault.authModule(), address(m2));
+        vm.prank(curator);
+        uint256 id2 = m2.activateDirect(_request(keyA, c1, 1000 ether));
+        _swap(keyA, true, 500 ether, id2);
+        _swap(keyA, true, 500 ether, id); // allocations made through the retired module are unaffected
+        _assertAccounting();
+    }
+
+    /// @notice Lifecycle around the check, on the production builds: (15) the installed module cannot be installed
+    ///         again; (16) a replaced module is retired for good; (17) after an emergency disable, the disabled module
+    ///         cannot be reinstated and the guardian cannot install anything; (18) a malicious module that gives both
+    ///         right answers is accepted. The check cannot tell it from the reviewed module, which is its documented
+    ///         limit. Once installed it is still bounded by `reserveFor`'s own checks, and the guardian's emergency
+    ///         disable works even though refused candidates were proposed and a malicious one was installed. Existing
+    ///         allocations, swaps and LP exits keep working throughout.
+    function test_PA_auth_installLifecycleAndSpoofedModule() public {
+        uint256 id = _allocate(curator, keyA, c1, 50_000 ether);
+
+        // (15)
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.AuthModuleRetired.selector, address(auth)));
         vault.setAuthModule(address(auth));
         assertEq(vault.authModule(), address(auth));
 
-        uint256 id = _allocate(curator, keyA, c1, 50_000 ether);
-        vm.prank(owner);
-        vault.setAuthModule(hookA);
-        ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c1, 1000 ether);
-        vm.prank(curator);
-        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.NotAuthModule.selector, address(auth)));
-        auth.activateDirect(r);
-        _swap(keyA, true, 1000 ether, id);
+        // (16)
         ICuratorAuthorization m2 = _deployAuth(vault);
         vm.prank(owner);
         vault.setAuthModule(address(m2));
-        assertTrue(vault.isConsumer(hookA));
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.AuthModuleRetired.selector, address(auth)));
+        vault.setAuthModule(address(auth));
+
+        // Refused candidates are proposed; then a malicious module that gives both answers is installed. (18)
+        _installRefused(hookA);
+        _installRefused(address(_deployAuth(IBenchVault(deployCode(VAULT_JSON, abi.encode(manager, owner, c0, c1))))));
+        MaliciousAuthModule mal = new MaliciousAuthModule(ISharedCommitmentVault(address(vault)));
+        vm.prank(owner);
+        vault.setAuthModule(address(mal));
+        assertEq(vault.authModule(), address(mal), "the check accepts a spoofed module");
+        ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c1, 1000 ether);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.CuratorNotRegistered.selector, stranger));
+        mal.forge(r, stranger, 0);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.StaleGeneration.selector, curator, 7, 0));
+        mal.forge(r, curator, 7);
+
+        // (17) emergency disable, then attempts to reinstate.
+        vm.prank(guardian);
+        vault.setAuthModule(address(0));
+        assertEq(vault.authModule(), address(0));
+        address[3] memory old = [address(mal), address(m2), address(auth)];
+        for (uint256 i; i < old.length; ++i) {
+            vm.prank(owner);
+            vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.AuthModuleRetired.selector, old[i]));
+            vault.setAuthModule(old[i]);
+        }
+        ICuratorAuthorization m3 = _deployAuth(vault);
+        vm.prank(guardian);
+        vm.expectRevert(ISharedCommitmentVault.GuardianCannotIncreaseRisk.selector);
+        vault.setAuthModule(address(m3));
         vm.prank(curator);
-        uint256 id2 = m2.activateDirect(r);
-        _swap(keyA, true, 500 ether, id2);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.NotAuthModule.selector, address(m2)));
+        m2.activateDirect(r);
+
+        _swap(keyA, true, 1000 ether, id);
+        vm.prank(lp);
+        (,,, uint256 req) = vault.redeem(500 ether, 0, 0, lp, true);
+        vault.processQueue(5);
+        if (req != 0) {
+            vm.prank(lp);
+            vault.claim(req);
+        }
+
+        vm.prank(owner);
+        vault.setAuthModule(address(m3)); // resuming means a new, reviewed module
+        vm.prank(curator);
+        uint256 id3 = m3.activateDirect(r);
+        _swap(keyA, true, 500 ether, id3);
         _assertAccounting();
     }
 
@@ -1035,11 +1169,25 @@ contract ProductionArtifactSecurityTest is Test {
         assertEq(deployed.code.length, vm.getDeployedCode(artifact).length, string.concat(artifact, ": code"));
     }
 
+    /// @dev Asserts the refusal is exactly `InvalidAuthModule(m)`, that nothing was emitted, and that the installed
+    ///         module is unchanged.
     function _installRefused(address m) internal {
         address before = vault.authModule();
+        vm.recordLogs();
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InvalidAuthModule.selector, m));
         vault.setAuthModule(m);
+        assertEq(vm.getRecordedLogs().length, 0, "no event");
+        assertEq(vault.authModule(), before);
+    }
+
+    /// @dev `_installRefused` with a 3,000,000 gas limit, for candidates that burn all the gas they are given.
+    function _installRefusedWithGas(address m) internal {
+        address before = vault.authModule();
+        vm.prank(owner);
+        (bool ok, bytes memory ret) = address(vault).call{gas: 3_000_000}(abi.encodeCall(vault.setAuthModule, (m)));
+        assertFalse(ok);
+        assertEq(ret, abi.encodeWithSelector(ISharedCommitmentVault.InvalidAuthModule.selector, m));
         assertEq(vault.authModule(), before);
     }
 

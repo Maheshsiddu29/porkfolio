@@ -21,7 +21,7 @@ import {VaultLens} from "../../src/VaultLens.sol";
 import {CuratorAuthorization} from "../../src/CuratorAuthorization.sol";
 import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
-import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
+import {ISharedCommitmentVault, AUTH_MODULE_ID} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {AuthModeHook} from "../utils/AuthModeHook.sol";
 import {ClaimDonor} from "../utils/ClaimDonor.sol";
@@ -888,17 +888,19 @@ contract VaultHandler is Test {
     }
 
     /// @notice The owner offers a candidate that must be refused: a production-build module bound to another vault
-    ///         address, an address without code, the vault itself, the PoolManager, or the module installed now
-    ///         (installing it again). Every attempt must revert and change nothing (INV-M9).
+    ///         address, an address without code, the vault itself, the PoolManager, either consumer hook (its
+    ///         `vault()` names this vault, but it has no module identity), or the module installed now (installing it
+    ///         again). Every attempt must revert and change nothing (INV-M9).
     function moduleTryInstallInvalid(uint256 seed) external {
-        uint256 kind = seed % 5;
+        uint256 kind = seed % 6;
         address installed = vault.authModule();
-        if (kind == 4 && installed == address(0)) kind = 0;
+        if (kind == 5 && installed == address(0)) kind = 0;
         address cand;
         if (kind == 0) cand = deployCode(ProductionArtifacts.authModule(), abi.encode(address(uint160(seed | 1))));
         else if (kind == 1) cand = address(uint160(uint256(keccak256(abi.encode("no code", seed)))));
         else if (kind == 2) cand = address(vault);
         else if (kind == 3) cand = address(manager);
+        else if (kind == 4) cand = address((seed >> 8) % 2 == 0 ? keyA.hooks : keyB.hooks);
         else cand = installed;
         bytes32 before = _moduleSnap();
         vm.prank(owner);
@@ -1752,13 +1754,16 @@ contract VaultInvariantsTest is VaultTestBase {
         assertFalse(handler.timeRuleBroken());
     }
 
-    /// INV-M9: the installed module, if any, reports this vault from `vault()`, and no candidate that is not a fresh
-    /// module for this vault was ever accepted (another vault's module, no code, the vault, the PoolManager, or the
-    /// installed module a second time).
+    /// INV-M9: the installed module, if any, answers `authModuleId()` with AUTH_MODULE_ID and `vault()` with this
+    /// vault, and no candidate that is not a fresh module for this vault was ever accepted (another vault's module, no
+    /// code, the vault, the PoolManager, a consumer hook, or the installed module a second time).
     function invariant_installedModuleReportsVault() public view {
         assertFalse(handler.invalidModuleInstalled());
         address m = vault.authModule();
-        if (m != address(0)) assertEq(address(CuratorAuthorization(m).vault()), address(vault));
+        if (m != address(0)) {
+            assertEq(CuratorAuthorization(m).authModuleId(), AUTH_MODULE_ID);
+            assertEq(address(CuratorAuthorization(m).vault()), address(vault));
+        }
     }
 
     function afterInvariant() public view {

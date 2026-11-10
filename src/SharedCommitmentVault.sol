@@ -12,7 +12,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 
-import {ISharedCommitmentVault} from "./interfaces/ISharedCommitmentVault.sol";
+import {ISharedCommitmentVault, AUTH_MODULE_ID} from "./interfaces/ISharedCommitmentVault.sol";
 import {IVaultState} from "./interfaces/IVaultState.sol";
 
 /// @title SharedCommitmentVault
@@ -116,9 +116,10 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 /// generation". The vault trusts it for nothing else: registration, restriction, generation, hook, pool, pair,
 /// direction, floors, capacity, ceiling, admission, exposure caps and deadline are all checked here. The module holds
 /// no assets and is not involved in `exchange`, cancellation, release or any LP path, so disabling or replacing it
-/// (`setAuthModule`) affects only the creation of new allocations. The vault calls the module once, read-only, when
-/// the owner installs it (to read `vault()`), and never otherwise. A compromised module can do at most what every
-/// registered, unrestricted curator could do together: reserve within their ceilings and every vault-side limit.
+/// (`setAuthModule`) affects only the creation of new allocations. The vault calls a module only when the owner
+/// installs it, read-only, to read `authModuleId()` and `vault()`; never otherwise. Those answers catch mistakes, not
+/// malice. A compromised module can do at most what every registered, unrestricted curator could do together:
+/// reserve within their ceilings and every vault-side limit.
 ///
 /// Not implemented here: rolling-window flow limits (the flow window is a fixed epoch; see `FLOW_WINDOW`),
 /// path-independent cumulative pricing, epoch-based expiry of commitments, transferable share tokens, and any
@@ -1034,17 +1035,26 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      Resuming after a disable therefore means deploying a new module; to stop new allocations temporarily
     ///      instead, lower the vault-scope exposure caps (`setRiskLimit`), deregister curators or pause.
     ///
-    ///      Installation check. A non-zero `module` must answer `vault()` with exactly this vault's address, or the
-    ///      call reverts with `InvalidAuthModule`. The vault reads it with one `staticcall`, so the candidate cannot
-    ///      change any state. The check fails closed when the address has no code (the call returns no data), when
-    ///      the contract has no such getter or its getter reverts, when it returns fewer than 32 bytes, and when the
-    ///      first returned word is not this address with clean upper bits. Only the first 32 bytes of the answer
-    ///      are copied. All remaining gas is forwarded, so a candidate that burns gas makes this transaction fail.
-    ///      This catches deployment mistakes such as a module built for another vault, a wrong address or an
-    ///      unrelated contract. It does not prove the module is safe: a malicious contract can return this address
-    ///      and do anything else. Code review, source verification and the owner's governance process are still
-    ///      required; what a module can do once installed is bounded by `reserveFor`'s checks. This is the only
-    ///      call from the vault to a module.
+    ///      Installation check. A non-zero `module` must answer two read-only questions, or the call reverts with
+    ///      `InvalidAuthModule` and nothing changes:
+    ///        1. `authModuleId()` must return exactly `AUTH_MODULE_ID`, the fixed value that says "this contract is
+    ///           meant to be a Porkfolio vault authorization module". This refuses contracts that happen to have a
+    ///           `vault()` getter naming this vault but are something else, such as the consumer hooks.
+    ///        2. `vault()` must return exactly this vault's address, so a module built for another vault is refused.
+    ///      Each answer is read with a `staticcall`, so the candidate cannot change any state. The second call is
+    ///      made only if the first answer was right. A call passes only if it succeeds, returns at least 32 bytes,
+    ///      and its first 32-byte word equals the expected value; only that first word is copied and any extra
+    ///      bytes are ignored. So the check fails closed when the address has no code (the call succeeds with no
+    ///      data), when the contract lacks the function (its dispatcher reverts, or a fallback answers with the
+    ///      wrong word or too few bytes), when the getter reverts, and when an address comes back with dirty upper
+    ///      bits. All remaining gas is forwarded, so a candidate that burns gas makes this transaction fail.
+    ///
+    ///      What the check is for. It catches configuration mistakes: a wrong address, a module for another vault,
+    ///      a hook, the PoolManager, the vault itself, or another contract. It does not prove the module is safe or
+    ///      that it is the reviewed code: anyone can deploy a contract that returns both expected answers and does
+    ///      anything else. Checking the deployed runtime code against a reproducible build, and the owner's
+    ///      governance review, are still required. What any installed module can do is bounded by `reserveFor`'s
+    ///      checks. These two calls are the only calls from the vault to a module.
     ///
     ///      Nothing else changes: existing allocations stay consumable, cancellable and releasable; swaps, LP
     ///      deposits, redemptions, queue processing and claims never involve the module; flow usage, exposure
@@ -1054,14 +1064,23 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     function setAuthModule(address module) external {
         _authorize(module == address(0));
         if (module != address(0)) {
+            bytes32 id = AUTH_MODULE_ID;
             bool ok;
             assembly ("memory-safe") {
-                // Calldata is the 4-byte selector of `vault()` (0xfbfa77cf), stored in the last 4 bytes of the
-                // scratch word at 0x00, so it starts at offset 28. The answer's first word overwrites that word.
-                mstore(0x00, 0xfbfa77cf)
+                // Each call sends a 4-byte selector, stored in the last 4 bytes of the scratch word at 0x00 (so it
+                // starts at offset 28), and copies at most 32 bytes of the answer back into that same word.
+                // `success`, `returndatasize()` and the word are read only after the call returns (Yul evaluates
+                // arguments right to left, so the call is its own statement). Checking `success` matters: a failed
+                // call also copies its revert data into the word. Checking the size matters: a short answer would
+                // leave bytes of the selector in the word.
+                mstore(0x00, 0x31b014a1) // authModuleId()
                 let success := staticcall(gas(), module, 28, 4, 0x00, 0x20)
-                // Read returndatasize and the answer only after the call: Yul evaluates arguments right to left.
-                ok := and(success, and(gt(returndatasize(), 31), eq(mload(0x00), address())))
+                ok := and(success, and(gt(returndatasize(), 31), eq(mload(0x00), id)))
+                if ok {
+                    mstore(0x00, 0xfbfa77cf) // vault()
+                    success := staticcall(gas(), module, 28, 4, 0x00, 0x20)
+                    ok := and(success, and(gt(returndatasize(), 31), eq(mload(0x00), address())))
+                }
             }
             if (!ok) revert InvalidAuthModule(module);
         }

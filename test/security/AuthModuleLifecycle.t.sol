@@ -182,9 +182,9 @@ contract AuthModuleLifecycleTest is AuthTestBase {
         vault.cancelAllocation(id); // and cancellable
     }
 
-    /// @notice A module built for another vault cannot be installed here (its `vault()` names the other vault). Even
-    ///         if it could, it would gain nothing: it only ever calls its own vault, which rejects it, and it refuses
-    ///         instructions naming this vault.
+    /// @notice A module built for another vault cannot be installed here: its identity is right but its `vault()` names
+    ///         the other vault. Even if it could, it would gain nothing: it only ever calls its own vault, which
+    ///         rejects it, and it refuses instructions naming this vault.
     function test_ML_moduleForAnotherVaultRefused() public {
         SharedCommitmentVault v2 = new SharedCommitmentVault(manager, owner, c0, c1);
         CuratorAuthorization foreign = _deployAuth(v2);
@@ -219,15 +219,16 @@ contract AuthModuleLifecycleTest is AuthTestBase {
         }
     }
 
-    /// @notice The vault calls a module exactly once: a read-only `vault()` call when the owner installs it. It never
-    ///         calls the installed or the retired module on deposits, redemptions, queue processing, claims, swaps,
-    ///         cancellation, release, configuration, or when a module is retired. The two expectations on `m2` together
-    ///         say "one call in total, and that call is `vault()`".
+    /// @notice The vault calls a module only when the owner installs it: one read-only `authModuleId()` call and one
+    ///         read-only `vault()` call. It never calls the installed or the retired module on deposits, redemptions,
+    ///         queue processing, claims, swaps, cancellation, release, configuration, or when a module is retired. The
+    ///         three expectations on `m2` together say "two calls in total: `authModuleId()` once and `vault()` once".
     function test_ML_vaultCallsModuleOnlyAtInstall() public {
         uint256 id = _allocate(keyA, c1, 50_000 ether);
         CuratorAuthorization m2 = _deployAuth(vault);
         vm.expectCall(address(auth), bytes(""), 0);
-        vm.expectCall(address(m2), bytes(""), 1);
+        vm.expectCall(address(m2), bytes(""), 2);
+        vm.expectCall(address(m2), abi.encodeWithSignature("authModuleId()"), 1);
         vm.expectCall(address(m2), abi.encodeWithSignature("vault()"), 1);
         _swap(keyA, true, 1000 ether, id);
         _depositShares(makeAddr("lpX"), 1000 ether);

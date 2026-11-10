@@ -46,3 +46,8 @@ interface IBenchVault is IVaultState {
 interface IBenchHook {
     function configurePool(PoolKey calldata key, uint160 priceX96, uint24 a, uint24 b) external;
 }
+
+/// @notice The public `vault()` getter that the hooks and the authorization module share.
+interface IBenchVaultBound {
+    function vault() external view returns (address);
+}

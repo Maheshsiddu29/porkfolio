@@ -116,7 +116,16 @@ interface ICuratorAuthorization {
     function MAX_VALIDITY_WINDOW() external view returns (uint64);
 
     /// @notice The vault this module reserves capacity in. Fixed at deployment.
+    /// @dev The vault requires this to be its own address before installing the module (`setAuthModule`).
     function vault() external view returns (IVaultState);
+
+    /// @notice Says what kind of contract this is: always AUTH_MODULE_ID (declared in ISharedCommitmentVault.sol).
+    /// @dev The vault requires this value before installing a module (`setAuthModule`), so that a contract built for
+    ///      another purpose, such as a consumer hook, is refused even if it has a `vault()` getter naming the vault.
+    ///      It is a fixed public label, not a secret and not a proof of what the code does: a malicious contract can
+    ///      return it too.
+    /// @return The constant AUTH_MODULE_ID.
+    function authModuleId() external pure returns (bytes32);
 
     /// @notice The EIP-712 digest a curator signs for `auth`.
     function hashAuthorization(AllocationAuthorization calldata auth) external view returns (bytes32);

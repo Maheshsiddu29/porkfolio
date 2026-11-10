@@ -7,7 +7,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 import {ICuratorAuthorization} from "./interfaces/ICuratorAuthorization.sol";
-import {ISharedCommitmentVault} from "./interfaces/ISharedCommitmentVault.sol";
+import {ISharedCommitmentVault, AUTH_MODULE_ID} from "./interfaces/ISharedCommitmentVault.sol";
 import {IVaultState} from "./interfaces/IVaultState.sol";
 
 /// @title CuratorAuthorization
@@ -73,6 +73,10 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 /// set the nonce bit (reverting if already set), then call the vault, which is the last action. There is no
 /// reentrancy guard: the only foreign code that runs is the wallet inside `staticcall`, and the vault never calls
 /// this contract.
+///
+/// Installation. Before installing this contract, the vault reads `authModuleId()` and `vault()` and requires
+/// AUTH_MODULE_ID and its own address. That only shows the contract claims to be a module for that vault; any
+/// contract can make the same claim, so the deployed code must still be checked against the reviewed build.
 ///
 /// The contract has no owner, no upgrade mechanism and no way to clear a nonce. It is retired by the vault owner
 /// installing another module or by the guardian disabling it in the vault (`setAuthModule`); the vault never
@@ -187,6 +191,11 @@ contract CuratorAuthorization is ICuratorAuthorization, EIP712 {
     ///      one 32-byte word; `bool` as 0 or 1, `bytes32` for the pool id).
     function hashAuthorization(AllocationAuthorization calldata auth) external view returns (bytes32) {
         return _digest(auth);
+    }
+
+    /// @inheritdoc ICuratorAuthorization
+    function authModuleId() external pure returns (bytes32) {
+        return AUTH_MODULE_ID;
     }
 
     /// @inheritdoc ICuratorAuthorization

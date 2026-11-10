@@ -3,7 +3,7 @@ pragma solidity 0.8.26;
 
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
 import {CuratorAuthorization} from "../../src/CuratorAuthorization.sol";
-import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
+import {ISharedCommitmentVault, AUTH_MODULE_ID} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
 import {AuthTestBase} from "../utils/AuthTestBase.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
@@ -13,10 +13,12 @@ import {MaliciousAuthModule} from "../utils/MaliciousAuthModule.sol";
 /// @notice The vault's installation check on `setAuthModule`, repeated and idempotent changes, and replay of
 ///         instructions signed for a module that has since been retired. Runs on the production builds
 ///         (`VaultTestBase`).
-/// @dev The installation check accepts a candidate only if a `staticcall` to `vault()` succeeds and its first 32
-///      returned bytes are exactly this vault's address. These tests show both sides of that: every malformed or
-///      wrong answer is refused without changing anything, and a contract that gives the right answer is accepted
-///      whether or not it is a real module. The second half is why the check does not replace review.
+/// @dev The installation check accepts a candidate only if a `staticcall` to `authModuleId()` returns AUTH_MODULE_ID
+///      and then a `staticcall` to `vault()` returns this vault's address, each as the first 32 bytes of a successful
+///      answer of at least 32 bytes. These tests show both sides of that: every contract that is not a module for
+///      this vault, and every malformed or wrong answer, is refused without changing anything; and a contract that
+///      gives both right answers is accepted whether or not it is the reviewed module. The second half is why the
+///      check does not replace verifying the deployed code.
 contract ModuleInstallationTest is AuthTestBase {
     ModuleCandidate internal cand;
 
@@ -29,46 +31,64 @@ contract ModuleInstallationTest is AuthTestBase {
     // Installation check
     // ------------------------------------------------------------------
 
-    /// @notice Every candidate that does not answer `vault()` with this vault is refused with `InvalidAuthModule`,
-    ///         and the refusal changes nothing: the installed module stays installed, is not retired, and keeps
-    ///         working. Covers no code, a contract without the getter, the vault itself, the PoolManager, a module
-    ///         for another vault, and a getter that reverts, returns nothing, returns 31 bytes, returns zero, or
-    ///         returns this address with dirty upper bits.
-    function test_MI_refusesCandidatesThatDoNotReportThisVault() public {
+    /// @notice Every candidate that is not a module for this vault is refused with `InvalidAuthModule`, and the
+    ///         refusal changes nothing: the installed module stays installed, is not retired, and keeps working.
+    ///         Covers no code, an empty contract, contracts without the identity getter (a wallet, the vault itself,
+    ///         the PoolManager, the lens, and both consumer hooks, whose `vault()` getter does name this vault), a
+    ///         real module for another vault, and candidates whose `authModuleId()` or `vault()` reverts, returns
+    ///         nothing, returns 31 bytes, echoes the call data, or returns a wrong word.
+    function test_MI_refusesCandidatesThatAreNotModulesForThisVault() public {
         SharedCommitmentVault v2 = new SharedCommitmentVault(manager, owner, c0, c1);
-        address[6] memory fixed_ = [
+        address empty = makeAddr("empty contract");
+        vm.etch(empty, hex"00"); // STOP: every call succeeds and returns no data
+        assertEq(address(hookA.vault()), address(vault), "the hooks name this vault");
+        assertEq(address(hookB.vault()), address(vault));
+        address[9] memory fixed_ = [
             makeAddr("no code"),
-            address(wallet), // a contract with functions but no `vault()` and no fallback
+            empty,
+            address(wallet), // a contract with functions but neither getter and no fallback
             address(vault),
             address(manager),
             address(_deployAuth(v2)), // the production module, built for another vault
-            address(lens)
+            address(lens),
+            address(hookA),
+            address(hookB)
         ];
         for (uint256 i; i < fixed_.length; ++i) {
             _expectInstallRefused(fixed_[i]);
         }
 
         bytes32 self = bytes32(uint256(uint160(address(vault))));
-        ModuleCandidate.Mode[4] memory modes = [
+        ModuleCandidate.Mode[5] memory modes = [
             ModuleCandidate.Mode.Revert,
             ModuleCandidate.Mode.Empty,
             ModuleCandidate.Mode.Short,
+            ModuleCandidate.Mode.Echo,
             ModuleCandidate.Mode.Answer
         ];
-        bytes32[4] memory words = [self, self, self, bytes32(0)];
+        // vault() malformed or wrong, identity right
+        bytes32[5] memory vaultWords = [self, self, self, self, bytes32(0)];
         for (uint256 i; i < modes.length; ++i) {
-            cand.set(modes[i], words[i]);
+            cand.set(modes[i], vaultWords[i]);
             _expectInstallRefused(address(cand));
         }
         cand.set(ModuleCandidate.Mode.Answer, self | bytes32(uint256(1) << 160)); // dirty upper bits
         _expectInstallRefused(address(cand));
 
+        // identity malformed or wrong, vault() right
+        cand.set(ModuleCandidate.Mode.Answer, self);
+        bytes32[5] memory idWords = [AUTH_MODULE_ID, AUTH_MODULE_ID, AUTH_MODULE_ID, AUTH_MODULE_ID, self];
+        for (uint256 i; i < modes.length; ++i) {
+            cand.setId(modes[i], idWords[i]);
+            _expectInstallRefused(address(cand));
+        }
+
         assertEq(vault.authModule(), address(auth), "nothing was installed or retired");
         _signAndActivate(_authz(signer, keyA, c1, 1000 ether), keyA);
     }
 
-    /// @notice Exactly one 32-byte value is accepted: this vault's address, left-padded with zeros. Any other word is
-    ///         refused. This is the whole decision rule of the check.
+    /// @notice With the identity right, exactly one `vault()` word is accepted: this vault's address, left-padded with
+    ///         zeros.
     function testFuzz_MI_onlyThisVaultsAddressIsAccepted(bytes32 w) public {
         bytes32 self = bytes32(uint256(uint160(address(vault))));
         vm.assume(w != self);
@@ -80,16 +100,48 @@ contract ModuleInstallationTest is AuthTestBase {
         assertEq(vault.authModule(), address(cand));
     }
 
-    /// @notice Two answers that only the call-success and length checks reject.
-    ///         (1) A candidate that reverts with exactly this vault's address as revert data. A failed call still
-    ///         copies its revert data into the output buffer, so without the success check it would read as the
-    ///         right answer.
-    ///         (2) A 31-byte answer, for a vault deployed at an address ending in 0xcf. The vault writes the selector
-    ///         0xfbfa77cf into the word it later reads, so the 32nd byte of that word is left over as 0xcf; without
-    ///         the length check, 31 correct bytes plus that leftover byte would read as the right answer.
-    function test_MI_failedOrShortAnswerCannotPassAsTheVault() public {
-        cand.set(ModuleCandidate.Mode.RevertWord, bytes32(uint256(uint160(address(vault)))));
+    /// @notice With `vault()` right, exactly one identity word is accepted: AUTH_MODULE_ID.
+    function testFuzz_MI_onlyTheModuleIdentityIsAccepted(bytes32 w) public {
+        vm.assume(w != AUTH_MODULE_ID);
+        cand.set(ModuleCandidate.Mode.Answer, bytes32(uint256(uint160(address(vault)))));
+        cand.setId(ModuleCandidate.Mode.Answer, w);
         _expectInstallRefused(address(cand));
+        cand.setId(ModuleCandidate.Mode.Answer, AUTH_MODULE_ID);
+        vm.prank(owner);
+        vault.setAuthModule(address(cand));
+        assertEq(vault.authModule(), address(cand));
+    }
+
+    /// @notice A fallback that gives one fixed word to every call cannot pass, whichever word it is: the two
+    ///         questions need two different answers. Only a contract that tells the two selectors apart and answers
+    ///         each correctly passes (see `test_MI_bothRightAnswersAreNotProofOfAModule`).
+    function test_MI_oneAnswerForEverySelectorIsRefused() public {
+        cand.setSameAnswerForAll(true);
+        cand.set(ModuleCandidate.Mode.Answer, bytes32(uint256(uint160(address(vault)))));
+        _expectInstallRefused(address(cand));
+        cand.set(ModuleCandidate.Mode.Answer, AUTH_MODULE_ID);
+        _expectInstallRefused(address(cand));
+        cand.set(ModuleCandidate.Mode.Echo, bytes32(0));
+        _expectInstallRefused(address(cand));
+    }
+
+    /// @notice Answers that only the call-success and length checks reject.
+    ///         (1) A candidate that reverts with exactly the expected word as revert data, for either question. A
+    ///         failed call still copies its revert data into the output buffer, so without the success check it
+    ///         would read as the right answer.
+    ///         (2) A 31-byte `vault()` answer, for a vault deployed at an address ending in 0xcf. The vault writes the
+    ///         selector 0xfbfa77cf into the word it later reads, so the 32nd byte of that word is left over as 0xcf;
+    ///         without the length check, 31 correct bytes plus that leftover byte would read as the right answer.
+    ///         The same cannot be staged for the identity, whose last byte (0x0a) differs from the last byte of
+    ///         its selector (0xa1); its length check is still required for the same reason.
+    function test_MI_failedOrShortAnswerCannotPass() public {
+        bytes32 self = bytes32(uint256(uint160(address(vault))));
+        cand.set(ModuleCandidate.Mode.RevertWord, self);
+        _expectInstallRefused(address(cand));
+        cand.set(ModuleCandidate.Mode.Answer, self);
+        cand.setId(ModuleCandidate.Mode.RevertWord, AUTH_MODULE_ID);
+        _expectInstallRefused(address(cand));
+        cand.setId(ModuleCandidate.Mode.Answer, AUTH_MODULE_ID);
 
         address at = address(uint160(0xC0FFEE) << 136 | 0xcf);
         deployCodeTo(ProductionArtifacts.VAULT, abi.encode(manager, owner, c0, c1), at);
@@ -102,56 +154,67 @@ contract ModuleInstallationTest is AuthTestBase {
         SharedCommitmentVault(at).setAuthModule(address(cand)); // the full answer is accepted: the setup is sound
     }
 
-    /// @notice A candidate whose getter burns all gas makes the owner's transaction fail and pay for it; nothing
-    ///         changes. The vault forwards all but 1/64 of its gas to the candidate, and the remaining 1/64 is enough
-    ///         to revert with the precise error.
+    /// @notice A candidate whose getter burns all gas, on either question, makes the owner's transaction fail and pay
+    ///         for it; nothing changes. The vault forwards all but 1/64 of its gas to the candidate, and the remaining
+    ///         1/64 is enough to revert with the precise error.
     function test_MI_gasBurningCandidateOnlyCostsTheOwner() public {
+        bytes32 self = bytes32(uint256(uint160(address(vault))));
         cand.set(ModuleCandidate.Mode.BurnGas, bytes32(0));
-        vm.prank(owner);
-        (bool ok, bytes memory ret) =
-            address(vault).call{gas: 3_000_000}(abi.encodeCall(vault.setAuthModule, (address(cand))));
-        assertFalse(ok);
-        assertEq(ret, abi.encodeWithSelector(ISharedCommitmentVault.InvalidAuthModule.selector, address(cand)));
-        assertEq(vault.authModule(), address(auth));
+        _expectInstallRefusedWithGas(address(cand), 3_000_000);
+        cand.set(ModuleCandidate.Mode.Answer, self);
+        cand.setId(ModuleCandidate.Mode.BurnGas, bytes32(0));
+        _expectInstallRefusedWithGas(address(cand), 3_000_000);
     }
 
-    /// @notice The limit of the check. Any contract that answers `vault()` with this address is accepted: a getter
-    ///         followed by extra data, a contract that is not a module at all, a malicious module, and even a
-    ///         consumer hook, whose own `vault()` getter names this vault. Installed by mistake, the hook creates
-    ///         nothing (it has no code that calls `reserveFor`), new allocations stop until the owner installs a
-    ///         real module, and the hook's consumer role is unaffected when it is retired as a module. A malicious
-    ///         module is bounded by `reserveFor` (`AuthModuleLifecycle.t.sol`). Review of what is installed stays the
-    ///         owner's job.
-    function test_MI_rightAnswerIsNotProofOfAModule() public {
+    /// @notice The identity is asked first, and `vault()` only if the identity was right. A hook therefore receives
+    ///         one call and is refused there; a real module receives exactly the two calls.
+    function test_MI_identityAskedFirst() public {
+        vm.expectCall(address(hookA), bytes(""), 1);
+        vm.expectCall(address(hookA), abi.encodeWithSignature("authModuleId()"), 1);
+        _expectInstallRefused(address(hookA));
+
+        CuratorAuthorization m2 = _deployAuth(vault);
+        assertEq(m2.authModuleId(), AUTH_MODULE_ID); // before the counted expectations below
+        vm.expectCall(address(m2), bytes(""), 2);
+        vm.expectCall(address(m2), abi.encodeWithSignature("authModuleId()"), 1);
+        vm.expectCall(address(m2), abi.encodeWithSignature("vault()"), 1);
+        vm.prank(owner);
+        vault.setAuthModule(address(m2));
+    }
+
+    /// @notice The limit of the check. Any contract that gives both right answers is accepted: one whose answers
+    ///         carry extra data, a fallback that tells the two selectors apart, and a malicious module. The check
+    ///         cannot tell any of them from the reviewed module. What a malicious module can do once installed is
+    ///         bounded by `reserveFor` (`AuthModuleLifecycle.t.sol`); the guardian can always disable it, and it is
+    ///         then retired for good. Verifying the deployed code stays the owner's job.
+    function test_MI_bothRightAnswersAreNotProofOfAModule() public {
         uint256 id = _allocate(keyA, c1, 50_000 ether);
         bytes32 self = bytes32(uint256(uint160(address(vault))));
 
         cand.set(ModuleCandidate.Mode.Long, self);
+        cand.setId(ModuleCandidate.Mode.Long, AUTH_MODULE_ID);
         vm.prank(owner);
-        vault.setAuthModule(address(cand)); // first word is right; the rest is ignored
+        vault.setAuthModule(address(cand)); // first words are right; the rest is ignored
+        assertEq(vault.authModule(), address(cand), "a contract that is not a module passes");
+
         MaliciousAuthModule mal = new MaliciousAuthModule(ISharedCommitmentVault(address(vault)));
         vm.prank(owner);
         vault.setAuthModule(address(mal));
-        assertEq(vault.authModule(), address(mal));
+        assertEq(vault.authModule(), address(mal), "a malicious module passes");
+        ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c1, 1000 ether);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.CuratorNotRegistered.selector, address(this)));
+        mal.forge(r, address(this), 0); // still bounded by the vault's own checks
 
+        vm.prank(guardian);
+        vault.setAuthModule(address(0));
+        assertEq(vault.authModule(), address(0));
         vm.prank(owner);
-        vault.setAuthModule(address(hookA));
-        assertEq(vault.authModule(), address(hookA), "a hook passes the check");
-        ICuratorAuthorization.AllocationAuthorization memory a = _authz(signer, keyA, c1, 1000 ether);
-        bytes memory sig = _sign(signerKey, a);
-        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.NotAuthModule.selector, address(auth)));
-        _activate(a, keyA, sig);
-        _swap(keyA, true, 1000 ether, id); // its consumer role and existing allocations are untouched
-
-        CuratorAuthorization m2 = _installAuth(vault); // retires the hook as a module
-        assertTrue(vault.isConsumer(address(hookA)), "still a registered consumer");
-        _swap(keyA, true, 1000 ether, id);
-        vm.prank(relayer);
-        uint256 id2 = m2.activate(a, keyA, _signWith(m2, signerKey, a));
-        _swap(keyA, true, 500 ether, id2);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.AuthModuleRetired.selector, address(mal)));
+        vault.setAuthModule(address(mal));
+        _swap(keyA, true, 1000 ether, id); // existing allocations are untouched throughout
     }
 
-    /// @notice A retired module is refused even though it still answers `vault()` correctly: the retired list is
+    /// @notice A retired module is refused even though it still gives both right answers: the retired list is
     ///         checked independently of the installation check.
     function test_MI_retiredModulePassesCheckButIsRefused() public {
         CuratorAuthorization m2 = _installAuth(vault);
@@ -285,6 +348,16 @@ contract ModuleInstallationTest is AuthTestBase {
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InvalidAuthModule.selector, m));
         vault.setAuthModule(m);
+        assertEq(vault.authModule(), before);
+    }
+
+    /// @dev Same as `_expectInstallRefused`, with a gas limit so a gas-burning candidate ends in reasonable time.
+    function _expectInstallRefusedWithGas(address m, uint256 gasLimit) internal {
+        address before = vault.authModule();
+        vm.prank(owner);
+        (bool ok, bytes memory ret) = address(vault).call{gas: gasLimit}(abi.encodeCall(vault.setAuthModule, (m)));
+        assertFalse(ok);
+        assertEq(ret, abi.encodeWithSelector(ISharedCommitmentVault.InvalidAuthModule.selector, m));
         assertEq(vault.authModule(), before);
     }
 }
