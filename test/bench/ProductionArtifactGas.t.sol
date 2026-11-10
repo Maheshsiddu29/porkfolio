@@ -452,6 +452,96 @@ contract ProductionArtifactGasTest is Test {
         console2.log("BENCH swap hookB (router+PM+hook+vault):", g - gasleft());
     }
 
+    // ------------------------------------------------------------------
+    // Cumulative pricing: directions, steady state, splitting, failures, quotes
+    // ------------------------------------------------------------------
+
+    /// @notice HookA selling asset1 and HookB selling asset0: the other direction of each hook's first swap.
+    function test_bench_swap_otherDirections() public {
+        uint256 idA = _allocate(curator, keyA, c0, 100_000 ether);
+        uint256 idB = _allocate(curator, keyB, c1, 100_000 ether);
+        uint256 g = gasleft();
+        _swap(keyA, false, -1000 ether, abi.encode(idA));
+        console2.log("BENCH swap hookA asset1 -> asset0 (first in direction):", g - gasleft());
+        g = gasleft();
+        _swap(keyB, true, -1000 ether, abi.encode(idB));
+        console2.log("BENCH swap hookB asset0 -> asset1 (first on pool):", g - gasleft());
+    }
+
+    /// @notice Second swap in the same direction one minute later: the pricing slot already holds a non-zero state and
+    ///         decay is applied (non-zero to non-zero write), as for most swaps on a live pool.
+    function test_bench_swap_steadyState() public {
+        uint256 idA = _allocate(curator, keyA, c1, 100_000 ether);
+        uint256 idB = _allocate(curator, keyB, c0, 100_000 ether);
+        _swap(keyA, true, -1000 ether, abi.encode(idA));
+        _swap(keyB, false, -1000 ether, abi.encode(idB));
+        vm.warp(vm.getBlockTimestamp() + 60);
+        uint256 g = gasleft();
+        _swap(keyA, true, -1000 ether, abi.encode(idA));
+        console2.log("BENCH swap hookA, second in direction after 60 s:", g - gasleft());
+        g = gasleft();
+        _swap(keyB, false, -1000 ether, abi.encode(idB));
+        console2.log("BENCH swap hookB, second on pool after 60 s:", g - gasleft());
+    }
+
+    /// @notice What a splitter pays: one swap of 1,000 against ten separate swaps of 100 (each its own transaction
+    ///         under --isolate). The pricing gives the split no discount, so all of the difference is overhead.
+    function test_bench_split_tenPieces() public {
+        for (uint256 h; h < 2; ++h) {
+            PoolKey memory key = h == 0 ? keyA : keyB;
+            uint256 id = _allocate(curator, key, c1, 100_000 ether);
+            uint256 snap = vm.snapshotState();
+            uint256 g = gasleft();
+            _swap(key, true, -1000 ether, abi.encode(id));
+            uint256 one = g - gasleft();
+            vm.revertToState(snap);
+            g = gasleft();
+            for (uint256 i; i < 10; ++i) {
+                _swap(key, true, -100 ether, abi.encode(id));
+            }
+            uint256 ten = g - gasleft();
+            console2.log(h == 0 ? "BENCH split hookA, 1 x 1,000:" : "BENCH split hookB, 1 x 1,000:", one);
+            console2.log(h == 0 ? "BENCH split hookA, 10 x 100:" : "BENCH split hookB, 10 x 100:", ten);
+        }
+    }
+
+    /// @notice Gas burned by refused swaps, measured to the revert: Hook B's cap (refused in the hook before any
+    ///         vault call), the hookData minimum (refused after pricing, before minting), and the vault floor
+    ///         (refused inside `exchange`, after the hook has minted the input claims).
+    function test_bench_failureCosts() public {
+        uint256 idB = _allocate(curator, keyB, c1, 100_000 ether);
+        uint256 idA = _allocate(curator, keyA, c1, 100_000 ether);
+        uint256 g = gasleft();
+        try this.swapExternal(keyB, true, -20_000 ether, abi.encode(idB)) {} catch {}
+        console2.log("BENCH failed swap: hookB cap:", g - gasleft());
+        g = gasleft();
+        try this.swapExternal(keyA, true, -1000 ether, abi.encode(idA, uint256(1000 ether))) {} catch {}
+        console2.log("BENCH failed swap: hookData minimum:", g - gasleft());
+        vm.prank(hookOwner);
+        IBenchHookA(hookA).configurePool(keyA, PRICE_1_1_X96 * 2, 500, 5000, 10_000 ether, 10_000 ether, 1 hours);
+        g = gasleft();
+        try this.swapExternal(keyA, true, -1000 ether, abi.encode(idA)) {} catch {}
+        console2.log("BENCH failed swap: vault floor:", g - gasleft());
+    }
+
+    /// @notice The hooks' quote views (what a router calls to set a minimum output).
+    function test_bench_quotes() public {
+        uint256 g = gasleft();
+        IBenchHookA(hookA).quote(keyA, true, 1000 ether);
+        console2.log("BENCH quote hookA:", g - gasleft());
+        g = gasleft();
+        IBenchHookB(hookB).quote(keyB, true, 1000 ether);
+        console2.log("BENCH quote hookB (asset0 in, inverse):", g - gasleft());
+        g = gasleft();
+        IBenchHookB(hookB).quote(keyB, false, 1000 ether);
+        console2.log("BENCH quote hookB (asset1 in):", g - gasleft());
+    }
+
+    /// @dev External so that a refused swap can be measured with try/catch.
+    function swapExternal(PoolKey memory key, bool zeroForOne, int256 amountSpecified, bytes memory hookData) external {
+        _swap(key, zeroForOne, amountSpecified, hookData);
+    }
+
     /// @notice Reference with no vault code at all: same router and amount on a hookless concentrated-liquidity
     ///         pool. Any change in this number between two runs comes from the PoolManager or router build, not
     ///         from the vault, which makes it a control for the swap benchmarks above.
