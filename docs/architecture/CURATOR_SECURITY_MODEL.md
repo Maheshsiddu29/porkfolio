@@ -4,7 +4,8 @@
 cancellation and the shared close path in the vault (`PHASE1B2_1_REPORT.md`), with the differences listed in §1.1.
 Step 1B-2.3 implemented signed authorizations, nonces, `reserveFor` and the authorization module
 (`PHASE1B2_3_REPORT.md`), with the differences listed in §2.1. Step 1B-2.4 added the module installation check and
-the signature time rules (§2.2; operator-facing summary in `AUTH_SECURITY_RELEASE_NOTES.md`). Where §2–§4 below still
+the signature time rules (§2.2; operator-facing summary in `AUTH_SECURITY_RELEASE_NOTES.md`); the follow-up hardening
+added the module identity question to that check (§2.2). Where §2–§4 below still
 describe the proposal, §2.1 and §2.2 say what was built. It assumes architecture B from
 `MODULAR_RISK_ENGINE.md` (vault + `CuratorAuthorization` module). It refines `PHASE1B_CURATOR_AUTH.md` and
 `CURATOR_REVOCATION.md`, and where they differ this document wins. Changes to earlier decisions are listed in §9.
@@ -88,7 +89,7 @@ live allocations, contrary to "deregistration leaves allocations consumable" (`C
 | `reserveFor(req, curator, generation, signed)`; vault skips the generation for direct calls | `reserveFor(req, curator, generation)`; the vault always compares it; on the direct path the module passes the generation it reads from the vault in the same call | one rule in the vault; no flag a module could misuse |
 | Direct path consumes a nonce | same: one bitmap per curator for both paths | an instruction a curator signed and then submits itself activates once, whichever path is first; retries are idempotent |
 | `setAuthModule(0)` by the guardian, owner may set any value | owner may install any module that was never installed; guardian may only set zero; **the module being replaced or disabled is retired for good** | keeps a retired module's unused signatures from ever regaining authority; a reversible stop of new allocations exists already (vault-scope exposure cap, deregistration, pause) |
-| — | 1B-2.3: the vault never calls the module (no `module.vault()` check at install). **Changed in 1B-2.4:** one read-only `vault()` call at installation (§2.2) | no call cycle either way; the install check costs 91 bytes and leaves 2,052 bytes of EIP-170 margin |
+| — | 1B-2.3: the vault never calls the module (no `module.vault()` check at install). **Changed in 1B-2.4:** one read-only `vault()` call at installation (§2.2). **Changed again by the install hardening:** `authModuleId()` first, then `vault()`, both read-only, at installation only | no call cycle either way; vault runtime 22,049 B, 2,527 B of EIP-170 margin (`AUTH_MODULE_INSTALL_HARDENING_REPORT.md`) |
 
 Order of an activation as built: signed-field checks (vault field, time-field consistency, clock, pool id, hook,
 direction) → signature (`SignatureChecker`) → nonce bit → `vault.reserveFor` (last action). Any revert undoes the nonce
@@ -96,11 +97,15 @@ bit.
 
 ### 2.2 Added in 1B-2.4 (SOURCE, `PHASE1B2_4_REPORT.md`)
 
-**Installation check.** `setAuthModule(m)` with `m != 0` makes one `staticcall` to `m.vault()` and reverts
-`InvalidAuthModule(m)` unless the call succeeds, returns at least 32 bytes, and the first word is exactly this vault's
-address. Installing the module that is already installed reverts `AuthModuleRetired` (installing retires the current
-module first). The check catches deployment mistakes only: a malicious module, or any contract with a `vault()` getter
-naming this vault (both hooks have one), passes it. Review and code verification stay mandatory.
+**Installation check.** `setAuthModule(m)` with `m != 0` makes a `staticcall` to `m.authModuleId()` and, only if
+that answer is right, a `staticcall` to `m.vault()`. It reverts `InvalidAuthModule(m)` unless each call succeeds,
+returns at least 32 bytes, and its first word is exactly the expected value: `AUTH_MODULE_ID`
+(`keccak256("porkfolio.vault.auth-module.v1")`, declared in `ISharedCommitmentVault.sol`) and this vault's address.
+The identity question was added after 1B-2.4 found that both hooks, which have a `vault()` getter naming this vault,
+passed the `vault()`-only check; they are now refused. Installing the module that is already installed reverts
+`AuthModuleRetired` (installing retires the current module first). The check catches configuration mistakes only: a
+malicious module can return both answers and passes it (`test_PA_auth_installLifecycleAndSpoofedModule`). Review and
+code verification stay mandatory (`MODULE_INSTALLATION_CHECKLIST.md`).
 
 **Time rules for signed instructions** (no change to the EIP-712 type, domain or digest):
 
@@ -236,8 +241,8 @@ deregistered curator's unexpired allocation is **not** releasable by a stranger,
     else is affected.
   - OZ 5.0.2 `SignatureChecker` copies the return data, so the submitter pays for memory expansion (SOURCE). Relayers
     should set a gas limit.
-- The module → vault call is the module's last action. The vault calls a module only once, read-only, when the owner
-  installs it (`vault()` through `staticcall`, 1B-2.4); never on any other path.
+- The module → vault call is the module's last action. The vault calls a module only when the owner installs it:
+  `authModuleId()` and then `vault()`, each through `staticcall`; never on any other path.
 
 ## 6. Gas (OBSERVED, prototype, `optimizer_runs` 200; `MODULAR_RISK_ENGINE.md` §8.2)
 

@@ -207,3 +207,19 @@ test/bench/security.sh       # now also fails if the vault's EIP-170 margin drop
 
 Docs: `docs/architecture/PHASE1B2_4_REPORT.md`, `docs/architecture/AUTH_SECURITY_RELEASE_NOTES.md`,
 `docs/architecture/PHASE1B3_PLAN.md`.
+
+## Authorization module installation hardening
+
+```bash
+forge test --match-contract ModuleInstallationTest -vv
+forge test --match-test "test_PA_auth_(moduleInstallCheck|installLifecycleAndSpoofedModule)" -vv
+```
+
+- **Identity check.** Before installing a module, `setAuthModule` asks `authModuleId()` (must be `AUTH_MODULE_ID`)
+  and then `vault()` (must be this vault). The hooks, which have a `vault()` getter naming the vault, are now
+  refused. A malicious contract can still give both answers: the check catches configuration mistakes, and code
+  verification stays mandatory (`MODULE_INSTALLATION_CHECKLIST.md`).
+- **Size.** `reserveFor` reads each request field once (−550 bytes, same checks); with the identity check the vault
+  is 22,049 B (EIP-170 margin 2,527 B). Allocation paths are 2,138 gas cheaper; swaps and LP paths unchanged.
+
+Docs: `docs/architecture/AUTH_MODULE_INSTALL_HARDENING_REPORT.md`, `docs/architecture/MODULE_INSTALLATION_CHECKLIST.md`.

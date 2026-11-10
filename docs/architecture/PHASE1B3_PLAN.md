@@ -6,7 +6,7 @@ measured in `TRADE_SPLITTING.md`. Labels: SOURCE, MODEL, PROPOSAL, DECISION (nee
 
 ## 0. Constraints that shape the plan
 
-- **The vault does not change.** It has 2,052 bytes of EIP-170 margin (`PHASE1B2_4_REPORT.md` §2). Every change lives
+- **The vault does not change.** It has 2,527 bytes of EIP-170 margin (`AUTH_MODULE_INSTALL_HARDENING_REPORT.md`). Every change lives
   in the hooks (7,174 and 6,884 bytes, about 17 KB of margin each). The plan's first gate checks that the vault's
   runtime code hash is unchanged; if any step turns out to need vault code, stop and report.
 - **Hooks stay untrusted by the vault.** The vault keeps enforcing `max(vault floor, curator floor)` on exact amounts

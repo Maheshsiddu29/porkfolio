@@ -1,18 +1,21 @@
 # Porkfolio — Authorization Security Release Notes
 
 **Status: local only. Nothing is deployed, and no audit or formal verification is claimed.** These notes cover the
-authorization path as of branch `phase-1b-2-4-auth-security-closure`: `SharedCommitmentVault.setAuthModule` and
-`reserveFor`, and `CuratorAuthorization`. They are written for the people who will operate the vault (owner, guardian,
-curators, relayers). The phase report (`PHASE1B2_4_REPORT.md`) has the evidence. Labels: SOURCE (read from the code),
+authorization path as of branch `fix/auth-module-install-hardening` (built on `phase-1b-2-4-auth-security-closure`):
+`SharedCommitmentVault.setAuthModule` and `reserveFor`, and `CuratorAuthorization`. They are written for the people
+who will operate the vault (owner, guardian, curators, relayers). The evidence is in `PHASE1B2_4_REPORT.md` and, for
+the module identity check, `AUTH_MODULE_INSTALL_HARDENING_REPORT.md`. The installation procedure is
+`MODULE_INSTALLATION_CHECKLIST.md`. Labels: SOURCE (read from the code),
 OBSERVED (a test asserts it; the test is named), ESTIMATE.
 
 ## 1. What changed in this release
 
 | Area | Before | Now | Evidence |
 |---|---|---|---|
-| Installing a module | the owner could install any address never installed before | the candidate must also answer `vault()` with this vault's address (one `staticcall`), or the call reverts `InvalidAuthModule` | `ModuleInstallation.t.sol`, `test_PA_auth_moduleInstallCheck` |
+| Installing a module | the owner could install any address never installed before | the candidate must also answer `authModuleId()` with `AUTH_MODULE_ID` and then `vault()` with this vault's address (two `staticcall`s), or the call reverts `InvalidAuthModule` | `ModuleInstallation.t.sol`, `test_PA_auth_moduleInstallCheck` |
 | Installing the installed module again | accepted; left it installed **and** marked retired | reverts `AuthModuleRetired`, nothing changes | `test_MI_repeatedInstallAndIdempotentDisable` |
-| Calls from the vault to a module | none | exactly one, read-only, at installation | `test_ML_vaultCallsModuleOnlyAtInstall` |
+| Calls from the vault to a module | none | two, read-only, at installation only (`authModuleId()`, then `vault()` if the first answer was right) | `test_ML_vaultCallsModuleOnlyAtInstall`, `test_MI_identityAskedFirst` |
+| `CuratorAuthorization` interface | — | new `authModuleId()` (pure; returns `AUTH_MODULE_ID`) | `test_MI_identityAskedFirst` |
 | Signed instruction times | only `validAfter <= now <= deadline` | also `validAfter <= deadline`, `deadline - validAfter <= 1 day`, `deadline < expiry`, all checked before the clock and before any wallet code | `ActivationSafety.t.sol`, `test_PA_auth_signatureTimeRules` |
 | Direct path times | vault checks `deadline >= now` and expiry | the module also requires `deadline < expiry` | `test_ST_inconsistentTimesRefusedAtAnyTime` |
 | EIP-712 type, domain, digest | — | **unchanged** (`test_CA_digestFixedVector` still matches the value computed outside Solidity) | |
@@ -43,16 +46,19 @@ raise. Assets already finalized for queued redemptions (W_a) are never reachable
 from N_a, so admission never lets an allocation take them. Queued shares that are not yet finalized still bear the
 losses.
 
-**What the installation check changes, and what it does not.** It catches mistakes: a module built for another vault,
-a wrong address, an address without code, an unrelated contract, a contract that reverts. It cannot detect a
-malicious or incorrect module, because the module itself answers the question. Any contract can return this vault's
-address from `vault()`. The tests show that a malicious module, a contract that is not a module at all, and **both
-consumer hooks** pass it (the hooks have a public `vault()` getter that names this vault; `test_MI_rightAnswerIsNotProofOfAModule`).
-A hook installed by mistake creates nothing (it has no code that calls `reserveFor`) and keeps its consumer role when
-replaced, but new allocations stop until a real module is installed. Before installing a module, the owner must still:
+**What the installation check changes, and what it does not.** It catches configuration mistakes: a module built for
+another vault, a wrong address, an address without code, an EOA, the PoolManager, the vault itself, either consumer
+hook, or any other contract that does not answer `authModuleId()` with `AUTH_MODULE_ID` (OBSERVED:
+`test_PA_auth_moduleInstallCheck`, `test_MI_refusesCandidatesThatAreNotModulesForThisVault`). The hooks have a
+public `vault()` getter that names this vault, so a check of `vault()` alone accepted them; the identity question
+refuses them. The check cannot detect a malicious or incorrect module, because the candidate answers both questions
+itself: `AUTH_MODULE_ID` is a public label, not a secret, and a malicious module returns it and this vault's address
+like the real one does (OBSERVED: `test_MI_bothRightAnswersAreNotProofOfAModule`,
+`test_PA_auth_installLifecycleAndSpoofedModule`). Before installing a module, the owner must still follow
+`MODULE_INSTALLATION_CHECKLIST.md`, in particular:
 
-1. verify the deployed runtime code against a reviewed build (`MAINNET_READINESS.md` X-2);
-2. confirm `vault()`, `eip712Domain()` and `MAX_VALIDITY_WINDOW()` read back as expected;
+1. verify the deployed runtime code against a reviewed, independently reproduced build (`MAINNET_READINESS.md` X-2);
+2. confirm `authModuleId()`, `vault()`, `eip712Domain()` and `MAX_VALIDITY_WINDOW()` read back as expected;
 3. route the installation through the timelock (it is a loosening action).
 
 A module that is installed is bounded by `reserveFor`: at worst it equals every registered, unrestricted curator
@@ -88,7 +94,7 @@ curator stopped expecting it.
 
 **Module-compromise runbook.** (1) Guardian: `setAuthModule(address(0))`; new allocations stop in that transaction.
 (2) Guardian: `release` the suspicious allocations, identified from the module's `Activated` and the vault's
-`AllocationCreated` events. (3) Owner: deploy, verify and install a new module (§2). (4) Curators: re-sign.
+`AllocationCreated` events. (3) Owner: deploy, verify and install a new module (§2, `MODULE_INSTALLATION_CHECKLIST.md`). (4) Curators: re-sign.
 
 ## 4. Nonce and generation exhaustion
 
@@ -186,13 +192,14 @@ The window is a fixed epoch, `floor(block.timestamp / 86,400)`, aligned to 00:00
 - **Unrelated to `MAX_VALIDITY_WINDOW`.** Both happen to be one day; they bound different things (flow per epoch,
   and how long a signed instruction is usable).
 - A rolling window or a decaying bucket would remove the boundary burst. Neither is implemented; a rolling window costs
-  vault bytecode, and the vault has 2,052 bytes of EIP-170 margin left.
+  vault bytecode, and the vault has 2,527 bytes of EIP-170 margin left.
 
 ## 8. Checklist for operators
 
 - [ ] Owner is a multisig; installing a module, registering hooks and curators, and every loosening action go through
       a timelock.
-- [ ] Before installing a module: code verified against the reviewed build; `vault()`, `eip712Domain()` and
+- [ ] Before installing a module: every item of `MODULE_INSTALLATION_CHECKLIST.md` §2, including code verified
+      against an independently reproduced build and `authModuleId()`, `vault()`, `eip712Domain()` and
       `MAX_VALIDITY_WINDOW()` read back.
 - [ ] Guardian runbooks for module compromise (§3) and for a curator whose generation is exhausted (§4).
 - [ ] Curators sign windows that open now, one day at most, with `expiry` at least the minimum lifetime after the
