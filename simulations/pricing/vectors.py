@@ -131,7 +131,7 @@ def scenario_a(rng, n):
     h.configure(A_CFG, 0)
     now, rows = 0, []
     for _ in range(n):
-        dt = rng.choice([0, 0, 1, 60, 900, 3600, 7200])
+        dt = rng.choice([0, 0, 1, 60, 300, 900, 1800])
         now += dt
         zfo = rng.random() < 0.5
         amt = rng.randrange(1, 6000) * E18 + rng.randrange(0, E18)
@@ -152,7 +152,7 @@ def scenario_b(rng, n):
     h.configure(B_CFG, 0)
     now, rows = 0, []
     for _ in range(n):
-        dt = rng.choice([0, 0, 1, 60, 900, 3600])
+        dt = rng.choice([0, 0, 1, 60, 300, 900, 1800])
         now += dt
         zfo = rng.random() < 0.55
         amt = rng.randrange(1, 4000) * E18 + rng.randrange(0, E18)
@@ -184,6 +184,8 @@ def main():
     fee, cost, inv, xmax, dec = (fee_vectors(rng), cost_vectors(rng), inverse_vectors(rng),
                                  max_position_vectors(rng), decay_vectors(rng))
     sa, sb = scenario_a(rng, 60), scenario_b(rng, 60)
+    # Both scenarios run against allocations that expire after one day.
+    assert sum(r[0] for r in sa) < 80_000 and sum(r[0] for r in sb) < 80_000
     codes_b = [r[4] for r in sb]
     assert codes_b.count(OK) >= 20 and codes_b.count(FLOOR) >= 3, codes_b  # the scenario must exercise both
 
