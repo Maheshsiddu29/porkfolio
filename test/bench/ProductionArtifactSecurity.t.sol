@@ -1055,6 +1055,129 @@ contract ProductionArtifactSecurityTest is Test {
     ISharedCommitmentVault.RiskScope internal constant CURATOR = ISharedCommitmentVault.RiskScope.Curator;
     ISharedCommitmentVault.RiskScope internal constant VAULT = ISharedCommitmentVault.RiskScope.Vault;
 
+    // ------------------------------------------------------------------
+    // Cumulative pricing on the production hooks
+    // ------------------------------------------------------------------
+
+    /// @notice One swap of 8,000 versus ten separate transactions of 800, from the same state, on both production
+    ///         hooks: identical total output and identical pricing state (1:1 reference, so conversions are exact).
+    function test_PA_pricing_splitInvariance() public {
+        uint256 idA = _allocate(curator, keyA, c1, 100_000 ether);
+        uint256 idB = _allocate(curator, keyB, c1, 100_000 ether);
+        for (uint256 h; h < 2; ++h) {
+            PoolKey memory key = h == 0 ? keyA : keyB;
+            uint256 id = h == 0 ? idA : idB;
+            uint256 snap = vm.snapshotState();
+            uint256 single = uint256(int256(_swap(key, true, 8000 ether, id).amount1()));
+            bytes32 state = _pricingState();
+            vm.revertToState(snap);
+            uint256 split;
+            for (uint256 i; i < 10; ++i) {
+                split += uint256(int256(_swap(key, true, 800 ether, id).amount1()));
+            }
+            assertEq(split, single);
+            assertEq(_pricingState(), state);
+            vm.revertToState(snap);
+        }
+        _assertAccounting();
+    }
+
+    /// @notice Hook B's cap is aggregate on the production build: with depth 200,000 and a 1% cap (|x| <= 992.56),
+    ///         5,000 of input executes neither as one swap nor as ten swaps; the pieces stop at the cap.
+    function test_PA_pricing_aggregateCap() public {
+        vm.prank(hookOwner);
+        IBenchHookB(hookB).configurePool(keyB, PRICE_1_1_X96, 200_000 ether, 10_000, 1 hours);
+        uint256 id = _allocate(curator, keyB, c1, 100_000 ether);
+        _swapReverts(
+            keyB,
+            true,
+            5000 ether,
+            id,
+            abi.encodeWithSignature(
+                "ImpactBoundExceeded(int256,uint256)", int256(0), uint256(992_561_958_002_172_866_945)
+            )
+        );
+        _swap(keyB, true, 500 ether, id);
+        int256 x = IBenchHookB(hookB).positionOf(keyB);
+        _swapReverts(
+            keyB,
+            true,
+            500 ether,
+            id,
+            abi.encodeWithSignature("ImpactBoundExceeded(int256,uint256)", x, uint256(992_561_958_002_172_866_945))
+        );
+        _assertAccounting();
+    }
+
+    /// @notice Round trips on the production hooks. Hook B would pay back what it charged, less the exact-input
+    ///         remainder, and the vault's 1:1 floor refuses that reverse leg (it is priced above the reference). Hook A
+    ///         keeps a level per direction, so its round trip pays both fees.
+    function test_PA_pricing_roundTrips() public {
+        uint256 b01 = _allocate(curator, keyB, c1, 100_000 ether);
+        uint256 b10 = _allocate(curator, keyB, c0, 100_000 ether);
+        uint256 got = uint256(int256(_swap(keyB, true, 3000 ether, b01).amount1()));
+        uint256 back = IBenchHookB(hookB).quote(keyB, false, got);
+        assertLe(back, 3000 ether);
+        assertGe(back, 3000 ether - 1);
+        _swapReverts(
+            keyB, false, got, b10, abi.encodeWithSelector(ISharedCommitmentVault.PriceBelowFloor.selector, got, back)
+        );
+
+        uint256 a01 = _allocate(curator, keyA, c1, 100_000 ether);
+        uint256 a10 = _allocate(curator, keyA, c0, 100_000 ether);
+        uint256 out = uint256(int256(_swap(keyA, true, 3000 ether, a01).amount1()));
+        uint256 ret = uint256(int256(_swap(keyA, false, out, a10).amount0()));
+        assertLt(ret, out);
+        assertLt(out, 3000 ether);
+        assertEq(IBenchHookA(hookA).flowLevel(keyA, true), 3000 ether);
+        assertEq(IBenchHookA(hookA).flowLevel(keyA, false), out);
+        _assertAccounting();
+    }
+
+    /// @notice The 64-byte hookData minimum on the production build: equal to the quote passes, one more reverts.
+    function test_PA_pricing_hookDataMinimum() public {
+        uint256 id = _allocate(curator, keyA, c1, 100_000 ether);
+        uint256 q = IBenchHookA(hookA).quote(keyA, true, 1000 ether);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                hookA,
+                IHooks.beforeSwap.selector,
+                abi.encodeWithSignature("InsufficientOutput(uint256,uint256)", q, q + 1),
+                abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+            )
+        );
+        _swapWithData(keyA, true, 1000 ether, abi.encode(id, q + 1));
+        assertEq(uint256(int256(_swapWithData(keyA, true, 1000 ether, abi.encode(id, q)).amount1())), q);
+    }
+
+    function _pricingState() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                IBenchHookA(hookA).flowLevel(keyA, true),
+                IBenchHookA(hookA).flowLevel(keyA, false),
+                IBenchHookB(hookB).positionOf(keyB)
+            )
+        );
+    }
+
+    function _swapWithData(PoolKey memory key, bool zeroForOne, uint256 amountIn, bytes memory hookData)
+        internal
+        returns (BalanceDelta d)
+    {
+        vm.prank(trader);
+        d = router.swap(
+            key,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: -int256(amountIn),
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            hookData
+        );
+    }
+
     function _setLimit(ISharedCommitmentVault.RiskScope scope, address account, Currency c, uint256 cap, uint16 bps)
         internal
     {
