@@ -965,56 +965,63 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         if (!record.registered) revert CuratorNotRegistered(curator);
         if (generation != record.generation) revert StaleGeneration(curator, generation, record.generation);
         if (req.deadline < block.timestamp) revert InstructionExpired(req.deadline);
-        if (!isConsumer[req.consumer]) revert ConsumerNotRegistered(req.consumer);
-        if (address(req.key.hooks) != req.consumer) revert ConsumerMismatch(req.consumer, address(req.key.hooks));
+        // Fields of `req` used more than once are copied to locals where they are first read. Every calldata read
+        // of a struct field also re-checks that the value fits its type, so reading each field once keeps the code
+        // smaller; the checks and their order are the same.
+        address consumer = req.consumer;
+        if (!isConsumer[consumer]) revert ConsumerNotRegistered(consumer);
+        if (address(req.key.hooks) != consumer) revert ConsumerMismatch(consumer, address(req.key.hooks));
         if (!(req.key.currency0 == asset0) || !(req.key.currency1 == asset1)) revert UnsupportedPair();
 
         // The key's currencies are the pair (checked above), so this also checks that currencyOut is one of them.
-        Currency currencyIn = _otherAsset(req.currencyOut);
+        Currency out = req.currencyOut;
+        Currency currencyIn = _otherAsset(out);
 
         // The direction must be configured and not halted, and the curator floor may only be at least as strict as
         // the vault floor. Zero curator floors are therefore always rejected (vault floor >= 1).
-        uint160 vaultFloor = _vaultFloor(req.currencyOut);
-        if (req.minInPerOutX96 < vaultFloor) revert FloorBelowVaultMinimum(req.minInPerOutX96, vaultFloor);
+        uint160 vaultFloor = _vaultFloor(out);
+        uint160 curatorFloor = req.minInPerOutX96;
+        if (curatorFloor < vaultFloor) revert FloorBelowVaultMinimum(curatorFloor, vaultFloor);
 
-        if (req.maxOut == 0) revert ZeroAmount();
-        if (req.maxOut > MAX_AMOUNT) revert AmountTooLarge();
-        if (req.expiry <= block.timestamp) revert InvalidExpiry();
-        if (req.expiry > block.timestamp + MAX_HORIZON) {
-            revert HorizonExceeded(req.expiry, block.timestamp + MAX_HORIZON);
+        uint128 maxOut = req.maxOut;
+        if (maxOut == 0) revert ZeroAmount();
+        if (maxOut > MAX_AMOUNT) revert AmountTooLarge();
+        uint64 expiry = req.expiry;
+        if (expiry <= block.timestamp) revert InvalidExpiry();
+        if (expiry > block.timestamp + MAX_HORIZON) {
+            revert HorizonExceeded(expiry, block.timestamp + MAX_HORIZON);
         }
 
-        Currency out = req.currencyOut;
         uint256 curatorAvailable = _sub0(curatorCeiling[curator][out], curatorReserved[curator][out]);
-        if (req.maxOut > curatorAvailable) revert CuratorCeilingExceeded(req.maxOut, curatorAvailable);
+        if (maxOut > curatorAvailable) revert CuratorCeilingExceeded(maxOut, curatorAvailable);
 
         uint256 eligible = _eligibleBacking(out);
         uint256 admissible = _admissible(out, eligible);
-        if (req.maxOut > admissible) revert InsufficientBacking(req.maxOut, admissible);
-        _checkExposure(RiskScope.Hook, req.consumer, out, hookReserved[req.consumer][out], req.maxOut, eligible);
-        _checkExposure(RiskScope.Curator, curator, out, curatorReserved[curator][out], req.maxOut, eligible);
-        _checkExposure(RiskScope.Vault, address(0), out, reserved[out], req.maxOut, eligible);
+        if (maxOut > admissible) revert InsufficientBacking(maxOut, admissible);
+        _checkExposure(RiskScope.Hook, consumer, out, hookReserved[consumer][out], maxOut, eligible);
+        _checkExposure(RiskScope.Curator, curator, out, curatorReserved[curator][out], maxOut, eligible);
+        _checkExposure(RiskScope.Vault, address(0), out, reserved[out], maxOut, eligible);
 
-        reserved[out] += req.maxOut;
-        curatorReserved[curator][out] += req.maxOut;
-        hookReserved[req.consumer][out] += req.maxOut;
+        reserved[out] += maxOut;
+        curatorReserved[curator][out] += maxOut;
+        hookReserved[consumer][out] += maxOut;
 
         allocationId = nextAllocationId++;
         PoolId poolId = req.key.toId();
         _allocations[allocationId] = Allocation({
             curator: curator,
-            consumer: req.consumer,
-            expiry: req.expiry,
+            consumer: consumer,
+            expiry: expiry,
             released: false,
             poolId: poolId,
             currencyIn: currencyIn,
             currencyOut: out,
-            maxOut: req.maxOut,
+            maxOut: maxOut,
             consumed: 0,
-            minInPerOutX96: req.minInPerOutX96
+            minInPerOutX96: curatorFloor
         });
 
-        emit AllocationCreated(allocationId, curator, req.consumer, poolId, out, req.maxOut, req.expiry, req.nonce);
+        emit AllocationCreated(allocationId, curator, consumer, poolId, out, maxOut, expiry, req.nonce);
     }
 
     /// @notice Install, replace or disable the authorization module, the only caller `reserveFor` accepts.
