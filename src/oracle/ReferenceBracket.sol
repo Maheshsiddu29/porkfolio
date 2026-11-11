@@ -24,6 +24,8 @@ library ReferenceBracket {
     /// @dev Bound on `|e|` that keeps every product below 2^256 for answers below 2^128 (see `pairBracket`).
     int256 internal constant MAX_DECIMAL_SHIFT = 30;
 
+    /// @notice A decimal shift beyond `MAX_DECIMAL_SHIFT` in either direction.
+    error DecimalShiftOutOfRange(int256 shift);
     /// @notice The live sources' brackets do not intersect.
     error ReferenceDivergence(uint256 low, uint256 high);
     /// @notice The intersection's low end is zero, so it has no usable centre (a threshold of nearly 100%, or an
@@ -49,7 +51,7 @@ library ReferenceBracket {
     /// @param a1 Answer of the currency1/USD leg. Positive, below 2^128.
     /// @param d0 Threshold plus margin of leg 0, pips. Below 1e6.
     /// @param d1 Threshold plus margin of leg 1, pips. Below 1e6.
-    /// @param e Decimal shift, see above. `|e| <= 30`.
+    /// @param e Decimal shift, see above. `|e| <= 30`, else `DecimalShiftOutOfRange`.
     /// @return low Low end, Q64.96, rounded down.
     /// @return high High end, Q64.96, rounded up.
     function pairBracket(uint256 a0, uint256 a1, uint256 d0, uint256 d1, int256 e)
@@ -61,12 +63,16 @@ library ReferenceBracket {
         uint256 xHi = a0 * (PIPS + d0);
         uint256 yLo = a1 * (PIPS - d1);
         uint256 yHi = a1 * (PIPS + d1);
+        if (e > MAX_DECIMAL_SHIFT || e < -MAX_DECIMAL_SHIFT) revert DecimalShiftOutOfRange(e);
         if (e >= 0) {
-            // e <= 30 was checked at configuration.
+            // 0 <= e <= 30: the cast is safe.
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint256 m = FixedPoint96.Q96 * 10 ** uint256(e);
             low = FullMath.mulDiv(xLo, m, yHi);
             high = FullMath.mulDivRoundingUp(xHi, m, yLo);
         } else {
+            // -30 <= e < 0: the cast is safe.
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint256 s = 10 ** uint256(-e);
             low = FullMath.mulDiv(xLo, FixedPoint96.Q96, yHi * s);
             high = FullMath.mulDivRoundingUp(xHi, FixedPoint96.Q96, yLo * s);

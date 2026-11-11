@@ -28,7 +28,10 @@ import {CumulativePricing} from "../hooks/CumulativePricing.sol";
 ///      each side (see `ask` and `bid`), every accepted trade is priced on the vault's side of `P` by at least
 ///      `minEdge`, whatever the state. Consequences: floors pivoted at `P` accept every quote; a closed cycle of trades
 ///      at a fixed `P` loses at least `2 * minEdge` of its volume; a hook that adds its own fee on top of `h` keeps
-///      the property.
+///      the property. In band-edge mode (`Config.bandEdge`) the same holds with the edge measured from the whole
+///      uncertainty band `P * (1 +- uncertainty)` instead of from `P`, which is what a vault that independently refuses
+///      prices inside that band needs. The vault's own edge must then stay strictly inside `minEdge`: with equal edges
+///      only the vault floor's rounding is left as margin, and that rounding can refuse a quote.
 ///
 ///      Trust. The functions are pure and check nothing about the caller. The reference price and the vault state
 ///      are inputs; the hook that uses this library must read the vault state in the same call that settles, and must
@@ -165,6 +168,8 @@ library InventoryPricing {
         inventoryAfter = extPositionForCost(t, core.depth, core.priceX96, core.cap);
         // t >= ceil(C(i)) - 1, so inventoryAfter >= i - 1; an input too small to buy one unit leaves it at or below i.
         if (inventoryAfter <= i) revert ZeroOutput();
+        // Positive by the check above, and below 2^128 (both ends lie within the cap or the trade's input).
+        // forge-lint: disable-next-line(unsafe-typecast)
         amountOut = uint256(inventoryAfter - i);
     }
 
@@ -194,10 +199,13 @@ library InventoryPricing {
         inventoryAfter = core.inventory - int256(moved);
         // forge-lint: disable-next-line(unsafe-typecast)
         if (inventoryAfter < -int256(core.cap)) revert InventoryLimit(core.inventory, core.cap);
+        // priced <= moved < 2^127: the cast is safe.
         // forge-lint: disable-next-line(unsafe-typecast)
+        int256 pricedSigned = int256(priced);
         int256 gross = extCost(core.inventory, core.depth, core.priceX96, core.cap)
-            - extCost(core.inventory - int256(priced), core.depth, core.priceX96, core.cap);
+            - extCost(core.inventory - pricedSigned, core.depth, core.priceX96, core.cap);
         // gross >= 0 (C is increasing) and below 2^225: the product with (1e6 - h) fits.
+        // forge-lint: disable-next-line(unsafe-typecast)
         uint256 paid = uint256(gross) * (PIPS - core.halfSpread) / PIPS;
         if (paid <= 1) revert ZeroOutput();
         amountOut = paid - 1;

@@ -181,6 +181,7 @@ contract PriceRiskAdapter {
         if (block.timestamp > validUntil) return (false, 0, 0, validUntil);
         live = true;
         // a0, a1 in (0, 2^128) checked by _read.
+        // forge-lint: disable-next-line(unsafe-typecast)
         (low, high) = ReferenceBracket.pairBracket(uint256(a0), uint256(a1), s.deviation0, s.deviation1, shift);
     }
 
@@ -221,7 +222,11 @@ contract PriceRiskAdapter {
             address(s.leg0) == address(0) || address(s.leg1) == address(0) || s.deviation0 >= PIPS
                 || s.deviation1 >= PIPS || s.maxAge0 == 0 || s.maxAge1 == 0
         ) revert InvalidConfig();
-        e = int256(uint256(s.leg1.decimals()) + decimals1) - int256(uint256(s.leg0.decimals()) + decimals0);
+        // Each sum is below 2 * 255: the casts are safe.
+        uint256 up = uint256(s.leg1.decimals()) + decimals1;
+        uint256 down = uint256(s.leg0.decimals()) + decimals0;
+        // forge-lint: disable-next-line(unsafe-typecast)
+        e = int256(up) - int256(down);
         if (e > ReferenceBracket.MAX_DECIMAL_SHIFT || e < -ReferenceBracket.MAX_DECIMAL_SHIFT) revert InvalidConfig();
     }
 }
