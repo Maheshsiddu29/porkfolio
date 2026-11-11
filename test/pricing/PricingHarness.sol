@@ -63,6 +63,14 @@ contract PricingHarness {
         return InventoryPricing.ask(core, netIn);
     }
 
+    function bid(InventoryPricing.Core memory core, uint256 moved, uint256 priced)
+        external
+        pure
+        returns (uint256, int256)
+    {
+        return InventoryPricing.bid(core, moved, priced);
+    }
+
     function pairBracket(uint256 a0, uint256 a1, uint256 d0, uint256 d1, int256 e)
         external
         pure

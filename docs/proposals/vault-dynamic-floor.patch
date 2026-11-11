@@ -1,0 +1,279 @@
+diff --git a/src/SharedCommitmentVault.sol b/src/SharedCommitmentVault.sol
+index 247c668..84dc3ad 100644
+--- a/src/SharedCommitmentVault.sol
++++ b/src/SharedCommitmentVault.sol
+@@ -14,6 +14,7 @@ import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
+ 
+ import {ISharedCommitmentVault, AUTH_MODULE_ID} from "./interfaces/ISharedCommitmentVault.sol";
+ import {IVaultState} from "./interfaces/IVaultState.sol";
++import {IPriceRiskAdapter} from "./interfaces/IPriceRiskAdapter.sol";
+ 
+ /// @title SharedCommitmentVault
+ /// @notice A two-asset reserve that several Uniswap v4 hooks can sell from. LPs deposit both assets and receive
+@@ -238,6 +239,32 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+     /// @dev Modules that were installed and then replaced or disabled. A retired module can never be installed again.
+     mapping(address module => bool) internal _retiredAuthModule;
+ 
++    /// @notice Delay between proposing a price-risk adapter change and installing it. Gives LPs time to exit and the
++    ///         guardian time to cancel.
++    uint256 public constant ADAPTER_DELAY = 2 days;
++    /// @notice While a dynamic floor is active, how far the static floors may leave the market between them: their
++    ///         product may fall to (1 - 25%)^2 of the D14 minimum. The static floors then act as an outer circuit
++    ///         breaker; cycle-freedom at a fixed reference comes from the dynamic floors.
++    uint256 public constant MAX_STATIC_BAND_PIPS = 250_000;
++    uint256 internal constant _PIPS = 1_000_000;
++    /// @notice Source of the reference-derived dynamic floor. Zero: static floors only.
++    IPriceRiskAdapter public priceRiskAdapter;
++    /// @notice Extra edge, beyond the reference band, that the dynamic floor demands, pips. Guardian may only raise.
++    uint24 public dynamicEdgePips;
++    /// @notice Adapter proposed by the owner, installable once `pendingAdapterEta` has passed.
++    address public pendingPriceRiskAdapter;
++    /// @notice Earliest time the pending adapter change can execute; 0 when none is pending.
++    uint64 public pendingAdapterEta;
++
++    event PriceRiskAdapterProposed(address indexed adapter, uint256 eta);
++    event PriceRiskAdapterCancelled(address indexed adapter, address indexed by);
++    event PriceRiskAdapterSet(address indexed previous, address indexed adapter);
++    event DynamicEdgeSet(uint24 previous, uint24 edge, address indexed by);
++
++    error NoPendingAdapterChange();
++    error AdapterChangeNotReady(uint256 eta);
++    error InvalidDynamicEdge();
++
+     /// @dev Transient-storage (EIP-1153) slot of the reentrancy lock: keccak256 of
+     ///      "porkfolio.SharedCommitmentVault.reentrancyLock". Transient storage is cleared at the end of every
+     ///      transaction and rolled back with a revert, so the lock can never stay set by mistake.
+@@ -557,6 +584,11 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+         if (oppositeFloor != 0) {
+             // ceil(2^192 / oppositeFloor): the smallest floor in this direction that keeps the pair non-crossing.
+             uint256 requiredMinimum = FullMath.mulDivRoundingUp(FixedPoint96.Q96, FixedPoint96.Q96, oppositeFloor);
++            // With a dynamic floor active the static pair is an outer band, not a pivot.
++            if (address(priceRiskAdapter) != address(0)) {
++                uint256 keep = _PIPS - MAX_STATIC_BAND_PIPS;
++                requiredMinimum = FullMath.mulDivRoundingUp(requiredMinimum, keep * keep, _PIPS * _PIPS);
++            }
+             if (minInPerOutX96 < requiredMinimum) {
+                 revert InconsistentDirectionalFloors(minInPerOutX96, requiredMinimum);
+             }
+@@ -579,6 +611,63 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+         emit SellHaltedSet(currencyOut, halted, msg.sender);
+     }
+ 
++    /// @notice Propose installing, replacing or removing (zero) the price-risk adapter. Owner only.
++    /// @dev Takes effect through `executePriceRiskAdapter` after `ADAPTER_DELAY`. A new proposal replaces the pending one
++    ///      and restarts the delay.
++    /// @param adapter New adapter, or address(0) to return to static floors only.
++    function proposePriceRiskAdapter(address adapter) external onlyOwner {
++        pendingPriceRiskAdapter = adapter;
++        uint256 eta = block.timestamp + ADAPTER_DELAY;
++        // forge-lint: disable-next-line(unsafe-typecast) timestamps fit 64 bits for billions of years.
++        pendingAdapterEta = uint64(eta);
++        emit PriceRiskAdapterProposed(adapter, eta);
++    }
++
++    /// @notice Cancel the pending adapter change. Owner or guardian (cancelling never loosens anything).
++    function cancelPriceRiskAdapter() external {
++        _authorize(true);
++        if (pendingAdapterEta == 0) revert NoPendingAdapterChange();
++        emit PriceRiskAdapterCancelled(pendingPriceRiskAdapter, msg.sender);
++        pendingPriceRiskAdapter = address(0);
++        pendingAdapterEta = 0;
++    }
++
++    /// @notice Execute the pending adapter change once its delay has passed. Anyone may call.
++    /// @dev A new adapter must answer `currentReference` now, so a broken adapter cannot be installed. Removing the
++    ///      adapter requires the static floors to be D14-consistent again (or a direction unset), because without the
++    ///      dynamic floor they are once more the only price protection.
++    function executePriceRiskAdapter() external {
++        uint256 eta = pendingAdapterEta;
++        if (eta == 0) revert NoPendingAdapterChange();
++        if (block.timestamp < eta) revert AdapterChangeNotReady(eta);
++        address next = pendingPriceRiskAdapter;
++        if (next == address(0)) {
++            uint256 f0 = sellPolicy[asset0].minInPerOutX96;
++            uint256 f1 = sellPolicy[asset1].minInPerOutX96;
++            if (f0 != 0 && f1 != 0) {
++                uint256 need = FullMath.mulDivRoundingUp(FixedPoint96.Q96, FixedPoint96.Q96, f1);
++                if (f0 < need) revert InconsistentDirectionalFloors(f0, need);
++            }
++        } else {
++            IPriceRiskAdapter(next).currentReference();
++        }
++        emit PriceRiskAdapterSet(address(priceRiskAdapter), next);
++        priceRiskAdapter = IPriceRiskAdapter(next);
++        pendingPriceRiskAdapter = address(0);
++        pendingAdapterEta = 0;
++    }
++
++    /// @notice Set the extra edge the dynamic floor demands beyond the reference band. Owner any value below 10%;
++    ///         guardian may only raise it.
++    /// @param edge Pips.
++    function setDynamicEdge(uint24 edge) external {
++        if (edge >= _PIPS / 10) revert InvalidDynamicEdge();
++        uint24 previous = dynamicEdgePips;
++        _authorize(edge >= previous);
++        dynamicEdgePips = edge;
++        emit DynamicEdgeSet(previous, edge, msg.sender);
++    }
++
+     // ==================================================================
+     // LP deposits (proportional basket)
+     // ==================================================================
+@@ -1202,7 +1291,12 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+         // amountIn * 2^96 >= amountOut * max(f_v live now, f_c). amountOut < 2^127 and F < 2^160, so FullMath's
+         // 512-bit product cannot overflow and the result (< 2^191) fits; ceil makes the comparison exact.
+         // _effectiveFloor also reverts if this direction is unconfigured or halted.
+-        uint256 requiredIn = FullMath.mulDivRoundingUp(amountOut, _effectiveFloor(a), FixedPoint96.Q96);
++        uint256 floor = _effectiveFloor(a);
++        if (address(priceRiskAdapter) != address(0)) {
++            uint256 dynamicFloor = _dynamicFloor(a.currencyOut);
++            if (dynamicFloor > floor) floor = dynamicFloor;
++        }
++        uint256 requiredIn = FullMath.mulDivRoundingUp(amountOut, floor, FixedPoint96.Q96);
+         if (amountIn < requiredIn) revert PriceBelowFloor(amountIn, requiredIn);
+ 
+         uint256 backingIn = backing[cin];
+@@ -1427,6 +1521,23 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+         if (policy.halted) revert DirectionHalted(currencyOut);
+     }
+ 
++    /// @dev Dynamic floor for selling `currencyOut`, from the adapter's reference mid `P` and uncertainty `u`:
++    ///      selling asset1 needs at least `ceil(ceil(2^192 / P) * (1e6 + u + e) / 1e6)` raw asset0 per raw asset1;
++    ///      selling asset0 needs at least `ceil(P * (1e6 + u + e) / 1e6)` raw asset1 per raw asset0. So the vault never
++    ///      trades inside the band `P * (1 +- u)` the adapter's sources allow, plus edge `e`. The two floors' product is
++    ///      at least `2^192 * (1 + u + e)^2`, so at any fixed reference they are D14-consistent by construction. The
++    ///      adapter is called with a staticcall before any effect; if it reverts, the swap reverts (fail closed).
++    function _dynamicFloor(Currency currencyOut) internal view returns (uint256) {
++        IPriceRiskAdapter.Reading memory r = priceRiskAdapter.currentReference();
++        uint256 widen = _PIPS + r.uncertaintyPips + dynamicEdgePips;
++        if (currencyOut == asset1) {
++            return FullMath.mulDivRoundingUp(
++                FullMath.mulDivRoundingUp(FixedPoint96.Q96, FixedPoint96.Q96, r.priceX96), widen, _PIPS
++            );
++        }
++        return FullMath.mulDivRoundingUp(r.priceX96, widen, _PIPS);
++    }
++
+     /// @dev max(live vault floor, allocation's curator floor). The vault floor is read on every call, so a change by
+     ///      the owner or guardian applies to existing allocations immediately. Taking the max means lowering the
+     ///      vault floor can never weaken the floor a curator chose.
+diff --git a/src/interfaces/IPriceRiskAdapter.sol b/src/interfaces/IPriceRiskAdapter.sol
+new file mode 100644
+index 0000000..620f1f6
+--- /dev/null
++++ b/src/interfaces/IPriceRiskAdapter.sol
+@@ -0,0 +1,17 @@
++// SPDX-License-Identifier: MIT
++pragma solidity 0.8.26;
++
++/// @title IPriceRiskAdapter
++/// @notice The read the vault's dynamic floor needs from a price-risk adapter (`src/oracle/PriceRiskAdapter.sol`).
++interface IPriceRiskAdapter {
++    /// @notice A reference read. Same layout as `PriceRiskAdapter.Reading`.
++    struct Reading {
++        uint256 priceX96;
++        uint256 uncertaintyPips;
++        uint256 validUntil;
++        uint256 liveSources;
++    }
++
++    /// @notice The current reference, or a revert when there is none the adapter trusts.
++    function currentReference() external view returns (Reading memory);
++}
+diff --git a/test/proto/DynamicFloorProto.t.sol b/test/proto/DynamicFloorProto.t.sol
+new file mode 100644
+index 0000000..2df0e1e
+--- /dev/null
++++ b/test/proto/DynamicFloorProto.t.sol
+@@ -0,0 +1,91 @@
++// SPDX-License-Identifier: MIT
++pragma solidity 0.8.26;
++
++import {IPriceRiskAdapter} from "../../src/interfaces/IPriceRiskAdapter.sol";
++import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
++import {VaultTestBase} from "../utils/VaultTestBase.sol";
++
++contract FixedAdapter is IPriceRiskAdapter {
++    uint256 public price;
++    uint256 public unc;
++    bool public down;
++    function set(uint256 p, uint256 u, bool d) external { (price, unc, down) = (p, u, d); }
++    function currentReference() external view returns (Reading memory r) {
++        require(!down, "no reference");
++        r = Reading(price, unc, block.timestamp + 1 days, 2);
++    }
++}
++
++contract DynamicFloorProtoTest is VaultTestBase {
++    FixedAdapter internal adapter;
++
++    function setUp() public override {
++        super.setUp();
++        adapter = new FixedAdapter();
++        adapter.set(PRICE_1_1_X96, 0, false);
++    }
++
++    function _install() internal {
++        vm.prank(owner);
++        vault.proposePriceRiskAdapter(address(adapter));
++        vm.warp(vm.getBlockTimestamp() + 2 days);
++        vault.executePriceRiskAdapter();
++    }
++
++    function _gasSwap(bool zeroForOne, uint256 amt, uint256 id) internal returns (uint256 g) {
++        g = gasleft();
++        _swap(keyA, zeroForOne, amt, id);
++        g -= gasleft();
++    }
++
++    /// Gas of the same Hook A swap with the dynamic floor off and on (adapter cold in each measured call).
++    function test_proto_gas() public {
++        uint256 id = _allocate(keyA, c1, 400_000 ether);
++        _swap(keyA, true, 1_000 ether, id); // warm-up of hook state
++        vm.cool(address(vault));
++        uint256 off = _gasSwap(true, 1_000 ether, id);
++        _install();
++        id = _allocate(keyA, c1, 400_000 ether);
++        vm.cool(address(vault));
++        vm.cool(address(adapter));
++        uint256 on = _gasSwap(true, 1_000 ether, id);
++        emit log_named_uint("swap gas, dynamic floor off", off);
++        emit log_named_uint("swap gas, dynamic floor on (adapter cold)", on);
++    }
++
++    /// Hook A quotes inside a 50 bp band are refused once the reference band says so; with a narrow band they pass.
++    function test_proto_dynamicFloorRefusesInsideBand() public {
++        _install();
++        uint256 id = _allocate(keyA, c1, 400_000 ether);
++        adapter.set(PRICE_1_1_X96, 5_000, false);
++        vm.expectRevert();
++        _swap(keyA, true, 1_000 ether, id);
++        adapter.set(PRICE_1_1_X96 * 101 / 100, 0, false); // currency1 cheaper in reference: Hook A's 1:1 quote passes
++        _swap(keyA, true, 1_000 ether, id);
++        adapter.set(PRICE_1_1_X96, 0, true);
++        vm.expectRevert();
++        _swap(keyA, true, 1_000 ether, id); // no reference: fail closed
++    }
++
++    /// The timelock and guardian rules.
++    function test_proto_adminRules() public {
++        vm.prank(owner);
++        vault.proposePriceRiskAdapter(address(adapter));
++        vm.expectRevert();
++        vault.executePriceRiskAdapter(); // before the delay
++        address g = makeAddr("guardian");
++        vm.prank(owner);
++        vault.setGuardian(g);
++        vm.prank(g);
++        vault.cancelPriceRiskAdapter();
++        vm.prank(g);
++        vm.expectRevert(); // guardian cannot propose
++        vault.proposePriceRiskAdapter(address(adapter));
++        _install();
++        vm.prank(g);
++        vault.setDynamicEdge(10); // raising: allowed
++        vm.prank(g);
++        vm.expectRevert(ISharedCommitmentVault.GuardianCannotIncreaseRisk.selector);
++        vault.setDynamicEdge(5);
++    }
++}

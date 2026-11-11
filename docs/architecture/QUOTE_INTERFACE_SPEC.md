@@ -1,6 +1,7 @@
 # Porkfolio — Deterministic Quote Interface (FastPath contract)
 
-**Status: PROPOSED, not implemented.** This defines what an off-chain quoter must compute so that its answer equals the
+**Status: PROPOSED, not implemented. Version 2 for the shared core and the price-risk adapter is in
+`SHARED_ECONOMIC_CORE_SPEC.md` §6 (Phase 1B-4.1); this document remains the base.** This defines what an off-chain quoter must compute so that its answer equals the
 on-chain settlement to the last raw unit. It is the contract the future FastPath service must meet. FastPath itself
 (caching, Redis, a quote server) is out of scope and not built here.
 

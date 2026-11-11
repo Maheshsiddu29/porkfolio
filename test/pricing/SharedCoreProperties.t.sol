@@ -270,4 +270,29 @@ contract SharedCorePropertiesTest is Test {
             }
         }
     }
+
+    /// @notice The cap is exact on both sides, and its refusal reason is `InventoryLimit` (refusal codes are part of
+    ///         the cross-implementation contract). From exactly +cap no ask is accepted, whatever its size; a bid may
+    ///         take the inventory to exactly -cap and not one unit further.
+    function test_capBoundaryIsExact() public view {
+        uint256 v = 158_001_289_277_201_521_479_000_000;
+        uint256 c = h.straddleCap(v, 2000, 100);
+        InventoryPricing.Core memory atCap = InventoryPricing.Core(int256(c), v, 0, c, 2000, FixedPoint96.Q96);
+        uint256[3] memory sizes = [uint256(1), 1e6, 1e21];
+        for (uint256 k; k < 3; ++k) {
+            try h.ask(atCap, sizes[k]) {
+                revert("ask from the cap must be refused");
+            } catch (bytes memory reason) {
+                assertEq(bytes4(reason), InventoryPricing.InventoryLimit.selector);
+            }
+        }
+        InventoryPricing.Core memory flat = InventoryPricing.Core(0, v, 0, c, 2000, FixedPoint96.Q96);
+        (, int256 after_) = h.bid(flat, c, c);
+        assertEq(after_, -int256(c));
+        try h.bid(flat, c + 1, c + 1) {
+            revert("bid past -cap must be refused");
+        } catch (bytes memory reason) {
+            assertEq(bytes4(reason), InventoryPricing.InventoryLimit.selector);
+        }
+    }
 }
