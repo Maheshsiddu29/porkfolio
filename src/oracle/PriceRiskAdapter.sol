@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {IAggregatorV3} from "../interfaces/IAggregatorV3.sol";
+import {IMarketRiskAdapter} from "../interfaces/IMarketRiskAdapter.sol";
 import {ReferenceBracket} from "./ReferenceBracket.sol";
 
 /// @title PriceRiskAdapter
@@ -29,7 +30,7 @@ import {ReferenceBracket} from "./ReferenceBracket.sol";
 ///
 ///      Not handled: pull oracles (their update data comes with the transaction), round history and realized
 ///      volatility (RedStone's feeds expose no history), and depeg policy beyond what the brackets show.
-contract PriceRiskAdapter {
+contract PriceRiskAdapter is IMarketRiskAdapter {
     uint256 internal constant PIPS = 1_000_000;
 
     /// @notice One provider's two legs and their error bounds.
@@ -46,18 +47,6 @@ contract PriceRiskAdapter {
         uint256 deviation1;
         uint256 maxAge0;
         uint256 maxAge1;
-    }
-
-    /// @notice A reference read.
-    /// @param priceX96 Mid, raw currency1 per raw currency0, Q64.96.
-    /// @param uncertaintyPips Half-width of the agreed range relative to the mid, pips.
-    /// @param validUntil Earliest time at which any leg used here would pass its staleness limit, seconds.
-    /// @param liveSources Number of sources that contributed.
-    struct Reading {
-        uint256 priceX96;
-        uint256 uncertaintyPips;
-        uint256 validUntil;
-        uint256 liveSources;
     }
 
     // Sources are held in immutables (code), not storage: a read costs no SLOAD for configuration that never changes.
@@ -83,6 +72,13 @@ contract PriceRiskAdapter {
     uint256 public immutable sequencerGrace;
     /// @notice Live sources required. 1 or 2.
     uint256 public immutable minSources;
+    /// @dev The priced pair, in PoolKey order, and its token decimals.
+    address internal immutable _currency0;
+    address internal immutable _currency1;
+    uint8 internal immutable _decimals0;
+    uint8 internal immutable _decimals1;
+    /// @inheritdoc IMarketRiskAdapter
+    bytes32 public immutable override configVersion;
 
     /// @notice Configuration rejected at deployment.
     error InvalidConfig();
@@ -97,6 +93,8 @@ contract PriceRiskAdapter {
     ///      larger than 30 decimal places in either direction.
     /// @param s0 First source.
     /// @param s1 Second source.
+    /// @param currency0_ Lower-address token of the pair. Non-zero and below `currency1_`.
+    /// @param currency1_ Higher-address token of the pair.
     /// @param decimals0 Token decimals of currency0.
     /// @param decimals1 Token decimals of currency1.
     /// @param sequencerFeed_ Sequencer uptime feed, or address(0).
@@ -105,13 +103,17 @@ contract PriceRiskAdapter {
     constructor(
         Source memory s0,
         Source memory s1,
+        address currency0_,
+        address currency1_,
         uint8 decimals0,
         uint8 decimals1,
         IAggregatorV3 sequencerFeed_,
         uint256 sequencerGrace_,
         uint256 minSources_
     ) {
-        if (minSources_ == 0 || minSources_ > 2) revert InvalidConfig();
+        if (minSources_ == 0 || minSources_ > 2 || currency0_ == address(0) || currency0_ >= currency1_) {
+            revert InvalidConfig();
+        }
         shift0 = _shift(s0, decimals0, decimals1);
         shift1 = _shift(s1, decimals0, decimals1);
         (_s0leg0, _s0leg1, _s0dev0, _s0dev1, _s0age0, _s0age1) =
@@ -121,14 +123,34 @@ contract PriceRiskAdapter {
         sequencerFeed = sequencerFeed_;
         sequencerGrace = sequencerGrace_;
         minSources = minSources_;
+        (_currency0, _currency1, _decimals0, _decimals1) = (currency0_, currency1_, decimals0, decimals1);
+        configVersion = keccak256(
+            abi.encode(
+                block.chainid,
+                s0,
+                s1,
+                currency0_,
+                currency1_,
+                decimals0,
+                decimals1,
+                sequencerFeed_,
+                sequencerGrace_,
+                minSources_
+            )
+        );
     }
 
-    /// @notice The current reference, or a revert.
+    /// @inheritdoc IMarketRiskAdapter
+    function pair() external view override returns (address, address, uint8, uint8) {
+        return (_currency0, _currency1, _decimals0, _decimals1);
+    }
+
+    /// @inheritdoc IMarketRiskAdapter
     /// @dev Reverts with `SequencerUnavailable`, `FeedUnusable`, `ReferenceBracket.InsufficientSources` or
     ///      `ReferenceBracket.ReferenceDivergence`. Never returns a stored or default price. Gas: five feed reads when
     ///      a sequencer feed is set (measured on a Unichain mainnet fork in test/fork/UnichainOracles.t.sol).
     /// @return r The reading.
-    function currentReference() external view returns (Reading memory r) {
+    function currentReference() external view override returns (Reading memory r) {
         if (address(sequencerFeed) != address(0)) {
             (, int256 status, uint256 since,) = _read(sequencerFeed, true);
             if (status != 0 || block.timestamp < since + sequencerGrace) revert SequencerUnavailable();

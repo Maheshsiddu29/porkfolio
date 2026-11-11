@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {IAggregatorV3} from "../../src/interfaces/IAggregatorV3.sol";
 import {PriceRiskAdapter} from "../../src/oracle/PriceRiskAdapter.sol";
+import {IMarketRiskAdapter} from "../../src/interfaces/IMarketRiskAdapter.sol";
 import {ReferenceBracket} from "../../src/oracle/ReferenceBracket.sol";
 import {MockAggregator} from "../utils/MockAggregator.sol";
 
@@ -13,6 +14,9 @@ import {MockAggregator} from "../utils/MockAggregator.sol";
 ///         RedStone-like legs with 8). Every path that is not a fresh, consistent pair of sources must revert.
 contract PriceRiskAdapterTest is Test {
     uint256 internal constant T = 1_794_360_000;
+    // Unichain USDC (currency0) and WETH (currency1); any sorted non-zero pair works for these tests.
+    address internal constant USDC = 0x078D782b760474a361dDA0AF3839290b0EF57AD6;
+    address internal constant WETH = 0x4200000000000000000000000000000000000006;
     MockAggregator internal clUsdc;
     MockAggregator internal clEth;
     MockAggregator internal rsUsdc;
@@ -39,14 +43,14 @@ contract PriceRiskAdapterTest is Test {
     function _deploy(uint256 minSources) internal returns (PriceRiskAdapter) {
         PriceRiskAdapter.Source memory cl = PriceRiskAdapter.Source(clUsdc, clEth, 3100, 5100, 88_200, 88_200);
         PriceRiskAdapter.Source memory rs = PriceRiskAdapter.Source(rsUsdc, rsEth, 5100, 5100, 12_600, 23_400);
-        return new PriceRiskAdapter(cl, rs, 6, 18, IAggregatorV3(address(seq)), 3600, minSources);
+        return new PriceRiskAdapter(cl, rs, USDC, WETH, 6, 18, IAggregatorV3(address(seq)), 3600, minSources);
     }
 
     /// @notice Both sources live: the reading is the centre of the two brackets' intersection. Chainlink's bracket for
     ///         WETH per USDC is about +-0.82% (30 + 50 bps thresholds, 1 bp margin each); RedStone's is about +-1.02%;
     ///         they overlap, and the result is within both.
     function test_bothSourcesLive() public view {
-        PriceRiskAdapter.Reading memory r = adapter.currentReference();
+        IMarketRiskAdapter.Reading memory r = adapter.currentReference();
         assertEq(r.liveSources, 2);
         assertGt(r.uncertaintyPips, 7000);
         assertLt(r.uncertaintyPips, 10_300);
@@ -101,7 +105,7 @@ contract PriceRiskAdapterTest is Test {
         vm.expectRevert(abi.encodeWithSelector(ReferenceBracket.InsufficientSources.selector, 1, 2));
         adapter.currentReference();
         PriceRiskAdapter one = _deploy(1);
-        PriceRiskAdapter.Reading memory r = one.currentReference();
+        IMarketRiskAdapter.Reading memory r = one.currentReference();
         assertEq(r.liveSources, 1);
         assertGt(r.uncertaintyPips, 8000); // Chainlink's bracket alone: about 82 bps
     }
@@ -121,19 +125,38 @@ contract PriceRiskAdapterTest is Test {
         PriceRiskAdapter.Source memory ok = PriceRiskAdapter.Source(clUsdc, clEth, 3100, 5100, 88_200, 88_200);
         PriceRiskAdapter.Source memory bad = PriceRiskAdapter.Source(clUsdc, clEth, 1_000_000, 5100, 88_200, 88_200);
         vm.expectRevert(PriceRiskAdapter.InvalidConfig.selector);
-        new PriceRiskAdapter(ok, bad, 6, 18, IAggregatorV3(address(0)), 0, 2);
+        new PriceRiskAdapter(ok, bad, USDC, WETH, 6, 18, IAggregatorV3(address(0)), 0, 2);
         vm.expectRevert(PriceRiskAdapter.InvalidConfig.selector);
-        new PriceRiskAdapter(ok, ok, 6, 18, IAggregatorV3(address(0)), 0, 3);
+        new PriceRiskAdapter(ok, ok, USDC, WETH, 6, 18, IAggregatorV3(address(0)), 0, 3);
         MockAggregator wide = new MockAggregator(60);
         vm.expectRevert(PriceRiskAdapter.InvalidConfig.selector);
         new PriceRiskAdapter(
             PriceRiskAdapter.Source(clUsdc, wide, 3100, 5100, 88_200, 88_200),
             ok,
+            USDC,
+            WETH,
             6,
             18,
             IAggregatorV3(address(0)),
             0,
             2
         );
+    }
+
+    /// @notice The pair must be sorted and non-zero, and the configuration hash identifies the whole fixed
+    ///         configuration: two adapters that differ in any parameter have different versions.
+    function test_pairAndConfigVersion() public {
+        (address a0, address a1, uint8 d0, uint8 d1) = adapter.pair();
+        assertEq(a0, USDC);
+        assertEq(a1, WETH);
+        assertEq(d0, 6);
+        assertEq(d1, 18);
+        assertTrue(adapter.configVersion() != bytes32(0));
+        assertTrue(adapter.configVersion() != _deploy(1).configVersion());
+        PriceRiskAdapter.Source memory cl = PriceRiskAdapter.Source(clUsdc, clEth, 3100, 5100, 88_200, 88_200);
+        vm.expectRevert(PriceRiskAdapter.InvalidConfig.selector);
+        new PriceRiskAdapter(cl, cl, WETH, USDC, 6, 18, IAggregatorV3(address(0)), 0, 2);
+        vm.expectRevert(PriceRiskAdapter.InvalidConfig.selector);
+        new PriceRiskAdapter(cl, cl, address(0), WETH, 6, 18, IAggregatorV3(address(0)), 0, 2);
     }
 }

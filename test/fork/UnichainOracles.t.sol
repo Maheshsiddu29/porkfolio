@@ -5,10 +5,18 @@ import {Test} from "forge-std/Test.sol";
 
 import {IAggregatorV3} from "../../src/interfaces/IAggregatorV3.sol";
 import {PriceRiskAdapter} from "../../src/oracle/PriceRiskAdapter.sol";
+import {IMarketRiskAdapter} from "../../src/interfaces/IMarketRiskAdapter.sol";
 
 interface IChainlinkRounds {
     function latestRound() external view returns (uint256);
     function getRoundData(uint80 roundId) external view returns (uint80, int256, uint256, uint256, uint80);
+}
+
+interface IUniswapV3PoolObserve {
+    function observe(uint32[] calldata secondsAgos)
+        external
+        view
+        returns (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128s);
 }
 
 interface IPythUnsafe {
@@ -36,7 +44,13 @@ contract UnichainOraclesForkTest is Test {
     address internal constant RS_ETH = 0xe8D9FbC10e00ecc9f0694617075fDAF657a76FB2;
     address internal constant RS_USDC = 0xD15862FC3D5407A03B696548b6902D6464A69b8c;
     address internal constant PYTH = 0x2880aB155794e7179c9eE2e38200202908C17B43;
+    address internal constant USDC = 0x078D782b760474a361dDA0AF3839290b0EF57AD6;
+    address internal constant WETH = 0x4200000000000000000000000000000000000006;
     bytes32 internal constant PYTH_ETH_USD = 0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
+
+    /// @dev Uniswap v3 WETH/USDC 0.3% pool on Unichain (deepest v3 pool for the pair at the time of writing; factory
+    ///      0x1f98...0003 from Uniswap's Unichain address page).
+    address internal constant V3_WETH_USDC_3000 = 0x8927058918e3CFf6F55EfE45A58db1be1F069E49;
 
     bool internal live;
 
@@ -101,6 +115,8 @@ contract UnichainOraclesForkTest is Test {
         PriceRiskAdapter a = new PriceRiskAdapter(
             PriceRiskAdapter.Source(IAggregatorV3(CL_USDC_USD), IAggregatorV3(CL_ETH_USD), 3100, 5100, 88_200, 88_200),
             PriceRiskAdapter.Source(IAggregatorV3(RS_USDC), IAggregatorV3(RS_ETH), 5100, 5100, 12_600, 23_400),
+            USDC,
+            WETH,
             6,
             18,
             IAggregatorV3(CL_SEQUENCER),
@@ -120,7 +136,7 @@ contract UnichainOraclesForkTest is Test {
             emit log_named_bytes("adapter refused (revert data)", ret);
             return;
         }
-        PriceRiskAdapter.Reading memory r = abi.decode(ret, (PriceRiskAdapter.Reading));
+        IMarketRiskAdapter.Reading memory r = abi.decode(ret, (IMarketRiskAdapter.Reading));
         emit log_named_uint("mid, raw WETH per raw USDC (integer part)", r.priceX96 >> 96);
         emit log_named_uint("uncertainty (pips)", r.uncertaintyPips);
         emit log_named_uint("valid for (s)", r.validUntil - block.timestamp);
@@ -128,5 +144,21 @@ contract UnichainOraclesForkTest is Test {
         g = gasleft();
         a.currentReference();
         emit log_named_uint("adapter.currentReference gas (warm)", g - gasleft());
+    }
+
+    /// @notice A 30-minute TWAP from the Uniswap v3 pool: an on-chain reference that shares no upstream with the push
+    ///         feeds (its source is trading on Unichain itself). Logs the read gas and the TWAP tick; the pool is thin,
+    ///         so this is a coarse cross-check, not a price to quote around.
+    function test_fork_v3Twap() public {
+        if (!live) vm.skip(true);
+        uint32[] memory ago = new uint32[](2);
+        ago[0] = 1800;
+        uint256 g = gasleft();
+        (int56[] memory ticks,) = IUniswapV3PoolObserve(V3_WETH_USDC_3000).observe(ago);
+        emit log_named_uint("v3 observe([1800, 0]) cold gas", g - gasleft());
+        int256 twapTick = (int256(ticks[1]) - int256(ticks[0])) / 1800;
+        emit log_named_int("v3 30-min TWAP tick (raw WETH per raw USDC = 1.0001^tick)", twapTick);
+        assertGt(twapTick, 190_000);
+        assertLt(twapTick, 210_000);
     }
 }
