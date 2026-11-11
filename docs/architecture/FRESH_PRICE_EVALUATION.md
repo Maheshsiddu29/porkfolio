@@ -56,3 +56,45 @@ credentialed signed source improves quotes about eightfold in the simulation (fi
 only as an **optional** tightening input that can never be the sole price, and only after a decision on the
 credential and fee dependency (R-2). The Uniswap v3 TWAP is too thin to be a pricing source. It can be added later as
 a third, provider-independent bracket with a wide threshold, to catch gross common-mode errors.
+
+## 6. Third-party relayer model (Phase 1B-4.3, Task 7)
+
+**Question.** Can someone other than the trader fetch recent signed prices and put them on-chain, so that verification
+and swaps stay permissionless and no trader ever supplies, or omits, a payload?
+
+**Evidence**: read-only, Unichain mainnet, block 63,633,395 (timestamp 1,794,381,960). Nothing was broadcast.
+
+| Provider | Who can submit a signed update on-chain | Verified how | Credentials needed to *obtain* updates | Current relaying on Unichain |
+|---|---|---|---|---|
+| RedStone push (adapter `0xFB1267A29C0aa19daae4a483ea895862A69e4AA5`) | **anyone**. The latest relayer calldata (tx `0xec2d37d9…094a00`, selector `0xb7a16251`) succeeds as an `eth_call` at the previous block both from the relayer `0x8186…ab9c` and from `0x…dEaD` | signer set checked in the adapter; timestamps must increase, so an older package cannot roll a feed back | yes (authenticated gateway, HTTP 403 without a key) | one relayer, about every 2.5–30 minutes in the last 5 updates; 65.5k gas for one feed (581 B calldata), 99.5k / 134k for two |
+| Pyth (`0x2880aB155794e7179c9eE2e38200202908C17B43`) | anyone, through `updatePriceFeeds` (Wormhole-signed); `singleUpdateFeeInWei` = 0 | Wormhole guardian signatures in the contract | yes (Hermes API key) | **none**: stored ETH/USD is 11,402,165 s (132 days) old, USDC/USD 37,564,960 s (1.2 years) |
+| Chainlink Data Streams (VerifierProxy `0x60fAa7faC949aF392DFc858F5d97E3EEfa07E9EB`) | anyone may verify a report (with a fee through the fee manager), but the verifier stores nothing: a relayer would need its own store contract | DON signatures via the verifier | yes (API key and user secret) | none applicable |
+
+**Execution availability versus price-data availability.** With a relayer, the vault and hooks only *read* stored
+values, as they do now:
+- **Execution** (anyone can swap) does not depend on the relayer.
+- **Price freshness** does:
+  - while the relayer runs, the band narrows to what the adapter's per-source threshold allows;
+  - when it stops, feeds age back to the provider's own cadence (RedStone: 0.5% / 6 h).
+- **What happens then is decided by the adapter's configuration, never by the trader.** Either the adapter refuses
+  (heartbeat set to the relayer's cadence: fresh or nothing), or it is configured with the provider's own heartbeat and
+  the band stays wide (the push-only mode).
+
+No trader can choose weaker validation by leaving something out, because there is no trader-supplied input. What a
+trader can still choose is *when* to trade, which includes just before a relayer update. That is the ordinary latency
+risk, bounded by the band and, beyond it, by the inventory floor.
+
+**What would have to be true to use it** (not decided; R-5):
+1. An adapter configured with a RedStone source whose threshold and heartbeat match the relayer's cadence. This is a
+   new immutable `PriceRiskAdapter`, installed through the governor's 3-day delay.
+2. A relayer that holds RedStone credentials. It could be the operator, a third party, or RedStone on a tighter
+   configuration, which is a commercial request. Its gas runs at about 65k per feed update (MEASURED from current
+   relayer transactions).
+3. A written policy for relayer outage. Recommended: the adapter keeps the provider's own heartbeat, so an outage
+   widens quotes instead of halting trading; monitoring alerts on relayer silence.
+
+**Not recommended:**
+- making any fresh source mandatory for execution (single credentialed dependency);
+- trader-supplied payloads (they reintroduce the omission choice and the free option inside the payload window);
+- Pyth until someone relays it on Unichain;
+- Data Streams without a reviewed store contract.
