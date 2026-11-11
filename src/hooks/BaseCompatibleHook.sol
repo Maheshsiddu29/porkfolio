@@ -108,6 +108,8 @@ abstract contract BaseCompatibleHook is IHooks {
     /// @notice The vault that fills this hook's swaps.
     ISharedCommitmentVault public immutable vault;
     /// @notice Account allowed to configure pool pricing on the concrete hook. It has no authority over the vault.
+    /// @dev Immutable. In the production deployment it is the vault's `VaultGovernor`, so every pricing change waits
+    ///      the governor's delay and can be canceled by the vault's guardian; the release checklist verifies this.
     address public immutable hookOwner;
 
     /// @dev 1e6 pips = 100%.
