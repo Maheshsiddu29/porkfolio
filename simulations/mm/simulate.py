@@ -66,8 +66,15 @@ from model import (  # noqa: E402
     floor_ok,
     floors_from_pivot,
     mul_div,
+    mul_div_up,
     quote_inventory,
     resolve_reference,
+    BracketSource,
+    ActivityFeeConfig,
+    bracket_reference,
+    core_state,
+    decayed,
+    hook_a_quote,
 )
 
 E18 = 10**18
@@ -106,6 +113,7 @@ class Regime:
     outage: tuple = ()  # (start fraction, seconds) primary returns nothing
     manip_primary: tuple = ()  # (start fraction, seconds, log offset)
     manip_secondary: tuple = ()
+    scale: float = 1.0  # vault size relative to INIT (illiquid regime: 0.1)
 
 
 REGIMES = [
@@ -127,6 +135,9 @@ STRESS = [
     Regime("depeg -15% in 1 h then drift", days=3, vol_day=0.03, drift_day=-0.03,
            jumps=tuple((0.3 + i * 0.0005, math.log(0.85) / 30) for i in range(30))),
 ]
+
+ILLIQUID = Regime("illiquid (vault 10x smaller)", scale=0.1)
+REGIMES_141 = REGIMES + [ILLIQUID]
 
 CALIBRATION_SEEDS = (101, 102, 103, 104)
 HELD_OUT_SEEDS = (201, 202, 203, 204)
@@ -151,6 +162,9 @@ class World:
     sec: list
     orders: list
     withdrawals: list  # (slot, fraction of then-outstanding shares)
+    vprim: list = field(default_factory=list)  # verified-parameter primary (Chainlink-like) per slot
+    vsec: list = field(default_factory=list)  # verified-parameter secondary (RedStone-like) per slot
+    pull: list = field(default_factory=list)  # hypothetical fresh pull source per slot
     _rounds: list = field(default_factory=list)  # (first slot visible, FeedReading) of every primary round
 
     def prim_hist(self, k: int, n: int) -> list:
@@ -202,6 +216,13 @@ def build_world(reg: Regime, seed: int) -> World:
 
     prim = feed(reg.oracle_dev, reg.oracle_hb, 0.0, reg.manip_primary, reg.outage, random.Random(seed + 1))
     sec = feed(reg.sec_dev, reg.sec_hb, reg.sec_noise_bps, reg.manip_secondary, (), random.Random(seed + 2))
+    # Verified Unichain parameters (docs/architecture/ORACLE_VERIFICATION_UNICHAIN.md): both push providers update the
+    # ETH leg on a 0.5% deviation; heartbeats 24 h (Chainlink) and 6 h (RedStone). The USDC legs barely move, so the
+    # pair moves with the ETH leg; their thresholds widen the bracket (VERIFIED_BRACKET), not the update rule.
+    vprim = feed(0.005, 86_400, 0.0, reg.manip_primary, reg.outage, random.Random(seed + 3))
+    vsec = feed(0.005, 21_600, reg.sec_noise_bps, reg.manip_secondary, (), random.Random(seed + 4))
+    # Hypothetical pull source: the market one slot ago, every slot (not verified usable on Unichain: see the report).
+    pull = [(0, 0)] + [(_x96(mkt[k - 1]), (k - 1) * SLOT) for k in range(1, n)]
 
     orders, t, zfo = [], 0.0, rng.random() < 0.5
     horizon = MARKOUT // SLOT
@@ -230,7 +251,7 @@ def build_world(reg: Regime, seed: int) -> World:
         for _ in range(m):
             withdrawals.append((rng.randrange(1, n - horizon), each))
         withdrawals.sort()
-    return World(reg, seed, mkt, prim, sec, orders, withdrawals)
+    return World(reg, seed, mkt, prim, sec, orders, withdrawals, vprim, vsec, pull)
 
 
 # ------------------------------------------------------------------------------------------------------------------
@@ -243,12 +264,13 @@ REF_POLICY = ReferencePolicy(max_age=3900, max_divergence=10_000, secondary_max_
 
 
 
-def c_config(base_spread: int, max_deviation: int, min_edge: int = 100, max_spread: int = 12_000) -> InventoryConfig:
+def c_config(base_spread: int, max_deviation: int, min_edge: int = 100, max_spread: int = 12_000,
+             band: bool = False) -> InventoryConfig:
     """Candidate C parameters with the depth derived from the risk cap (see `depth_per_share_for`)."""
     return InventoryConfig(target_per_share=WAD,
                            depth_per_share=depth_per_share_for(WAD, max_deviation, base_spread, min_edge),
                            depth_max=2**95 - 1, base_spread=base_spread, min_edge=min_edge, max_spread=max_spread,
-                           max_deviation=max_deviation)
+                           max_deviation=max_deviation, band_edge=band)
 
 
 C_DEFAULT = c_config(2_000, 300_000)
@@ -271,12 +293,21 @@ class Candidate:
     rfq_inventory_checked: bool = True  # D: RFQ fills must also respect the hook's inventory cap
     a_depth: int = V_TOKENS  # A: Hook B depth, tokens
     hooks: tuple = ()  # X: sub-candidates sharing the reserve; "hookA" = production Hook A
+    ref_mode: str = "assumed"  # "assumed" (Phase 1B-4 feeds), "point" (verified feeds, divergence uncertainty),
+    #                            "bracket" (verified feeds, fail-safe bracket), "bracket_pull" (+ hypothetical pull)
+    strategy: str = "B"  # C/D/S: "B" core only (Hook B strategy) or "A" (Hook A activity fee on the core)
 
 
 # Held-out candidates. A, B and C parameters are the calibration selections (results/calibration.json, rule in
 # `calibrate`); the other rows remove one component of the selected C, or add the RFQ path, to attribute effects.
 C_SELECTED = c_config(2_000, 150_000)
 KEEPER = dict(oracle=True, floors="keeper")
+
+# Bracket half-widths of the verified sources for a WETH/USDC-like pair, pips: each provider's ETH-leg threshold plus
+# its USDC-leg threshold, plus 1 bp of latency margin per leg (the PriceRiskAdapter fork configuration).
+VERIFIED_BRACKET = {"primary": (8_200, 86_400 + 1_800), "secondary": (10_200, 21_600 + 1_800), "pull": (1_500, 30)}
+STRATEGY_A_FEE = ActivityFeeConfig(base=0, mx=2_000, scale0=20_000 * E18, scale1=20_000 * E18, window=3_600)
+POINT_POLICY = replace(REF_POLICY, max_age=86_400 + 1_800, secondary_max_age=21_600 + 1_800)
 CANDIDATES = [
     Candidate("A0 Hook B, static P", "A"),
     Candidate("A  Hook B, keeper P+floors", "A", **KEEPER),
@@ -377,6 +408,8 @@ class Engine:
     def __init__(self, cand: Candidate, p0: int):
         self.cand, self.p0 = cand, p0
         self._ref_error = "ReferenceUnavailable"
+        self.level = {True: 0, False: 0}
+        self.updated = {True: 0, False: 0}
         if cand.kind == "A":
             self.h = HookB()
             self.h.configure(HookBConfig(p0, cand.a_depth * E18, 20_000, 3600), 0)
@@ -392,6 +425,12 @@ class Engine:
             return self.h.quote(zfo, amt, now)
         if ref is None:
             raise Revert(getattr(self, "_ref_error", "ReferenceUnavailable"))
+        if self.cand.strategy == "A":
+            f = STRATEGY_A_FEE
+            k = f.scale0 if zfo else f.scale1
+            lvl = decayed(self.level[zfo], k, f.window, now - self.updated[zfo])
+            q = hook_a_quote(core_state(self.cand.c, snap, ref), f, lvl, zfo, amt)
+            return q.amount_out, ("A", zfo, q.new_level)
         q = quote_inventory(self.cand.c, snap, ref, zfo, amt)
         return q.amount_out, None
 
@@ -410,12 +449,20 @@ class Engine:
             self.h.x, self.h.updated = token, now
         elif self.cand.kind == "B":
             self.h.commit(token, now)
+        elif token is not None and token[0] == "A":
+            self.level[token[1]], self.updated[token[1]] = token[2], now
 
     def save(self):
-        return (self.h.x, self.h.updated) if self.cand.kind in ("A", "B") else None
+        if self.cand.kind in ("A", "B"):
+            return (self.h.x, self.h.updated)
+        return ("S", dict(self.level), dict(self.updated))
 
     def restore(self, st):
-        if st is not None:
+        if st is None:
+            return
+        if st[0] == "S":
+            self.level, self.updated = dict(st[1]), dict(st[2])
+        else:
             self.h.x, self.h.updated = st
 
 
@@ -453,10 +500,35 @@ class Metrics:
     rfq_fills: int = 0
     days: float = 0.0
     value0: float = 0.0
+    init: float = float(INIT)
+    causes: dict = field(default_factory=dict)  # uninformed orders not filled, by the nine categories of the brief
 
 
 def _reason(m: Metrics, name: str):
     m.reasons[name] = m.reasons.get(name, 0) + 1
+
+
+ORACLE_REASONS = {"ReferenceUnavailable", "StaleReference", "ReferenceDivergence", "SecondaryUnavailable",
+                  "SpreadTooWide", "InsufficientSources", "SequencerDown", "SequencerGracePeriod", "DegenerateBracket"}
+SAFETY_CAUSES = ("physical inventory", "LP withdrawal reservation", "curator commitment limit", "vault flow limit",
+                 "inventory concentration", "price-floor conflict", "oracle uncertainty or staleness")
+
+
+def cause_of(e: Revert) -> str:
+    """The brief's nine categories for an uninformed order that was not filled."""
+    n = e.name
+    if n == "QuotaExceeded":
+        c = e.args_[0] if e.args_ else "full"
+        return "curator commitment limit" if c == "full" else c
+    if n == "FlowLimitExceeded":
+        return "vault flow limit"
+    if n in ("InventoryLimit", "ImpactBoundExceeded"):
+        return "inventory concentration"
+    if n == "PriceBelowFloor":
+        return "price-floor conflict"
+    if n in ORACLE_REASONS:
+        return "oracle uncertainty or staleness"
+    return "pricing-model limitation"  # ZeroOutput, AmountTooLarge, TradeImpactExceeded
 
 
 class Sim:
@@ -467,8 +539,11 @@ class Sim:
             self.eng = MultiEngine([HookAEngine(self.p0) if h == "hookA" else Engine(h, self.p0) for h in cand.hooks])
         else:
             self.eng = Engine(cand, self.p0)
-        self.n0 = self.n1 = INIT * E18
-        self.shares = INIT * E18  # sqrt(N0 * N1)
+        self.init = int(INIT * world.regime.scale)
+        self.n0 = self.n1 = self.init * E18
+        self.shares = self.init * E18  # sqrt(N0 * N1)
+        self.q_cause = {True: "full", False: "full"}  # why the current allocation is below its target size
+        self._ref_cache = (-1, None)
         self.tau1 = self.n1 * WAD // self.shares
         self.pivot, self.pending_pivot = self.p0, None
         self.q = {True: 0, False: 0}  # remaining allocation by "vault sells currency1" (True) / currency0 (False)
@@ -489,8 +564,12 @@ class Sim:
     def _refresh(self, k: int):
         for sells1 in (True, False):
             n_a = self.n1 if sells1 else self.n0
-            adm = max(0, int(n_a * (1 - BUFFER)) - self._pending(n_a))
-            self.q[sells1] = min(int(ALLOC_FRACTION * INIT) * E18, adm)
+            target = int(ALLOC_FRACTION * self.init) * E18
+            no_queue = max(0, int(n_a * (1 - BUFFER)))
+            adm = max(0, no_queue - self._pending(n_a))
+            self.q[sells1] = min(target, adm)
+            self.q_cause[sells1] = ("full" if adm >= target else
+                                    "LP withdrawal reservation" if no_queue >= target else "physical inventory")
         self._process_queue(k)
 
     def _process_queue(self, k: int):
@@ -507,6 +586,42 @@ class Sim:
     def reference(self, k: int) -> Reference | None:
         if not self.c.oracle or self.c.kind in ("A", "B"):
             return Reference(self.p0, 0)
+        if self._ref_cache[0] == k:
+            return self._ref_cache[1]
+        r = self._reference_uncached(k)
+        self._ref_cache = (k, r)
+        return r
+
+    def _set_ref_error(self, name: str):
+        for e2 in getattr(self.eng, "engines", [self.eng]):
+            e2._ref_error = name
+
+    def _reference_uncached(self, k: int) -> Reference | None:
+        mode = self.c.ref_mode
+        if mode in ("bracket", "bracket_pull"):
+            srcs = []
+            for name, feed in (("primary", self.w.vprim), ("secondary", self.w.vsec)) + (
+                    (("pull", self.w.pull),) if mode == "bracket_pull" else ()):
+                p, u = feed[k]
+                if p == 0 and name != "pull":
+                    self._set_ref_error("ReferenceUnavailable")
+                    return None
+                if p:
+                    srcs.append(BracketSource(p, u, *VERIFIED_BRACKET[name]))
+            try:
+                return bracket_reference(srcs, k * SLOT, min_sources=2)
+            except Revert as e:
+                self._set_ref_error(e.name)
+                return None
+        if mode == "point":
+            p, u = self.w.vprim[k]
+            q, qu = self.w.vsec[k]
+            try:
+                return resolve_reference(FeedReading(p, u), FeedReading(q, qu), k * SLOT,
+                                         replace(POINT_POLICY, vol_mult=self.c.vol_mult), self.w.prim_hist(k, 5))
+            except Revert as e:
+                self._set_ref_error(e.name)
+                return None
         if self.c.kind == "X":
             sub = [h for h in self.c.hooks if h != "hookA"]
             vm = sub[0].vol_mult if sub else 0
@@ -527,14 +642,24 @@ class Sim:
             return None
 
     def _vault_check(self, zfo: bool, amt: int, out: int, k: int):
-        f_sell0, f_sell1 = floors_from_pivot(self.pivot)
+        if self.c.floors == "dynamic":
+            # The proposed vault-side dynamic floor: refuse any price inside the reference band (same adapter, same
+            # block as the hook), on the vault's own rounding.
+            ref = self.reference(k)
+            if ref is None:
+                raise Revert("ReferenceUnavailable")
+            widen = PIPS + ref.uncertainty
+            f_sell0 = mul_div_up(ref.price_x96, widen, PIPS)
+            f_sell1 = mul_div_up(mul_div_up(Q96, Q96, ref.price_x96), widen, PIPS)
+        else:
+            f_sell0, f_sell1 = floors_from_pivot(self.pivot)
         if not floor_ok(amt, out, f_sell1 if zfo else f_sell0):
             raise Revert("PriceBelowFloor")
         if out > self.q[zfo]:
-            raise Revert("QuotaExceeded")
+            raise Revert("QuotaExceeded", self.q_cause[zfo])
         day = (k * SLOT) // 86_400
         used = self.flow[zfo][0] if self.flow[zfo][1] == day else 0
-        if used + out > int(FLOW_CAP * INIT) * E18:
+        if used + out > int(FLOW_CAP * self.init) * E18:
             raise Revert("FlowLimitExceeded")
 
     def _apply(self, zfo: bool, amt: int, out: int, k: int):
@@ -653,6 +778,8 @@ class Sim:
             _reason(m, e.name)
             if not o.informed:
                 m.uninformed_refused += 1
+                c = cause_of(e)
+                m.causes[c] = m.causes.get(c, 0) + 1
             return
         out = sum(outs)
         if self.c.kind == "D":
@@ -673,6 +800,8 @@ class Sim:
         if not accept:
             self._restore(saved)
             _reason(m, "TraderDeclined" if not o.informed else "InformedNoEdge")
+            if not o.informed:
+                m.causes["trader minimum-output constraint"] = m.causes.get("trader minimum-output constraint", 0) + 1
             return
         for p, q in zip(pieces, outs):
             self._record_fill(o.zfo, p, q, k, "informed" if o.informed else "uninformed")
@@ -755,14 +884,15 @@ class Sim:
             self.pivot, self.pending_pivot = self.pending_pivot[0], None
             if self.c.kind in ("A", "B", "X"):  # the same keeper transaction re-prices the hooks
                 self.eng.reprice(self.pivot, k * SLOT)
-        p, _ = self.w.prim[k]
+        p, _ = (self.w.vprim if self.c.ref_mode == "point" else self.w.prim)[k]
         if p and self.pending_pivot is None and abs(p / self.pivot - 1) > self.c.keeper_band:
             self.pending_pivot = (p, k + max(1, self.c.keeper_delay // SLOT))
 
     # --- run --------------------------------------------------------------------------------------------------
     def run(self) -> Metrics:
         w, m = self.w, self.m
-        m.value0 = 2 * INIT
+        m.value0 = 2 * self.init
+        m.init = float(self.init)
         wd = list(w.withdrawals)
         next_refresh = REFRESH // SLOT
         last_k = 0
@@ -788,7 +918,7 @@ class Sim:
             last_k = k
         mk = w.mkt[last_k]
         per_share = (self.n0 / E18 + self.n1 / E18 / mk) / (self.shares / E18)
-        hodl = (INIT + INIT / mk) / INIT
+        hodl = (self.init + self.init / mk) / self.init
         m.lp_pnl_bps = (per_share / hodl - 1) * 1e4
         m.final_dev = self._inventory()
         for s, k0 in self.queue:
@@ -805,6 +935,14 @@ def run_one(args):
 # ------------------------------------------------------------------------------------------------------------------
 # Reporting
 # ------------------------------------------------------------------------------------------------------------------
+
+
+def _sum_causes(ms: list[dict]) -> dict:
+    out: dict = {}
+    for x in ms:
+        for k, v in x.get("causes", {}).items():
+            out[k] = out.get(k, 0) + v
+    return out
 
 
 def summarise(ms: list[dict]) -> dict:
@@ -830,10 +968,15 @@ def summarise(ms: list[dict]) -> dict:
         "mean |dev|%": 100 * tot("dev_sum") / max(1, tot("dev_n")),
         "max |dev|%": 100 * max(x["dev_max"] for x in ms),
         "max conc%": 100 * max(x["conc_max"] for x in ms),
-        "turnover/day": tot("notional") / days / (2 * INIT),
+        "turnover/day": sum(x["notional"] / x["days"] / (2 * x["init"]) for x in ms) / len(ms),
         "wd instant%": 100 * tot("wd_instant") / tot("wd_requested") if tot("wd_requested") else None,
         "rfq fills": tot("rfq_fills"),
         "reasons": reasons,
+        "causes": _sum_causes(ms),
+        "fill% | quotable": 100 * tot("uninformed_filled") / max(1, tot("uninformed_filled") + _sum_causes(ms).get(
+            "trader minimum-output constraint", 0)),
+        "fill% | safe demand": 100 * tot("uninformed_filled") / max(1, tot("uninformed") - sum(
+            _sum_causes(ms).get(c, 0) for c in SAFETY_CAUSES)),
     }
 
 
@@ -922,12 +1065,93 @@ def calibrate():
     return selected
 
 
+# ------------------------------------------------------------------------------------------------------------------
+# Phase 1B-4.1: verified references, the vault-side dynamic floor, both strategies, rejection attribution
+# ------------------------------------------------------------------------------------------------------------------
+
+CAUSE_ORDER = ["physical inventory", "LP withdrawal reservation", "curator commitment limit", "vault flow limit",
+               "inventory concentration", "price-floor conflict", "oracle uncertainty or staleness",
+               "trader minimum-output constraint", "pricing-model limitation"]
+
+
+def _families_141():
+    keeper = dict(oracle=True, floors="keeper")
+    dyn = dict(oracle=True, floors="dynamic")
+    fam = {
+        "point": [Candidate(f"point h={h / 100:g} vol={vm}", "C", ref_mode="point", c=c_config(h, 150_000),
+                            vol_mult=vm, **keeper) for h in (500, 1_000, 2_000, 4_000) for vm in (0, 50)],
+        "bracket": [Candidate(f"bracket h={h / 100:g} vol={vm}", "C", ref_mode="bracket",
+                              c=c_config(h, 150_000, max_spread=40_000, band=True), vol_mult=vm, **dyn)
+                    for h in (200, 500, 1_000, 2_000) for vm in (0,)],
+        "bracket_pull": [Candidate(f"bracket+pull h={h / 100:g}", "C", ref_mode="bracket_pull",
+                                   c=c_config(h, 150_000, max_spread=40_000, band=True), **dyn)
+                         for h in (200, 500, 1_000, 2_000)],
+    }
+    return fam
+
+
+def phase141(workers=None):
+    """Calibrate each reference mode on calibration seeds (same pre-declared rule as Phase 1B-4), then evaluate the
+    selections on held-out seeds with rejection attribution. SYNTHETIC; feed parameters as verified on Unichain."""
+    print("Phase 1B-4.1. SYNTHETIC worlds. Calibration seeds", CALIBRATION_SEEDS, "held-out", HELD_OUT_SEEDS)
+    selected = {}
+    for fam, grid in _families_141().items():
+        table = run_grid(REGIMES_141, CALIBRATION_SEEDS, grid, workers)
+        ov = overall(table, REGIMES_141, grid, f"Calibration, {fam}")
+        ranked = sorted(ov.items(), key=lambda kv: (round(kv[1]["pnl_worst"]), kv[1]["pnl_med"]), reverse=True)
+        selected[fam] = next(c for c in grid if c.name == ranked[0][0])
+        print(f"\nSelected for {fam}:", ranked[0][0])
+    p0 = next(c for c in CANDIDATES if c.name.startswith("C3"))
+    p2 = selected["bracket"]
+    cands = [
+        replace(p0, name="P0 C3, assumed feeds (Phase 1B-4)"),
+        replace(selected["point"], name=f"P1 verified feeds, point mid ({selected['point'].name})"),
+        replace(p2, name=f"P2 verified bracket + vault dynamic floor ({p2.name})"),
+        replace(selected["bracket_pull"], name=f"P3 bracket + hypothetical pull ({selected['bracket_pull'].name})"),
+        Candidate("P4 Hook A + Hook B strategies on P2's shared core", "X", ref_mode="bracket", oracle=True,
+                  floors="dynamic", hooks=(replace(p2, strategy="A"), replace(p2, strategy="B"))),
+    ]
+    table = run_grid(REGIMES_141, HELD_OUT_SEEDS, cands, workers)
+    ov = overall(table, REGIMES_141, cands, "Held-out, Phase 1B-4.1 candidates")
+    stress = run_grid(STRESS, HELD_OUT_SEEDS, cands, workers)
+    print("\n### Rejection attribution, held-out (share of uninformed orders, %)\n")
+    print("| regime | candidate | fill% | fill% given quotable | fill% given safe demand | " + " | ".join(CAUSE_ORDER)
+          + " |")
+    print("|---" * (len(CAUSE_ORDER) + 5) + "|")
+    rows = {}
+    for src, regs in ((table, REGIMES_141), (stress, STRESS)):
+        for r in regs:
+            for c in cands:
+                sm = summarise(src[(r.name, c.name)])
+                n = sum(x["uninformed"] for x in src[(r.name, c.name)])
+                shares = [100 * sm["causes"].get(k, 0) / max(1, n) for k in CAUSE_ORDER]
+                rows[f"{r.name} | {c.name}"] = {**{k: sm[k] for k in ("fill%", "fill% | quotable", "fill% | safe demand",
+                                                                       "LP vs HODL bps (median)",
+                                                                       "LP vs HODL bps (worst)", "arb rev/day",
+                                                                       "exec cost bps", "max |dev|%")},
+                                                "causes%": dict(zip(CAUSE_ORDER, shares))}
+                print(f"| {r.name} | {c.name[:3]} | {sm['fill%']:.1f} | {sm['fill% | quotable']:.1f} | "
+                      f"{sm['fill% | safe demand']:.1f} | " + " | ".join(f"{x:.1f}" for x in shares) + " |")
+    print("\n### Economics, held-out and stress (median LP vs HODL bps / worst seed / arbitrage per day / cost bps)\n")
+    for k, v in rows.items():
+        print(f"- {k}: {v['LP vs HODL bps (median)']:.1f} / {v['LP vs HODL bps (worst)']:.1f} / "
+              f"{v['arb rev/day']:.1f} / {v['exec cost bps']:.1f}; max dev {v['max |dev|%']:.1f}%")
+    os.makedirs(os.path.join(os.path.dirname(__file__), "results"), exist_ok=True)
+    with open(os.path.join(os.path.dirname(__file__), "results", "phase141_summary.json"), "w") as f:
+        json.dump({"selected": {k: v.name for k, v in selected.items()}, "overall": ov, "rows": rows},
+                  f, indent=1, sort_keys=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--calibrate", action="store_true")
     ap.add_argument("--quick", action="store_true", help="2 seeds, for development only")
     ap.add_argument("--workers", type=int, default=None)
+    ap.add_argument("--phase141", action="store_true", help="Phase 1B-4.1 experiment (verified feeds)")
     a = ap.parse_args()
+    if a.phase141:
+        phase141(a.workers)
+        return
     if a.calibrate:
         calibrate()
         return
