@@ -43,6 +43,8 @@ from cumulative import (  # noqa: E402
     HookB,
     HookBConfig,
     Revert,
+    cumulative_fee,
+    decayed,
     decayed_signed,
     floor_ok,
     max_position,
@@ -55,11 +57,13 @@ from cumulative import (  # noqa: E402
 WAD = 10**18
 
 __all__ = [
-    "PIPS", "Q96", "WAD", "MAX_AMOUNT", "Revert", "HookA", "HookAConfig", "HookB", "HookBConfig", "floor_ok", "mul_div", "mul_div_up",
+    "PIPS", "Q96", "WAD", "MAX_AMOUNT", "Revert", "HookA", "HookAConfig", "HookB", "HookBConfig", "floor_ok", "mul_div", "mul_div_up", "decayed", "cumulative_fee",
     "position_cost", "position_for_cost", "max_position", "decayed_signed",
     "VaultSnapshot", "FeedReading", "ReferencePolicy", "Reference", "resolve_reference", "realized_vol_term",
     "TwoSidedCurveConfig", "TwoSidedCurve", "InventoryConfig", "InventoryQuote", "inventory_state",
-    "straddle_cap", "depth_per_share_for", "ext_cost", "ext_position_for_cost", "quote_inventory", "floors_from_pivot",
+    "straddle_cap", "depth_per_share_for", "ext_cost", "CoreState", "core_state", "core_ask", "core_bid",
+    "BracketSource", "SequencerStatus", "bracket_reference", "ActivityFeeConfig", "StrategyQuote", "hook_a_quote",
+    "hook_b_quote", "ext_position_for_cost", "quote_inventory", "floors_from_pivot",
 ]
 
 
@@ -391,10 +395,48 @@ def quote_inventory(cfg: InventoryConfig, snap: VaultSnapshot, ref: Reference, z
 
     h = base_spread + reference uncertainty. cap = min(straddle_cap(V, h, h_min), max_deviation * T_1 / PIPS).
     """
+    _check_amount(amount_in)
+    cs = core_state(cfg, snap, ref)
+    if zero_for_one:
+        out, i2 = core_ask(cs, amount_in)
+    else:
+        out, i2 = core_bid(cs, amount_in, amount_in)
+    return InventoryQuote(out, cs.i, i2, cs.h, cs.cap, cs.v)
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# Shared economic core (Phase 1B-4.1): one state every hook on the reserve prices from
+# ----------------------------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CoreState:
+    """The shared economic state of one reserve at one block, as every hook must compute it.
+
+    i:     inventory deviation T_1 - N_1, raw currency1 (from the vault; no hook copy).
+    v:     curve depth, raw currency1.
+    t1:    target currency1 holdings.
+    cap:   inventory cap shared by all hooks = min(straddle_cap(v, h, h_min), t1 * max_deviation).
+    h:     core half-spread = base_spread + reference uncertainty: the minimum every strategy charges, and the spread
+           the shared cap is computed for. Strategies may add to it, never subtract.
+    price: reference mid, Q96."""
+
+    i: int
+    v: int
+    t1: int
+    cap: int
+    h: int
+    price_x96: int
+
+
+def _check_amount(amount_in: int) -> None:
     if amount_in == 0:
         raise Revert("ZeroInput")
     if amount_in > MAX_AMOUNT:
         raise Revert("AmountTooLarge")
+
+
+def core_state(cfg: InventoryConfig, snap: VaultSnapshot, ref: Reference) -> CoreState:
     h = cfg.base_spread + ref.uncertainty
     if h > cfg.max_spread:
         raise Revert("SpreadTooWide", h)
@@ -402,19 +444,163 @@ def quote_inventory(cfg: InventoryConfig, snap: VaultSnapshot, ref: Reference, z
     if v == 0:
         raise Revert("NoDepth")
     cap = min(straddle_cap(v, h, cfg.min_edge), t1 * cfg.max_deviation // PIPS)
-    P = ref.price_x96
-    c_i = ext_cost(i, v, P, cap)
-    if zero_for_one:
-        t = c_i + credit_in(amount_in, h) - 1
-        if i >= cap or t >= ext_cost(cap + 1, v, P, cap):
-            raise Revert("InventoryLimit", i, cap)
-        i2 = ext_position_for_cost(t, v, P, cap)
-        out = i2 - i
-    else:
-        i2 = i - amount_in
-        if i2 < -cap:
-            raise Revert("InventoryLimit", i, cap)
-        out = debit_out(c_i - ext_cost(i2, v, P, cap), h) - 1
+    return CoreState(i, v, t1, cap, h, ref.price_x96)
+
+
+def core_ask(cs: CoreState, net_in: int) -> tuple[int, int]:
+    """Vault sells currency1 for `net_in` currency0 (after any strategy fee). Returns (out, I')."""
+    v, P, cap = cs.v, cs.price_x96, cs.cap
+    t = ext_cost(cs.i, v, P, cap) + credit_in(net_in, cs.h) - 1
+    if cs.i >= cap or t >= ext_cost(cap + 1, v, P, cap):
+        raise Revert("InventoryLimit", cs.i, cap)
+    i2 = ext_position_for_cost(t, v, P, cap)
+    out = i2 - cs.i
     if out <= 0:
         raise Revert("ZeroOutput")
-    return InventoryQuote(out, i, i2, h, cap, v)
+    return out, i2
+
+
+def core_bid(cs: CoreState, moved: int, priced: int) -> tuple[int, int]:
+    """Vault buys `moved` currency1 and pays for `priced` <= moved of it on the curve (the rest is the strategy fee,
+    received in currency1). The state moves by the full `moved`, because that is what the vault now holds; the curve
+    segment priced, [I - priced, I], lies inside the one moved through, so the fee can only lower the output."""
+    v, P, cap = cs.v, cs.price_x96, cs.cap
+    i2 = cs.i - moved
+    if i2 < -cap:
+        raise Revert("InventoryLimit", cs.i, cap)
+    c_i = ext_cost(cs.i, v, P, cap)
+    out = debit_out(c_i - ext_cost(cs.i - priced, v, P, cap), cs.h) - 1
+    if out <= 0:
+        raise Revert("ZeroOutput")
+    return out, i2
+
+
+# --- Reference: intersection of deviation brackets -------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BracketSource:
+    """A push feed whose deviation trigger bounds the market while the feed is live: market within
+    [p (1 - d), p (1 + d)], d = deviation + margin (pips). `max_age` is its heartbeat plus a grace, seconds."""
+
+    price_x96: int
+    updated_at: int
+    deviation: int
+    max_age: int
+
+
+@dataclass(frozen=True)
+class SequencerStatus:
+    """Chainlink L2 sequencer uptime feed: answer 0 = up; `since` = startedAt of the current status."""
+
+    up: bool
+    since: int
+
+
+def bracket_reference(sources: list[BracketSource], now: int, min_sources: int = 2,
+                      sequencer: SequencerStatus | None = None, grace: int = 0) -> Reference:
+    """Mid and uncertainty from the intersection of every fresh source's deviation bracket.
+
+    Each live source says the market is in [lo_s, hi_s] = [floor(p (PIPS - d) / PIPS), ceil(p (PIPS + d) / PIPS)].
+    The market is in every bracket at once, so in L = max lo_s, H = min hi_s. If L > H the sources contradict each
+    other beyond their own error bounds: at least one is wrong or not live, and the reference is refused. Otherwise
+    M = floor((L + H) / 2) and u = max(ceil((H - M) PIPS / M), ceil((M - L) PIPS / M)), so M (1 +- u) covers [L, H]:
+    quotes with half-spread >= u straddle every price the sources allow.
+
+    Example: p_1 = 2,048.39 and p_2 = 2,050.31 (the Unichain Chainlink and RedStone ETH/USD readings of 2026-11-10),
+    both d = 50 bps: brackets [2,038.15, 2,058.63] and [2,040.06, 2,060.56]; L = 2,040.06, H = 2,058.63, M = 2,049.35,
+    u = 4,532 pips (45.3 bps). Two sources 1.1% apart with d = 50 bps each: refused.
+
+    Refusals: SequencerDown, SequencerGracePeriod, ReferenceUnavailable (no answer or a future timestamp),
+    InsufficientSources (fewer than `min_sources` fresh), ReferenceDivergence (empty intersection)."""
+    if sequencer is not None:
+        if not sequencer.up:
+            raise Revert("SequencerDown")
+        if now - sequencer.since < grace:
+            raise Revert("SequencerGracePeriod")
+    lo = hi = None
+    n = 0
+    for src in sources:
+        if src.price_x96 == 0 or src.updated_at > now:
+            raise Revert("ReferenceUnavailable")
+        if now - src.updated_at > src.max_age:
+            continue
+        l_s = src.price_x96 * (PIPS - src.deviation) // PIPS
+        h_s = mul_div_up(src.price_x96, PIPS + src.deviation, PIPS)
+        lo = l_s if lo is None else max(lo, l_s)
+        hi = h_s if hi is None else min(hi, h_s)
+        n += 1
+    if n < min_sources:
+        raise Revert("InsufficientSources", n)
+    if lo > hi:
+        raise Revert("ReferenceDivergence", lo, hi)
+    m = (lo + hi) // 2
+    u = max(mul_div_up(hi - m, PIPS, m), mul_div_up(m - lo, PIPS, m))
+    return Reference(m, u)
+
+
+# --- Strategies ---------------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ActivityFeeConfig:
+    """Hook A's activity fee on top of the core spread: the existing cumulative flow fee (`cumulative_fee`), rising
+    from `base` to `mx` pips over `scale` of decayed gross input per direction, decaying over `window` seconds."""
+
+    base: int
+    mx: int
+    scale0: int
+    scale1: int
+    window: int
+
+
+@dataclass(frozen=True)
+class StrategyQuote:
+    amount_out: int
+    i_after: int
+    fee: int  # input units kept by the strategy before the core prices the rest
+    new_level: int  # Hook A only: the activity level to store; 0 for Hook B
+
+
+def hook_a_quote(cs: CoreState, fc: ActivityFeeConfig, level_now: int, zero_for_one: bool,
+                 amount_in: int) -> StrategyQuote:
+    """Hook A: inventory-aware cumulative dynamic fee.
+
+    fee = F_hat(s + in) - F_hat(s) (input units, the production Hook A function, telescoping per direction);
+    net = in - fee is priced by the shared core, so Hook A always pays the core spread and the shared cap.
+    zeroForOne: out = core ask for net currency0. oneForZero: the vault receives all `in` currency1 (the state moves
+    by `in`) and pays for `net` of it on the curve."""
+    _check_amount(amount_in)
+    k = fc.scale0 if zero_for_one else fc.scale1
+    s2 = level_now + amount_in
+    if s2 > 2**128 - 1:
+        raise Revert("AmountTooLarge")
+    fee = cumulative_fee(s2, k, fc.base, fc.mx) - cumulative_fee(level_now, k, fc.base, fc.mx)
+    net = amount_in - fee
+    if zero_for_one:
+        out, i2 = core_ask(cs, net)
+    else:
+        out, i2 = core_bid(cs, amount_in, net)
+    return StrategyQuote(out, i2, fee, s2)
+
+
+def hook_b_quote(cs: CoreState, markup: int, max_trade_impact: int, zero_for_one: bool,
+                 amount_in: int) -> StrategyQuote:
+    """Hook B: inventory-aware bounded impact.
+
+    An optional flat markup (pips of input, rounded toward the vault) on top of the core spread, the shared cap as the
+    aggregate impact bound, and a per-trade bound: the trade is refused (TradeImpactExceeded) if its average price is
+    more than `max_trade_impact` pips worse for the trader than the reference mid. Inventory-reducing trades get the
+    better side of the skew; nothing refuses them except the reference, the spread limit and the vault."""
+    _check_amount(amount_in)
+    fee = amount_in - amount_in * (PIPS - markup) // PIPS
+    net = amount_in - fee
+    if zero_for_one:
+        out, i2 = core_ask(cs, net)
+        at_mid = amount_in * cs.price_x96 // Q96
+    else:
+        out, i2 = core_bid(cs, amount_in, net)
+        at_mid = amount_in * Q96 // cs.price_x96
+    if out * PIPS < at_mid * (PIPS - max_trade_impact):
+        raise Revert("TradeImpactExceeded", out, at_mid)
+    return StrategyQuote(out, i2, fee, 0)
