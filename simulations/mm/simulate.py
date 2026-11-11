@@ -75,6 +75,7 @@ from model import (  # noqa: E402
     core_state,
     decayed,
     hook_a_quote,
+    hook_b_quote,
 )
 
 E18 = 10**18
@@ -114,6 +115,7 @@ class Regime:
     manip_primary: tuple = ()  # (start fraction, seconds, log offset)
     manip_secondary: tuple = ()
     scale: float = 1.0  # vault size relative to INIT (illiquid regime: 0.1)
+    freeze: tuple = ()  # (start fraction, seconds): both verified push feeds publish nothing (still within max age)
 
 
 REGIMES = [
@@ -221,6 +223,11 @@ def build_world(reg: Regime, seed: int) -> World:
     # pair moves with the ETH leg; their thresholds widen the bracket (VERIFIED_BRACKET), not the update rule.
     vprim = feed(0.005, 86_400, 0.0, reg.manip_primary, reg.outage, random.Random(seed + 3))
     vsec = feed(0.005, 21_600, reg.sec_noise_bps, reg.manip_secondary, (), random.Random(seed + 4))
+    for fs, fdur in reg.freeze:  # a frozen feed keeps showing its last answer and timestamp
+        a, b = int(fs * n), min(n, int(fs * n) + fdur // SLOT)
+        for lst in (vprim, vsec):
+            for k in range(a + 1, b):
+                lst[k] = lst[a]
     # Hypothetical pull source: the market one slot ago, every slot (not verified usable on Unichain: see the report).
     pull = [(0, 0)] + [(_x96(mkt[k - 1]), (k - 1) * SLOT) for k in range(1, n)]
 
@@ -296,6 +303,10 @@ class Candidate:
     ref_mode: str = "assumed"  # "assumed" (Phase 1B-4 feeds), "point" (verified feeds, divergence uncertainty),
     #                            "bracket" (verified feeds, fail-safe bracket), "bracket_pull" (+ hypothetical pull)
     strategy: str = "B"  # C/D/S: "B" core only (Hook B strategy) or "A" (Hook A activity fee on the core)
+    kappa: int = 150_000  # floors="orb": vault inventory tolerance, pips (inventory floor = target * (1 - kappa))
+    max_unc: int = 30_000  # floors="orb": vault uncertainty breaker, pips
+    fresh_avail: float = 1.0  # bracket_pull: probability that a trade carries a fresh signed payload
+    b_markup: int = 0  # strategy B: flat markup, pips
 
 
 # Held-out candidates. A, B and C parameters are the calibration selections (results/calibration.json, rule in
@@ -431,6 +442,9 @@ class Engine:
             lvl = decayed(self.level[zfo], k, f.window, now - self.updated[zfo])
             q = hook_a_quote(core_state(self.cand.c, snap, ref), f, lvl, zfo, amt)
             return q.amount_out, ("A", zfo, q.new_level)
+        if self.cand.b_markup:
+            q = hook_b_quote(core_state(self.cand.c, snap, ref), self.cand.b_markup, PIPS - 1, zfo, amt)
+            return q.amount_out, None
         q = quote_inventory(self.cand.c, snap, ref, zfo, amt)
         return q.amount_out, None
 
@@ -502,13 +516,14 @@ class Metrics:
     value0: float = 0.0
     init: float = float(INIT)
     causes: dict = field(default_factory=dict)  # uninformed orders not filled, by the nine categories of the brief
+    recoveries: list = field(default_factory=list)  # seconds from |deviation| > 10% back to < 5%
 
 
 def _reason(m: Metrics, name: str):
     m.reasons[name] = m.reasons.get(name, 0) + 1
 
 
-ORACLE_REASONS = {"ReferenceUnavailable", "StaleReference", "ReferenceDivergence", "SecondaryUnavailable",
+ORACLE_REASONS = {"UncertaintyTooHigh", "ReferenceUnavailable", "StaleReference", "ReferenceDivergence", "SecondaryUnavailable",
                   "SpreadTooWide", "InsufficientSources", "SequencerDown", "SequencerGracePeriod", "DegenerateBracket"}
 SAFETY_CAUSES = ("physical inventory", "LP withdrawal reservation", "curator commitment limit", "vault flow limit",
                  "inventory concentration", "price-floor conflict", "oracle uncertainty or staleness")
@@ -522,7 +537,7 @@ def cause_of(e: Revert) -> str:
         return "curator commitment limit" if c == "full" else c
     if n == "FlowLimitExceeded":
         return "vault flow limit"
-    if n in ("InventoryLimit", "ImpactBoundExceeded"):
+    if n in ("InventoryLimit", "ImpactBoundExceeded", "InventoryFloorBreached"):
         return "inventory concentration"
     if n == "PriceBelowFloor":
         return "price-floor conflict"
@@ -544,6 +559,7 @@ class Sim:
         self.shares = self.init * E18  # sqrt(N0 * N1)
         self.q_cause = {True: "full", False: "full"}  # why the current allocation is below its target size
         self._ref_cache = (-1, None)
+        self._excursion = None
         self.tau1 = self.n1 * WAD // self.shares
         self.pivot, self.pending_pivot = self.p0, None
         self.q = {True: 0, False: 0}  # remaining allocation by "vault sells currency1" (True) / currency0 (False)
@@ -600,8 +616,10 @@ class Sim:
         mode = self.c.ref_mode
         if mode in ("bracket", "bracket_pull"):
             srcs = []
+            has_payload = mode == "bracket_pull" and (
+                self.c.fresh_avail >= 1.0 or (zlib.crc32(f"{self.w.seed}:{k}".encode()) % 10_000) < self.c.fresh_avail * 10_000)
             for name, feed in (("primary", self.w.vprim), ("secondary", self.w.vsec)) + (
-                    (("pull", self.w.pull),) if mode == "bracket_pull" else ()):
+                    (("pull", self.w.pull),) if has_payload else ()):
                 p, u = feed[k]
                 if p == 0 and name != "pull":
                     self._set_ref_error("ReferenceUnavailable")
@@ -642,7 +660,7 @@ class Sim:
             return None
 
     def _vault_check(self, zfo: bool, amt: int, out: int, k: int):
-        if self.c.floors == "dynamic":
+        if self.c.floors in ("dynamic", "orb"):
             # The proposed vault-side dynamic floor: refuse any price inside the reference band (same adapter, same
             # block as the hook), on the vault's own rounding.
             ref = self.reference(k)
@@ -651,6 +669,13 @@ class Sim:
             widen = PIPS + ref.uncertainty
             f_sell0 = mul_div_up(ref.price_x96, widen, PIPS)
             f_sell1 = mul_div_up(mul_div_up(Q96, Q96, ref.price_x96), widen, PIPS)
+            if self.c.floors == "orb":
+                if ref.uncertainty > self.c.max_unc:
+                    raise Revert("UncertaintyTooHigh")
+                held = self.n1 if zfo else self.n0
+                floor_ = mul_div_up(self.shares * WAD, PIPS - self.c.kappa, WAD * PIPS)  # target 1 per share
+                if held - out < floor_:
+                    raise Revert("InventoryFloorBreached")
         else:
             f_sell0, f_sell1 = floors_from_pivot(self.pivot)
         if not floor_ok(amt, out, f_sell1 if zfo else f_sell0):
@@ -909,6 +934,11 @@ class Sim:
             self.arbitrage(k)
             self.order(o, k)
             dev = abs(self._inventory())
+            if dev > 0.10 and self._excursion is None:
+                self._excursion = k
+            elif dev < 0.05 and self._excursion is not None:
+                m.recoveries.append((k - self._excursion) * SLOT)
+                self._excursion = None
             m.dev_sum += dev
             m.dev_n += 1
             m.dev_max = max(m.dev_max, dev)
@@ -1142,13 +1172,98 @@ def phase141(workers=None):
                   f, indent=1, sort_keys=True)
 
 
+# ------------------------------------------------------------------------------------------------------------------
+# Phase 1B-4.2: the oracle risk boundary in the vault, correlated oracle failures, fresh-source availability
+# ------------------------------------------------------------------------------------------------------------------
+
+ATTACKS = [
+    Regime("A1 one source +1.5% for 6 h (inside the detection band)", days=3, manip_primary=((0.4, 6 * 3600, math.log(1.015)),)),
+    Regime("A2 one source +3% for 30 min (detected)", days=3, manip_primary=((0.5, 1800, math.log(1.03)),)),
+    Regime("A3 both sources +5% for 6 h (shared upstream)", days=3,
+           manip_primary=((0.4, 6 * 3600, math.log(1.05)),), manip_secondary=((0.4, 6 * 3600, math.log(1.05)),)),
+    Regime("A4 malicious adapter: price halved for 1 day", days=3,
+           manip_primary=((0.3, 86_400, math.log(0.5)),), manip_secondary=((0.3, 86_400, math.log(0.5)),)),
+    Regime("A5 both feeds frozen through a -10% move over 2 h", days=3, vol_day=0.02, freeze=((0.4, 3 * 3600),),
+           jumps=tuple((0.4 + i * 0.0001, math.log(0.9) / 70) for i in range(70))),
+    Regime("A6 sudden -8% jump", days=3, vol_day=0.02, jumps=((0.5, math.log(0.92)),)),
+    Regime("A7 depeg -15% in 1 h then drift", days=3, vol_day=0.03, drift_day=-0.03,
+           jumps=tuple((0.3 + i * 0.0005, math.log(0.85) / 30) for i in range(30))),
+]
+
+
+def _cands_142():
+    dyn = dict(oracle=True, floors="dynamic")
+    orb = dict(oracle=True, floors="orb")
+    b10 = c_config(1_000, 150_000, max_spread=40_000, band=True)
+    b20 = c_config(2_000, 150_000, max_spread=40_000, band=True)
+    return [
+        Candidate("Q0 push bracket, dynamic floor only (Phase 1B-4.1)", "C", ref_mode="bracket", c=b10, **dyn),
+        Candidate("Q1 push bracket + oracle risk boundary (kappa 15%)", "C", ref_mode="bracket", c=b10, **orb),
+        Candidate("Q2 push + fresh credentialed source (95% availability) + boundary", "C", ref_mode="bracket_pull",
+                  c=b20, fresh_avail=0.95, **orb),
+        Candidate("Q3 as Q2, kappa 5%", "C", ref_mode="bracket_pull", c=c_config(2_000, 50_000, max_spread=40_000,
+                                                                                 band=True), fresh_avail=0.95,
+                  kappa=50_000, **orb),
+    ]
+
+
+def phase142(workers=None):
+    print("Phase 1B-4.2. SYNTHETIC worlds; held-out seeds", HELD_OUT_SEEDS)
+    cands = _cands_142()
+    table = run_grid(REGIMES_141, HELD_OUT_SEEDS, cands, workers)
+    ov = overall(table, REGIMES_141, cands, "Held-out, Phase 1B-4.2 candidates")
+    att = run_grid(ATTACKS, HELD_OUT_SEEDS, cands, workers)
+    rows = {}
+    print("\n### Attacks (3-day worlds, 4 seeds): LP vs HODL bps median / worst seed; arbitrage revenue per day; "
+          "refusal causes (% of uninformed)\n")
+    print("| attack | candidate | LP median | LP worst | arb/day | max dev% | oracle refusals | inventory refusals |")
+    print("|---|---|---|---|---|---|---|---|")
+    for r in ATTACKS:
+        for c in cands:
+            ms = att[(r.name, c.name)]
+            sm = summarise(ms)
+            n = max(1, sum(x["uninformed"] for x in ms))
+            ora = 100 * sm["causes"].get("oracle uncertainty or staleness", 0) / n
+            inv = 100 * sm["causes"].get("inventory concentration", 0) / n
+            rows[f"{r.name} | {c.name}"] = {"lp_med": sm["LP vs HODL bps (median)"],
+                                            "lp_worst": sm["LP vs HODL bps (worst)"], "arb": sm["arb rev/day"],
+                                            "max_dev": sm["max |dev|%"], "oracle%": ora, "inventory%": inv}
+            print(f"| {r.name} | {c.name[:2]} | {sm['LP vs HODL bps (median)']:.1f} | "
+                  f"{sm['LP vs HODL bps (worst)']:.1f} | {sm['arb rev/day']:.1f} | {sm['max |dev|%']:.1f} | "
+                  f"{ora:.1f} | {inv:.1f} |")
+    print("\n### Inventory recovery (held-out; seconds from |deviation| > 10% back to < 5%)\n")
+    rec = {}
+    for c in cands:
+        allr = [t for r in REGIMES_141 for x in table[(r.name, c.name)] for t in x["recoveries"]]
+        rec[c.name] = {"episodes": len(allr), "median_s": statistics.median(allr) if allr else None,
+                       "max_s": max(allr) if allr else None}
+        print(f"- {c.name}: {rec[c.name]}")
+    # Strategy differentiation: Hook A (activity fee 0 -> 20 bps) beside Hook B with a flat 10 bp markup, on Q2's core.
+    q2 = cands[2]
+    diff = [replace(q2, name="S0 Hook B alone (no markup)"),
+            Candidate("S1 Hook A (0->20 bps activity fee) + Hook B (10 bp markup)", "X", ref_mode="bracket_pull",
+                      oracle=True, floors="orb", fresh_avail=0.95,
+                      hooks=(replace(q2, strategy="A"), replace(q2, b_markup=1_000)))]
+    dt = run_grid(REGIMES_141, HELD_OUT_SEEDS, diff, workers)
+    dov = overall(dt, REGIMES_141, diff, "Strategy differentiation (held-out)")
+    os.makedirs(os.path.join(os.path.dirname(__file__), "results"), exist_ok=True)
+    with open(os.path.join(os.path.dirname(__file__), "results", "phase142_summary.json"), "w") as f:
+        json.dump({"overall": ov, "attacks": rows, "recovery": rec, "differentiation": dov,
+                   "regimes": {f"{r} | {c}": {k: v for k, v in summarise(x).items() if k != "reasons"}
+                               for (r, c), x in table.items()}}, f, indent=1, sort_keys=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--calibrate", action="store_true")
     ap.add_argument("--quick", action="store_true", help="2 seeds, for development only")
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--phase141", action="store_true", help="Phase 1B-4.1 experiment (verified feeds)")
+    ap.add_argument("--phase142", action="store_true", help="Phase 1B-4.2 experiment (oracle risk boundary)")
     a = ap.parse_args()
+    if a.phase142:
+        phase142(a.workers)
+        return
     if a.phase141:
         phase141(a.workers)
         return
