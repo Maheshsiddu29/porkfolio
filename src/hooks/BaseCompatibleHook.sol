@@ -14,6 +14,9 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 
 import {ISharedCommitmentVault} from "../interfaces/ISharedCommitmentVault.sol";
+import {IVaultState} from "../interfaces/IVaultState.sol";
+import {IMarketRiskAdapter} from "../interfaces/IMarketRiskAdapter.sol";
+import {InventoryPricing} from "../pricing/InventoryPricing.sol";
 
 /// @title BaseCompatibleHook
 /// @notice Shared swap plumbing for hooks that fill every swap on their pool from the SharedCommitmentVault instead
@@ -78,6 +81,21 @@ import {ISharedCommitmentVault} from "../interfaces/ISharedCommitmentVault.sol";
 ///      after the swap (for example the v4 `V4Router`'s `amountOutMinimum`) protect their users independently of
 ///      this field, because the hook's output reaches the swapper as an ordinary PoolManager delta.
 ///
+///      Two pricing modes, chosen by the vault, never by the hook or the swapper.
+///        Static mode (the vault has no market-risk adapter): the concrete hook prices with `_quote` from its own
+///        per-pool configuration, around the price its owner configured.
+///        Shared-core mode (the vault has an adapter): the hook reads that adapter from the vault, the vault's net
+///        currency1 holding N1, the share supply S and the vault's inventory target tau_1, and prices through
+///        `InventoryPricing` in band mode (every quote lies outside the reference band widened by the edge), then
+///        applies its own strategy (`_quoteCore`). Nothing in the hook selects the adapter, so a hook cannot price
+///        from a weaker one than the vault enforces. The vault re-reads the same adapter inside `exchange` in the
+///        same transaction; for an adapter that is a view of on-chain state, as `PriceRiskAdapter` is, both reads see
+///        the same state because nothing between them touches the feeds. That is consistency, not independence: one
+///        corrupted adapter misleads both, and what bounds the damage is the vault's inventory floor.
+///        Two vault limits feed the core so that a tightening by the vault's guardian reaches every hook at once:
+///        the core's deviation cap is at most the vault's tolerance kappa_1, and the hook's edge is at least the
+///        vault's edge plus 1 pip (an equal edge would let rounding put a quote one raw unit inside the vault floor).
+///
 ///      Permissions: beforeSwap, beforeSwapReturnDelta, and beforeAddLiquidity (only to reject native liquidity,
 ///      which could never be traded because every swap is intercepted). The deployed address must encode exactly
 ///      these permission bits; the constructor checks this.
@@ -91,6 +109,38 @@ abstract contract BaseCompatibleHook is IHooks {
     ISharedCommitmentVault public immutable vault;
     /// @notice Account allowed to configure pool pricing on the concrete hook. It has no authority over the vault.
     address public immutable hookOwner;
+
+    /// @dev 1e6 pips = 100%.
+    uint256 internal constant _PIPS = 1_000_000;
+
+    /// @notice Shared-core parameters of one pool, used only while the vault has a market-risk adapter.
+    /// @param depthPerShare Curve depth V per share, raw currency1 scaled by 1e18; V = S * depthPerShare / 1e18,
+    ///        capped at `depthMax`. Larger depth means a flatter price curve.
+    /// @param depthMax Largest V, raw currency1. Below 2^95 (the core's overflow bound).
+    /// @param baseSpreadPips Half-spread before uncertainty; the core adds the adapter's uncertainty u to it.
+    /// @param minEdgePips Smallest edge beyond the reference band; raised to the vault's edge + 1 when lower.
+    /// @param maxSpreadPips Largest half-spread (base + u) the pool will quote; wider readings are refused.
+    /// @param maxDeviationPips Largest inventory deviation from target, pips of T1; lowered to the vault's kappa_1.
+    struct CoreParams {
+        uint128 depthPerShare;
+        uint128 depthMax;
+        uint24 baseSpreadPips;
+        uint24 minEdgePips;
+        uint24 maxSpreadPips;
+        uint24 maxDeviationPips;
+    }
+
+    /// @notice Shared-core parameters by pool. All-zero: the pool cannot trade in shared-core mode.
+    mapping(PoolId => CoreParams) public coreParams;
+
+    /// @notice Shared-core parameters of `poolId` were set.
+    event CoreConfigured(PoolId indexed poolId, CoreParams params);
+
+    /// @notice The vault has a market-risk adapter but this pool has no shared-core parameters.
+    error CoreNotConfigured();
+    /// @notice Shared-core parameters out of range (zero depth, depth at or above 2^95, a spread or deviation of
+    ///         100% or more, or a key for another hook).
+    error InvalidCoreConfig();
 
     /// @notice A hook callback was called by something other than the PoolManager.
     error NotPoolManager();
@@ -162,6 +212,22 @@ abstract contract BaseCompatibleHook is IHooks {
         poolManager_.setOperator(address(vault_), true);
     }
 
+    /// @notice Set the shared-core parameters of one of this hook's pools.
+    /// @dev Hook owner only. Takes effect on the next swap. The parameters shape the hook's quotes inside the vault's
+    ///      boundary; they cannot widen what the vault accepts. See `CoreParams` for units.
+    /// @param key Pool to configure; its `hooks` must be this contract.
+    /// @param params New parameters.
+    function configureCore(PoolKey calldata key, CoreParams calldata params) external onlyHookOwner {
+        if (
+            address(key.hooks) != address(this) || params.depthPerShare == 0 || params.depthMax == 0
+                || params.depthMax >= 2 ** 95 || params.baseSpreadPips >= _PIPS || params.minEdgePips >= _PIPS
+                || params.maxSpreadPips >= _PIPS || params.maxDeviationPips >= _PIPS
+        ) revert InvalidCoreConfig();
+        PoolId id = key.toId();
+        coreParams[id] = params;
+        emit CoreConfigured(id, params);
+    }
+
     /// @notice Callbacks this hook needs: beforeSwap, beforeSwapReturnDelta and beforeAddLiquidity.
     /// @return p Permission flags; every flag not set here must be clear in the hook's address.
     function getHookPermissions() public pure returns (Hooks.Permissions memory p) {
@@ -185,6 +251,78 @@ abstract contract BaseCompatibleHook is IHooks {
         view
         virtual
         returns (uint256 amountOut, uint256 newState);
+
+    /// @notice Strategy pricing in shared-core mode: output for `amountIn` given the core state, and the strategy state
+    ///         to store if the swap succeeds.
+    /// @dev A view, like `_quote`. The core already includes the reference, the vault's inventory and the band.
+    /// @param id Pool being swapped on.
+    /// @param core Core state built by `_coreState` for this swap.
+    /// @param zeroForOne True if the swapper sells currency0.
+    /// @param amountIn Raw input amount, at most 2^127 - 1.
+    /// @return amountOut Raw output to request from the vault.
+    /// @return newState Strategy state after this trade, passed to `_commitCore`.
+    function _quoteCore(PoolId id, InventoryPricing.Core memory core, bool zeroForOne, uint256 amountIn)
+        internal
+        view
+        virtual
+        returns (uint256 amountOut, uint256 newState);
+
+    /// @notice Store the strategy state `_quoteCore` computed, after the vault has filled the trade.
+    /// @dev Default: no strategy state.
+    function _commitCore(PoolId id, bool zeroForOne, uint256 newState) internal virtual {}
+
+    /// @notice Shared-core state for one swap, or `coreMode = false` when the vault has no adapter (static mode).
+    /// @dev Reads, in this order: the vault's adapter, the adapter's reading, the vault's kappa_1, edge, tau_1, net
+    ///      currency1 holding N1 = B1 - W1 and share supply S. The adapter's revert (stale, contradictory or
+    ///      unavailable sources) reverts the swap. The vault re-checks the reading itself, so the hook adds no
+    ///      validity checks of its own beyond what `InventoryPricing.coreState` requires (spread at most maxSpread,
+    ///      non-zero depth).
+    /// @param id Pool being priced.
+    /// @param currency1 The pool's currency1 (the vault's asset1; the vault checks the pool's pair on every fill).
+    /// @return coreMode True when the vault has an adapter.
+    /// @return core The core state; meaningless when `coreMode` is false.
+    function _coreState(PoolId id, Currency currency1)
+        internal
+        view
+        returns (bool coreMode, InventoryPricing.Core memory core)
+    {
+        IVaultState v = IVaultState(address(vault));
+        IMarketRiskAdapter adapter = v.riskAdapter();
+        if (address(adapter) == address(0)) return (false, core);
+        CoreParams memory p = coreParams[id];
+        if (p.depthPerShare == 0) revert CoreNotConfigured();
+        IMarketRiskAdapter.Reading memory r = adapter.currentReference();
+        uint256 maxDeviation = v.inventoryTolerancePips(1);
+        if (p.maxDeviationPips < maxDeviation) maxDeviation = p.maxDeviationPips;
+        uint256 minEdge = uint256(v.riskEdgePips()) + 1;
+        if (p.minEdgePips > minEdge) minEdge = p.minEdgePips;
+        InventoryPricing.Config memory cfg = InventoryPricing.Config({
+            targetPerShare: v.inventoryTargetPerShare(1),
+            depthPerShare: p.depthPerShare,
+            depthMax: p.depthMax,
+            baseSpread: p.baseSpreadPips,
+            minEdge: minEdge,
+            maxSpread: p.maxSpreadPips,
+            maxDeviation: maxDeviation,
+            bandEdge: true
+        });
+        uint256 n1 = v.backing(currency1) - v.claimableAssets(currency1);
+        core = InventoryPricing.coreState(cfg, n1, v.totalShares(), r.priceX96, r.uncertaintyPips);
+        coreMode = true;
+    }
+
+    /// @notice Output for `amountIn` in whichever mode the vault is in, and the state to commit.
+    /// @dev Used by `beforeSwap` and by the concrete hooks' `quote` views, so a quote and a swap in the same block
+    ///      price identically.
+    function _quoteAny(PoolId id, Currency currency1, bool zeroForOne, uint256 amountIn)
+        internal
+        view
+        returns (bool coreMode, uint256 amountOut, uint256 newState)
+    {
+        InventoryPricing.Core memory core;
+        (coreMode, core) = _coreState(id, currency1);
+        (amountOut, newState) = coreMode ? _quoteCore(id, core, zeroForOne, amountIn) : _quote(id, zeroForOne, amountIn);
+    }
 
     /// @notice Store the pricing state `_quote` computed, after the vault has filled the trade.
     /// @param id Pool the swap ran on.
@@ -248,31 +386,43 @@ abstract contract BaseCompatibleHook is IHooks {
         }
 
         uint256 amountIn = uint256(-params.amountSpecified);
-        PoolId id = key.toId();
-
-        (uint256 amountOut, uint256 newState) = _quote(id, params.zeroForOne, amountIn);
-        if (amountOut == 0) revert ZeroOutput();
-        if (amountOut > MAX_AMOUNT) revert AmountTooLarge();
-        if (amountOut < minAmountOut) revert InsufficientOutput(amountOut, minAmountOut);
-
-        (Currency cin, Currency cout) =
-            params.zeroForOne ? (key.currency0, key.currency1) : (key.currency1, key.currency0);
-
-        // 1. Mint the swapper's input as claims to this hook: hook delta[in] = -amountIn.
-        poolManager.mint(address(this), cin.toId(), amountIn);
-        // 2. Vault pulls those input claims and sends output claims, or reverts the whole swap.
-        vault.exchange(key, params.zeroForOne, allocationId, amountIn, amountOut);
-        // 3. Burn the output claims: hook delta[out] = +amountOut.
-        poolManager.burn(address(this), cout.toId(), amountOut);
-        // The vault has filled the trade: store the pricing state it was quoted from.
-        _commit(id, params.zeroForOne, newState);
-
-        emit SharedLiquiditySwap(id, allocationId, params.zeroForOne, amountIn, amountOut);
+        uint256 amountOut = _fill(key, params.zeroForOne, amountIn, allocationId, minAmountOut);
 
         // 4. Hand both deltas to the swapper; the hook's own deltas return to zero.
         // Both casts are safe: amountIn, amountOut <= int128.max.
         // forge-lint: disable-next-line(unsafe-typecast)
         return (IHooks.beforeSwap.selector, toBeforeSwapDelta(int128(int256(amountIn)), -int128(int256(amountOut))), 0);
+    }
+
+    /// @dev Steps 1-3 of the swap flow (see the contract documentation) and the state update: price in the vault's
+    ///      current mode, check the swapper's minimum, mint the input claims, let the vault fill, burn the output
+    ///      claims, store the pricing state. Split out of `beforeSwap` only to keep the compiler's stack within limits.
+    function _fill(PoolKey calldata key, bool zeroForOne, uint256 amountIn, uint256 allocationId, uint256 minAmountOut)
+        internal
+        returns (uint256 amountOut)
+    {
+        PoolId id = key.toId();
+
+        bool coreMode;
+        uint256 newState;
+        (coreMode, amountOut, newState) = _quoteAny(id, key.currency1, zeroForOne, amountIn);
+        if (amountOut == 0) revert ZeroOutput();
+        if (amountOut > MAX_AMOUNT) revert AmountTooLarge();
+        if (amountOut < minAmountOut) revert InsufficientOutput(amountOut, minAmountOut);
+
+        (Currency cin, Currency cout) = zeroForOne ? (key.currency0, key.currency1) : (key.currency1, key.currency0);
+
+        // 1. Mint the swapper's input as claims to this hook: hook delta[in] = -amountIn.
+        poolManager.mint(address(this), cin.toId(), amountIn);
+        // 2. Vault pulls those input claims and sends output claims, or reverts the whole swap.
+        vault.exchange(key, zeroForOne, allocationId, amountIn, amountOut);
+        // 3. Burn the output claims: hook delta[out] = +amountOut.
+        poolManager.burn(address(this), cout.toId(), amountOut);
+        // The vault has filled the trade: store the pricing state it was quoted from.
+        if (coreMode) _commitCore(id, zeroForOne, newState);
+        else _commit(id, zeroForOne, newState);
+
+        emit SharedLiquiditySwap(id, allocationId, zeroForOne, amountIn, amountOut);
     }
 
     /// @notice Always reverts: liquidity added to the pool's curve could never be traded, because every swap is

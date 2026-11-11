@@ -356,10 +356,10 @@ contract PricingAdversarialTest is PricingTestBase {
         return bytes32(uint256(hookB.positionOf(keyB)));
     }
 
-    /// @dev Storage slot of HookA's `_flow[id][zeroForOne]`. `poolConfig` is slot 0 and `_flow` slot 1 (the hook's
-    ///      only storage; immutables are in code).
+    /// @dev Storage slot of HookA's `_flow[id][zeroForOne]`. `coreParams` (inherited) is slot 0, `poolConfig` slot 1
+    ///      and `_flow` slot 2 (the hook's only storage; immutables are in code).
     function _flowSlot(PoolKey memory key, bool zeroForOne) internal pure returns (bytes32) {
-        bytes32 inner = keccak256(abi.encode(key.toId(), uint256(1)));
+        bytes32 inner = keccak256(abi.encode(key.toId(), uint256(2)));
         return keccak256(abi.encode(zeroForOne, inner));
     }
 }

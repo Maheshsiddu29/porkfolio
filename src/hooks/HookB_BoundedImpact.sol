@@ -8,12 +8,24 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {ISharedCommitmentVault} from "../interfaces/ISharedCommitmentVault.sol";
 import {BaseCompatibleHook} from "./BaseCompatibleHook.sol";
 import {CumulativePricing} from "./CumulativePricing.sol";
+import {InventoryPricing} from "../pricing/InventoryPricing.sol";
+import {StrategyPricing} from "../pricing/StrategyPricing.sol";
 
 /// @title HookB_BoundedImpact
-/// @notice Sells vault liquidity along a virtual constant-product curve around a reference price. The price moves
-///         with the pool's net position, not with the size of each trade, and the position is capped so that the
-///         marginal price never moves more than a set percentage from the reference.
-/// @dev State. One signed position `x` per pool: currency1 the vault has sold through this pool minus currency1 it
+/// @notice Sells vault liquidity along a curve around a reference price, with bounded price impact. In static mode the
+///         curve is this pool's own virtual constant-product position around a configured price, capped so the
+///         marginal price never moves more than a set percentage from it. While the vault has a market-risk adapter
+///         it prices through the shared inventory core around that adapter's reference, keeps a flat markup on the
+///         input and refuses any single trade whose impact exceeds a set bound (`configureStrategy`).
+/// @dev Shared-core mode keeps no hook state: the curve position is the vault's own inventory, shared with every hook,
+///      and the static-mode position below is neither used nor changed. Why a markup: in shared-core mode both hooks
+///      quote from the same core, so the strategy is the only difference between them. A flat markup prices every
+///      trade the same whatever recent flow was; Hook A's activity fee is cheaper for occasional small trades and
+///      dearer for bursts. The per-trade bound stops one trade from walking deep into the curve at once.
+///
+///      The rest of this section describes static mode.
+///
+///      State. One signed position `x` per pool: currency1 the vault has sold through this pool minus currency1 it
 ///      has bought back, in raw currency1. It decays linearly toward zero over time (see below).
 ///
 ///      Curve. With depth `V` and reference price `P` (raw currency1 per raw currency0), the currency0 owed for a
@@ -104,6 +116,21 @@ contract HookB_BoundedImpact is BaseCompatibleHook {
     /// @dev Stored position by pool id; `positionOf` returns it with decay applied.
     mapping(PoolId => Position) internal _position;
 
+    /// @notice Hook B's strategy in shared-core mode.
+    /// @param markupPips Share of every input kept before the core prices the rest (a flat markup over the core).
+    /// @param maxTradeImpactPips Largest shortfall of one trade's output against the reference price, pips; a larger
+    ///        trade is refused (`TradeImpactExceeded`) rather than filled deep into the curve.
+    struct Strategy {
+        uint24 markupPips;
+        uint24 maxTradeImpactPips;
+    }
+
+    /// @notice Shared-core strategy by pool. `maxTradeImpactPips == 0`: not configured.
+    mapping(PoolId => Strategy) public strategy;
+
+    /// @notice Hook B's shared-core strategy of `poolId` was set.
+    event StrategyConfigured(PoolId indexed poolId, uint24 markupPips, uint24 maxTradeImpactPips);
+
     /// @notice The pool has no reference price configured, so it cannot be quoted.
     error PoolNotConfigured();
     /// @notice `configurePool` was called with a key for another hook, a zero price, a depth above 2^95 - 1, an
@@ -192,7 +219,47 @@ contract HookB_BoundedImpact is BaseCompatibleHook {
     /// @return amountOut Raw output amount.
     function quote(PoolKey calldata key, bool zeroForOne, uint256 amountIn) external view returns (uint256 amountOut) {
         if (amountIn > MAX_AMOUNT) revert AmountTooLarge();
-        (amountOut,) = _quote(key.toId(), zeroForOne, amountIn);
+        (, amountOut,) = _quoteAny(key.toId(), key.currency1, zeroForOne, amountIn);
+    }
+
+    /// @notice Set Hook B's shared-core strategy for one of its pools.
+    /// @dev Hook owner only. The markup must be below 100% and the per-trade impact bound strictly between 0 and
+    ///      100%. Example: a markup of 1,000 pips (0.1%) keeps 1 of every 1,000 raw input units before pricing; a
+    ///      bound of 20,000 pips (2%) refuses any trade whose output is more than 2% below the reference value of
+    ///      its input.
+    /// @param key Pool to configure; its `hooks` must be this contract.
+    /// @param markupPips Markup, pips of the input.
+    /// @param maxTradeImpactPips Per-trade impact bound, pips.
+    function configureStrategy(PoolKey calldata key, uint24 markupPips, uint24 maxTradeImpactPips)
+        external
+        onlyHookOwner
+    {
+        if (
+            address(key.hooks) != address(this) || markupPips >= PIPS || maxTradeImpactPips == 0
+                || maxTradeImpactPips >= PIPS
+        ) {
+            revert InvalidConfig();
+        }
+        PoolId id = key.toId();
+        strategy[id] = Strategy(markupPips, maxTradeImpactPips);
+        emit StrategyConfigured(id, markupPips, maxTradeImpactPips);
+    }
+
+    /// @notice Shared-core mode: a flat markup on the input, the core prices the rest, and the trade is refused if its
+    ///         output falls further below the reference value than `maxTradeImpactPips` (`StrategyPricing.hookB`).
+    /// @dev Hook B keeps no state in this mode (its static-mode position is not used or changed).
+    /// @return amountOut Raw output.
+    /// @return newState Always 0.
+    function _quoteCore(PoolId id, InventoryPricing.Core memory core, bool zeroForOne, uint256 amountIn)
+        internal
+        view
+        override
+        returns (uint256 amountOut, uint256 newState)
+    {
+        Strategy memory st = strategy[id];
+        if (st.maxTradeImpactPips == 0) revert PoolNotConfigured();
+        amountOut = StrategyPricing.hookB(core, st.markupPips, st.maxTradeImpactPips, zeroForOne, amountIn).amountOut;
+        newState = 0;
     }
 
     /// @dev See the contract documentation for the formulas. `newState` is the new position `x'` as the two's

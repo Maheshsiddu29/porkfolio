@@ -8,10 +8,14 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {ISharedCommitmentVault} from "../interfaces/ISharedCommitmentVault.sol";
 import {BaseCompatibleHook} from "./BaseCompatibleHook.sol";
 import {CumulativePricing} from "./CumulativePricing.sol";
+import {InventoryPricing} from "../pricing/InventoryPricing.sol";
+import {StrategyPricing} from "../pricing/StrategyPricing.sol";
 
 /// @title HookA_DynamicFee
-/// @notice Sells vault liquidity at a fixed reference price, charging a fee whose rate rises with the recent flow
-///         through the pool in the trade's direction.
+/// @notice Sells vault liquidity, charging a fee whose rate rises with the recent flow through the pool in the trade's
+///         direction. In static mode it prices around a configured reference price; while the vault has a market-risk
+///         adapter it prices through the shared inventory core around that adapter's reference (see
+///         `BaseCompatibleHook`) and the same fee is taken from the input first.
 /// @dev State. One flow level per pool and direction: the gross input swapped in that direction, in raw units of
 ///      that direction's input currency, decaying linearly toward zero over time. The two directions are independent:
 ///      selling currency0 never lowers the level for selling currency1, so a round trip pays both fees. The level does
@@ -41,7 +45,12 @@ import {CumulativePricing} from "./CumulativePricing.sol";
 ///      the next trade's fee; a larger `K` or lower fees lower it. `hookOwner` is trusted; nothing delays a loosening
 ///      change.
 ///
-///      Not handled here. The reference price does not follow the market, and the fee never exceeds `max`, so a market
+///      Shared-core mode. The fee, its levels and decay are unchanged; only the conversion of the net input changes:
+///      `StrategyPricing.hookA` prices it with the vault-wide inventory core instead of `_grossOut`. The fee only adds
+///      to the core price, so this hook is never cheaper than the core, and the core's cap (shared with every hook on
+///      the vault) bounds how far one-way flow can move the vault's inventory. `priceX96` is not used in this mode.
+///
+///      Not handled here. In static mode the reference price does not follow the market, and the fee never exceeds `max`, so a market
 ///      move larger than the fee lets arbitrageurs trade until the vault's price floor, quota or flow limits stop them.
 ///      This is not a v4 dynamic LP fee: the pool's curve never runs, so the pool's fee setting is never applied.
 contract HookA_DynamicFee is BaseCompatibleHook {
@@ -166,7 +175,7 @@ contract HookA_DynamicFee is BaseCompatibleHook {
     /// @param amountIn Raw input amount.
     /// @return amountOut Raw output amount.
     function quote(PoolKey calldata key, bool zeroForOne, uint256 amountIn) external view returns (uint256 amountOut) {
-        (amountOut,) = _quote(key.toId(), zeroForOne, amountIn);
+        (, amountOut,) = _quoteAny(key.toId(), key.currency1, zeroForOne, amountIn);
     }
 
     /// @dev out = (amountIn - fee) at the reference price, rounded down. `newState` is the new level.
@@ -197,6 +206,35 @@ contract HookA_DynamicFee is BaseCompatibleHook {
     }
 
     /// @dev Stores the level `_quote` returned (below 2^128) with the current time.
+    /// @notice Shared-core mode: the same cumulative activity fee as static mode, taken from the input, with the rest
+    ///         priced by the core (`StrategyPricing.hookA`).
+    /// @dev The fee parameters and flow levels are this pool's static-mode configuration; `priceX96` is not used in
+    ///      this mode. The fee only adds to the core price, so Hook A is never cheaper than the core.
+    /// @return amountOut Raw output.
+    /// @return newState New flow level of this direction (the fee's state), stored by `_commitCore`.
+    function _quoteCore(PoolId id, InventoryPricing.Core memory core, bool zeroForOne, uint256 amountIn)
+        internal
+        view
+        override
+        returns (uint256 amountOut, uint256 newState)
+    {
+        PoolConfig memory cfg = poolConfig[id];
+        if (cfg.priceX96 == 0) revert PoolNotConfigured();
+        StrategyPricing.Quote memory q = StrategyPricing.hookA(
+            core,
+            StrategyPricing.ActivityFee(cfg.baseFeePips, cfg.maxFeePips, cfg.scale0, cfg.scale1),
+            _levelNow(cfg, _flow[id][zeroForOne], zeroForOne),
+            zeroForOne,
+            amountIn
+        );
+        return (q.amountOut, q.newLevel);
+    }
+
+    /// @dev Shared-core mode stores the same flow level as static mode.
+    function _commitCore(PoolId id, bool zeroForOne, uint256 newState) internal override {
+        _commit(id, zeroForOne, newState);
+    }
+
     function _commit(PoolId id, bool zeroForOne, uint256 newState) internal override {
         // forge-lint: disable-next-line(unsafe-typecast)
         _flow[id][zeroForOne] = FlowState(uint128(newState), uint64(block.timestamp));
