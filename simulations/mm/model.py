@@ -63,7 +63,8 @@ __all__ = [
     "TwoSidedCurveConfig", "TwoSidedCurve", "InventoryConfig", "InventoryQuote", "inventory_state",
     "straddle_cap", "depth_per_share_for", "ext_cost", "CoreState", "core_state", "core_ask", "core_bid",
     "BracketSource", "SequencerStatus", "bracket_reference", "mid_and_uncertainty", "pair_bracket", "ActivityFeeConfig", "StrategyQuote", "hook_a_quote",
-    "hook_b_quote", "ext_position_for_cost", "quote_inventory", "floors_from_pivot",
+    "hook_b_quote", "check_uncertainty", "dynamic_floors", "inventory_floor", "check_inventory",
+    "vault_fill_check", "ext_position_for_cost", "quote_inventory", "floors_from_pivot",
 ]
 
 
@@ -633,3 +634,48 @@ def hook_b_quote(cs: CoreState, markup: int, max_trade_impact: int, zero_for_one
     if out * PIPS < at_mid * (PIPS - max_trade_impact):
         raise Revert("TradeImpactExceeded", out, at_mid)
     return StrategyQuote(out, i2, fee, 0)
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# Vault risk boundary (Phase 1B-4.2): `src/risk/VaultRiskBoundary.sol`, operation by operation
+# ----------------------------------------------------------------------------------------------------------------
+
+
+def check_uncertainty(uncertainty: int, max_uncertainty: int) -> None:
+    if uncertainty > max_uncertainty:
+        raise Revert("UncertaintyTooHigh", uncertainty, max_uncertainty)
+
+
+def dynamic_floors(price_x96: int, uncertainty: int, edge: int) -> tuple[int, int]:
+    """(F0, F1): minimum raw asset1 in per raw asset0 out, and raw asset0 in per raw asset1 out, both Q96, outside the
+    reference band widened by `edge`. Every step rounds up."""
+    widen = PIPS + uncertainty + edge
+    return (mul_div_up(price_x96, widen, PIPS), mul_div_up(mul_div_up(Q96, Q96, price_x96), widen, PIPS))
+
+
+def inventory_floor(shares: int, target_per_share: int, tolerance: int) -> int:
+    """L_a = ceil(S * tau_a * (1e6 - kappa_a) / (1e18 * 1e6)): the least the vault may hold of an asset after paying
+    it out. No price enters."""
+    return mul_div_up(shares * target_per_share, PIPS - tolerance, WAD * PIPS)
+
+
+def check_inventory(holding: int, amount_out: int, floor_: int) -> None:
+    after = holding - amount_out if holding > amount_out else 0
+    if after < floor_:
+        raise Revert("InventoryFloorBreached", after, floor_)
+
+
+def vault_fill_check(zero_for_one: bool, amount_in: int, amount_out: int, ref: Reference, edge: int,
+                     max_uncertainty: int, n0: int, n1: int, shares: int, tau0: int, tau1: int, kappa0: int,
+                     kappa1: int) -> None:
+    """The three vault-side rules, in the order the proposed `exchange` applies them, for a fill in which the vault
+    pays out `amount_out` of asset1 (zeroForOne) or asset0. The reference is whatever the installed adapter returned;
+    a malicious adapter can return anything, and rule 3 still holds."""
+    check_uncertainty(ref.uncertainty, max_uncertainty)
+    f0, f1 = dynamic_floors(ref.price_x96, ref.uncertainty, edge)
+    if not floor_ok(amount_in, amount_out, f1 if zero_for_one else f0):
+        raise Revert("PriceBelowFloor")
+    if zero_for_one:
+        check_inventory(n1, amount_out, inventory_floor(shares, tau1, kappa1))
+    else:
+        check_inventory(n0, amount_out, inventory_floor(shares, tau0, kappa0))
