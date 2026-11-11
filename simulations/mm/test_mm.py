@@ -482,7 +482,7 @@ class InversionExact(unittest.TestCase):
             P = int(rng.uniform(0.1, 10) * Q96)
             cap = straddle_cap(V, rng.choice([500, 2_000]), 100)
             lo = ext_cost(-cap - rng.randint(0, V // 2), V, P, cap)
-            hi = ext_cost(cap, V, P, cap)
+            hi = ext_cost(cap + 1, V, P, cap) - 1
             t = rng.randint(lo, hi)
             i = ext_position_for_cost(t, V, P, cap)
             self.assertLessEqual(ext_cost(i, V, P, cap), t)

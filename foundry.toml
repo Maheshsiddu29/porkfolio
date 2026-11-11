@@ -16,9 +16,10 @@ optimizer = true
 optimizer_runs = 44444444
 bytecode_hash = "none"
 ffi = false
-# Tests may read build artifacts (and nothing else) so that test/bench/ can deploy the production artifact files by
-# path, independent of the optimizer profile the test file itself is compiled under.
-fs_permissions = [{ access = "read", path = "./out" }]
+# Tests may read build artifacts so that test/bench/ can deploy the production artifact files by path, independent of
+# the optimizer profile the test file itself is compiled under, and the integer conformance vectors the Python model
+# writes (test/pricing/ checks the Solidity against them). Read-only; nothing else.
+fs_permissions = [{ access = "read", path = "./out" }, { access = "read", path = "./simulations/mm/vectors" }]
 
 # The vault alone is compiled with optimizer_runs = 2,000. At 44,444,444 runs its runtime is 22,814 bytes, which
 # leaves 1,762 bytes under the EIP-170 limit (24,576); at 2,000 runs it is 17,792 bytes. The cost is a little more

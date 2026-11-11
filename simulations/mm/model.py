@@ -62,7 +62,7 @@ __all__ = [
     "VaultSnapshot", "FeedReading", "ReferencePolicy", "Reference", "resolve_reference", "realized_vol_term",
     "TwoSidedCurveConfig", "TwoSidedCurve", "InventoryConfig", "InventoryQuote", "inventory_state",
     "straddle_cap", "depth_per_share_for", "ext_cost", "CoreState", "core_state", "core_ask", "core_bid",
-    "BracketSource", "SequencerStatus", "bracket_reference", "ActivityFeeConfig", "StrategyQuote", "hook_a_quote",
+    "BracketSource", "SequencerStatus", "bracket_reference", "mid_and_uncertainty", "pair_bracket", "ActivityFeeConfig", "StrategyQuote", "hook_a_quote",
     "hook_b_quote", "ext_position_for_cost", "quote_inventory", "floors_from_pivot",
 ]
 
@@ -267,6 +267,10 @@ class InventoryConfig:
     min_edge:         h_min: every quote stays at least this far on the vault's side of the reference, pips.
     max_spread:       refuse to quote when base + uncertainty exceeds this, pips.
     max_deviation:    risk cap on |I| in pips of T_1 (applied together with the straddle cap).
+    band_edge:        False (Phase 1B-4 behaviour, kept for the v1 vectors): quotes straddle the mid by min_edge.
+                      True (production mode): quotes straddle the whole uncertainty band, by min_edge beyond
+                      M (1 +- u); the cap is straddle_cap(V, h, min_edge + u). Required for the vault-side dynamic
+                      floor, which refuses any price inside the band.
     """
 
     target_per_share: int
@@ -276,6 +280,7 @@ class InventoryConfig:
     min_edge: int
     max_spread: int
     max_deviation: int
+    band_edge: bool = False
 
 
 @dataclass(frozen=True)
@@ -366,7 +371,10 @@ def ext_cost(i: int, depth: int, price_x96: int, cap: int) -> int:
 
 
 def ext_position_for_cost(t: int, depth: int, price_x96: int, cap: int) -> int:
-    """Largest integer I with C_ext(I) <= t, for t <= ext_cost(cap) (callers refuse targets above the cap first).
+    """Largest integer I with C_ext(I) <= t, for t < ext_cost(cap + 1) (callers refuse other targets first).
+
+    The bound matters: at prices where one unit of inventory costs less than one unit of potential, ceil(C) is flat
+    and ext_cost(cap) can equal ext_cost(cap + 1); the inner curve's inverse then answers beyond the cap.
 
     For integer t, ceil(C) <= t  <=>  C <= t, so this inverts `ext_cost` exactly."""
     lo_cost = ext_cost(-cap, depth, price_x96, cap)
@@ -443,7 +451,8 @@ def core_state(cfg: InventoryConfig, snap: VaultSnapshot, ref: Reference) -> Cor
     i, v, t1 = inventory_state(cfg, snap)
     if v == 0:
         raise Revert("NoDepth")
-    cap = min(straddle_cap(v, h, cfg.min_edge), t1 * cfg.max_deviation // PIPS)
+    edge = cfg.min_edge + (ref.uncertainty if cfg.band_edge else 0)
+    cap = min(straddle_cap(v, h, edge), t1 * cfg.max_deviation // PIPS)
     return CoreState(i, v, t1, cap, h, ref.price_x96)
 
 
@@ -534,9 +543,29 @@ def bracket_reference(sources: list[BracketSource], now: int, min_sources: int =
         raise Revert("InsufficientSources", n)
     if lo > hi:
         raise Revert("ReferenceDivergence", lo, hi)
-    m = (lo + hi) // 2
-    u = max(mul_div_up(hi - m, PIPS, m), mul_div_up(m - lo, PIPS, m))
-    return Reference(m, u)
+    return Reference(*mid_and_uncertainty(lo, hi))
+
+
+def mid_and_uncertainty(lo: int, hi: int) -> tuple[int, int]:
+    """`ReferenceBracket.midAndUncertainty`: centre of [lo, hi] and its half-width in pips of the centre, rounded up."""
+    if lo > hi:
+        raise Revert("ReferenceDivergence", lo, hi)
+    if lo == 0:
+        raise Revert("DegenerateBracket")
+    m = lo + (hi - lo) // 2
+    return m, max(mul_div_up(hi - m, PIPS, m), mul_div_up(m - lo, PIPS, m))
+
+
+def pair_bracket(a0: int, a1: int, d0: int, d1: int, e: int) -> tuple[int, int]:
+    """`ReferenceBracket.pairBracket`: the pool-price bracket one provider allows, from its currency0/USD answer `a0`
+    and currency1/USD answer `a1` with thresholds d0, d1 (pips) and decimal shift e. Low end floor, high end ceiling."""
+    x_lo, x_hi = a0 * (PIPS - d0), a0 * (PIPS + d0)
+    y_lo, y_hi = a1 * (PIPS - d1), a1 * (PIPS + d1)
+    if e >= 0:
+        m = Q96 * 10**e
+        return mul_div(x_lo, m, y_hi), mul_div_up(x_hi, m, y_lo)
+    sc = 10 ** (-e)
+    return mul_div(x_lo, Q96, y_hi * sc), mul_div_up(x_hi, Q96, y_lo * sc)
 
 
 # --- Strategies ---------------------------------------------------------------------------------------------------

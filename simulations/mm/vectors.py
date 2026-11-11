@@ -49,7 +49,8 @@ def s(x: int) -> str:
 def quote_case(c: InventoryConfig, snap: VaultSnapshot, ref: Reference, zfo: bool, amt: int, note: str) -> dict:
     case = {
         "note": note,
-        "config": {k: s(v) for k, v in c.__dict__.items()},
+        # band_edge (added in Phase 1B-4.1) is left out: these vectors are the mid-edge mode, byte-identical to v1.
+        "config": {k: s(v) for k, v in c.__dict__.items() if k != "band_edge"},
         "vault": {"n0": s(snap.n0), "n1": s(snap.n1), "shares": s(snap.shares)},
         "reference": {"priceX96": s(ref.price_x96), "uncertaintyPips": s(ref.uncertainty)},
         "zeroForOne": zfo,

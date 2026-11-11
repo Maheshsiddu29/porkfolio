@@ -40,9 +40,9 @@ E18 = 10**18
 FEE_A = ActivityFeeConfig(base=0, mx=3_000, scale0=50_000 * E18, scale1=50_000 * E18, window=3_600)
 
 
-def cfg(base=1_000, dev=150_000, min_edge=100, tau=WAD, max_spread=60_000):
+def cfg(base=1_000, dev=150_000, min_edge=100, tau=WAD, max_spread=60_000, band=False):
     return InventoryConfig(tau, depth_per_share_for(tau, dev, base, min_edge), 2**95 - 1, base, min_edge,
-                           max_spread, dev)
+                           max_spread, dev, band)
 
 
 class Reserve:
@@ -126,6 +126,26 @@ class BothStrategiesStraddle(unittest.TestCase):
                 fills += 1
                 self.assertTrue(straddles(zfo, amt, out, ref, r.c.min_edge), (hook, zfo, amt, out))
         self.assertGreater(fills, 2_000)
+
+    def test_band_mode_straddles_the_whole_band(self):
+        """Production mode: every fill of either strategy is min_edge beyond M (1 +- u), not only beyond M, so a vault
+        that refuses any price inside the band accepts every hook quote."""
+        rng = random.Random(109)
+        fills = 0
+        for _ in range(200):
+            r = rand_reserve(rng)
+            r.c = cfg(base=rng.choice([500, 1_000, 3_000]), band=True)
+            ref = Reference(int(rng.uniform(0.2, 5.0) * Q96), rng.randint(0, 9_000))
+            for step in range(20):
+                hook, zfo = rng.choice("AB"), rng.random() < 0.5
+                amt = rng.randint(1, 30_000) * E18
+                try:
+                    out = r.swap(hook, ref, zfo, amt, now=step)
+                except Revert:
+                    continue
+                fills += 1
+                self.assertTrue(straddles(zfo, amt, out, ref, r.c.min_edge + ref.uncertainty))
+        self.assertGreater(fills, 1_000)
 
     def test_shared_cap_binds_every_strategy(self):
         """Pushing inventory outward through A, then B, then A: the vault's deviation never passes the cap that both
