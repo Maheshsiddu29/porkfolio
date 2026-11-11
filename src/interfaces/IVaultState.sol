@@ -4,6 +4,7 @@ pragma solidity 0.8.26;
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
 import {ISharedCommitmentVault} from "./ISharedCommitmentVault.sol";
+import {IMarketRiskAdapter} from "./IMarketRiskAdapter.sol";
 
 /// @title IVaultState
 /// @notice Read-only view of the vault's stored accounting: the public getters that off-chain tools and `VaultLens`
@@ -65,6 +66,21 @@ interface IVaultState is ISharedCommitmentVault {
     /// @param currency The asset the limit applies to (the asset the vault sells).
     /// @return The stored record.
     function getRiskLimit(RiskScope scope, address account, Currency currency) external view returns (RiskLimit memory);
+
+    /// @notice Market-risk adapter the vault reads on every fill; zero in static mode.
+    function riskAdapter() external view returns (IMarketRiskAdapter);
+
+    /// @notice Vault edge beyond the adapter's reference band, pips.
+    function riskEdgePips() external view returns (uint24);
+
+    /// @notice Largest adapter uncertainty the vault accepts, pips.
+    function maxUncertaintyPips() external view returns (uint24);
+
+    /// @notice Inventory target of asset `index` (0 or 1) per share, raw units scaled by 1e18. Zero: no floor.
+    function inventoryTargetPerShare(uint256 index) external view returns (uint256);
+
+    /// @notice Inventory tolerance of asset `index` (0 or 1), pips of the target.
+    function inventoryTolerancePips(uint256 index) external view returns (uint24);
 
     /// @notice Stored state of a withdrawal request; an all-zero struct if the id does not exist.
     /// @param requestId Request to read.

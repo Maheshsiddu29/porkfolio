@@ -6,6 +6,8 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 
 import {ISharedCommitmentVault} from "./interfaces/ISharedCommitmentVault.sol";
 import {IVaultState} from "./interfaces/IVaultState.sol";
+import {IMarketRiskAdapter} from "./interfaces/IMarketRiskAdapter.sol";
+import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
 
 /// @title VaultLens
 /// @notice Read-only helpers for `SharedCommitmentVault`: deposit and redemption previews, the status of a queued
@@ -121,20 +123,52 @@ contract VaultLens {
         amount1 = FullMath.mulDiv(shares, netAssets(vault, vault.asset1()), supply);
     }
 
-    /// @notice Floor that `exchange` would apply to this allocation right now: max(live vault floor, curator floor).
-    /// @dev Same as the vault's `_effectiveFloor`. Reverts in the same policy cases as `exchange`: with
-    ///      `PriceFloorNotConfigured` if the direction was never opened (also for an unknown id, whose stored
-    ///      currency is address(0)) and with `DirectionHalted` while the direction is halted. It does not check
-    ///      that the allocation is live; `getAllocation` shows `released` and `expiry`.
+    /// @notice Price floor that `exchange` would apply to this allocation right now: max(stored vault floor, curator
+    ///         floor, dynamic floor in adapter mode).
+    /// @dev Same as the price part of the vault's `_floorForFill`. Reverts in the same policy cases as `exchange`:
+    ///      `PriceFloorNotConfigured` in static mode if the direction was never opened (also for an unknown id, whose
+    ///      stored currency is address(0)), `DirectionHalted` while the direction is halted, and in adapter mode
+    ///      whatever the adapter reverts with, `InvalidReference` or `UncertaintyTooHigh`. It does not apply the
+    ///      inventory floor, which depends on the fill size (see `inventoryRoom`), and does not check that the
+    ///      allocation is live; `getAllocation` shows `released` and `expiry`.
     /// @param vault Vault to read.
     /// @param allocationId Allocation to inspect.
-    /// @return Effective floor, Q64.96 raw input per raw output.
-    function effectiveFloorX96(IVaultState vault, uint256 allocationId) external view returns (uint256) {
+    /// @return floor Effective floor, Q64.96 raw input per raw output.
+    function effectiveFloorX96(IVaultState vault, uint256 allocationId) external view returns (uint256 floor) {
         ISharedCommitmentVault.Allocation memory a = vault.getAllocation(allocationId);
         (uint160 vaultFloor, bool halted) = vault.sellPolicy(a.currencyOut);
-        if (vaultFloor == 0) revert ISharedCommitmentVault.PriceFloorNotConfigured(a.currencyOut);
+        IMarketRiskAdapter adapter = vault.riskAdapter();
+        if (vaultFloor == 0) {
+            if (address(adapter) == address(0)) revert ISharedCommitmentVault.PriceFloorNotConfigured(a.currencyOut);
+            vaultFloor = 1;
+        }
         if (halted) revert ISharedCommitmentVault.DirectionHalted(a.currencyOut);
-        return a.minInPerOutX96 > vaultFloor ? a.minInPerOutX96 : vaultFloor;
+        floor = a.minInPerOutX96 > vaultFloor ? a.minInPerOutX96 : vaultFloor;
+        if (address(adapter) != address(0)) {
+            IMarketRiskAdapter.Reading memory r = adapter.currentReference();
+            if (r.priceX96 == 0 || r.validUntil < block.timestamp) revert ISharedCommitmentVault.InvalidReference();
+            VaultRiskBoundary.checkUncertainty(r.uncertaintyPips, vault.maxUncertaintyPips());
+            (uint256 f0, uint256 f1) =
+                VaultRiskBoundary.dynamicFloors(r.priceX96, r.uncertaintyPips, vault.riskEdgePips());
+            uint256 dynamicFloor = a.currencyOut == vault.asset1() ? f1 : f0;
+            if (dynamicFloor > floor) floor = dynamicFloor;
+        }
+    }
+
+    /// @notice How much of `currency` fills may still pay out before the inventory floor binds: N_a - L_a, or 0.
+    /// @dev L_a = ceil(S * tau_a * (1e6 - kappa_a) / (1e18 * 1e6)), the vault's own formula. Returns N_a when no target
+    ///      is set for the asset (no inventory floor; in adapter mode the vault then refuses fills of it entirely).
+    ///      Other limits (allocation quota, flow caps) may bind first.
+    /// @param vault Vault to read.
+    /// @param currency asset0 or asset1.
+    /// @return Raw units of `currency`.
+    function inventoryRoom(IVaultState vault, Currency currency) external view returns (uint256) {
+        uint256 i = currency == vault.asset1() ? 1 : 0;
+        uint256 n = netAssets(vault, currency);
+        uint256 target = vault.inventoryTargetPerShare(i);
+        if (target == 0) return n;
+        uint256 floor_ = VaultRiskBoundary.inventoryFloor(vault.totalShares(), target, vault.inventoryTolerancePips(i));
+        return n > floor_ ? n - floor_ : 0;
     }
 
     /// @notice Lifecycle state of a withdrawal request, derived from its stored amounts.

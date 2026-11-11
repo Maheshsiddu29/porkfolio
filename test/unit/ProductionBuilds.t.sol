@@ -6,7 +6,7 @@ import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
 
 /// @notice The shared functional fixture runs the production builds of every deployable contract.
 /// @dev Every test that extends `VaultTestBase` (unit, integration, security, fuzz and the invariant campaign) uses
-///      this fixture. If this test passes, those tests exercised the vault built at 2,000 runs, the hooks, the lens and
+///      this fixture. If this test passes, those tests exercised the vault built at 200 runs, the hooks, the lens and
 ///      the authorization module at 44,444,444 runs and the pinned PoolManager at its upstream setting, each byte for byte as recorded in its
 ///      artifact file (immutables masked). Test-only contracts the fixture also deploys (routers, malicious hooks)
 ///      are compiled into the test files and are never deployed by the project.
@@ -40,7 +40,7 @@ contract ProductionBuildsTest is VaultTestBase {
         }
     }
 
-    /// @notice The check is not vacuous: the 2,000-run hook build that a by-name `deployCode` would return inside this
+    /// @notice The check is not vacuous: the 200-run hook build that a by-name `deployCode` would return inside this
     ///         file differs from the production build, and the masked comparison tells them apart.
     function test_maskedHashDistinguishesBuilds() public view {
         string memory testBuild = "out/HookA_DynamicFee.sol/HookA_DynamicFee.vault.json";

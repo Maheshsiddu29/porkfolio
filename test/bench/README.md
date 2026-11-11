@@ -137,7 +137,7 @@ runtime hashes. Reading `out/` needs the read-only `fs_permissions` entry in `fo
 `test/utils/VaultTestBase.sol`, the fixture of nearly every functional, fuzz and invariant test, deploys the
 PoolManager, both hooks, `VaultLens` and `CuratorAuthorization` from their production artifact files
 (`ProductionArtifacts`), and the vault has a single (production) artifact. `test/unit/ProductionBuilds.t.sol` checks
-all six against their artifacts in the same way as above, and shows the check tells the 2,000-run hook build apart.
+all six against their artifacts in the same way as above, and shows the check tells the 200-run hook build apart.
 The Reentrancy and 6/18-decimal fixtures are checked the same way; modules deployed inside tests (second vaults, the
 invariant handler's replacements) also come from the production artifact. What is still compiled into test files:
 routers and test-only contracts (`AuthModeHook`, `ScriptedHook`, `MaliciousConsumerHook`, `Mock1271Wallet`,

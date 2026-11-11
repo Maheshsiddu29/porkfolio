@@ -14,6 +14,8 @@ import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 
 import {ISharedCommitmentVault, AUTH_MODULE_ID} from "./interfaces/ISharedCommitmentVault.sol";
 import {IVaultState} from "./interfaces/IVaultState.sol";
+import {IMarketRiskAdapter} from "./interfaces/IMarketRiskAdapter.sol";
+import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
 
 /// @title SharedCommitmentVault
 /// @notice A two-asset reserve that several Uniswap v4 hooks can sell from. LPs deposit both assets and receive
@@ -57,6 +59,8 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 ///
 /// Roles.
 ///   Owner     Configures everything, initializes the vault, can loosen limits. Has no function that moves LP assets.
+///             In production the owner is a `VaultGovernor`, which makes every owner call wait a public delay; the
+///             vault itself does not delay anything.
 ///   Guardian  Optional emergency role. May only make changes that reduce risk (see `_authorize`).
 ///   Curator   Registered address that reserves capacity for hooks, within its own per-currency ceiling, through
 ///             the authorization module (a signed instruction, or a call to the module).
@@ -120,6 +124,14 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 /// installs it, read-only, to read `authModuleId()` and `vault()`; never otherwise. Those answers catch mistakes, not
 /// malice. A compromised module can do at most what every registered, unrestricted curator could do together:
 /// reserve within their ceilings and every vault-side limit.
+///
+/// Market-risk boundary. With an adapter installed (`riskAdapter`), every fill also reads a reference price P and its
+/// uncertainty u from that adapter and must pay at least the band around P widened by u and the vault's edge; the
+/// stored floors and the curator floor still apply on top. Independently of any price, and in every mode once the
+/// inventory targets are set, no fill may leave N_a below L_a = ceil(S * tau_a * (1 - kappa_a)). That floor is the
+/// part that does not trust the adapter: whatever price is used, each share keeps at least tau_a (1 - kappa_a) of
+/// every asset it had at least that much of. Hooks are expected to read the adapter from this vault; a hook that
+/// prices from anything else is still held to this boundary by `exchange`. See `_floorForFill`.
 ///
 /// Not implemented here: rolling-window flow limits (the flow window is a fixed epoch; see `FLOW_WINDOW`),
 /// path-independent cumulative pricing, epoch-based expiry of commitments, transferable share tokens, and any
@@ -237,6 +249,20 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     address public authModule;
     /// @dev Modules that were installed and then replaced or disabled. A retired module can never be installed again.
     mapping(address module => bool) internal _retiredAuthModule;
+
+    /// @notice Market-risk adapter read on every fill. Zero: static mode (only the stored floors price fills). Hooks
+    ///         read it from here, so they cannot price from a different adapter than the one the vault enforces.
+    IMarketRiskAdapter public riskAdapter;
+    /// @notice e: the vault's edge beyond the reference band, pips. Guardian may only raise it.
+    uint24 public riskEdgePips;
+    /// @notice Largest reference uncertainty u the vault accepts, pips. Guardian may only lower it.
+    uint24 public maxUncertaintyPips;
+    /// @notice tau_a: inventory target per share, by asset index (0: asset0, 1: asset1), in raw units scaled by 1e18.
+    ///         Zero: no inventory floor for that asset (and, in adapter mode, no selling of it).
+    uint256[2] public inventoryTargetPerShare;
+    /// @notice kappa_a: how far below its target the holding of each asset may fall, pips of the target. Guardian may
+    ///         only lower it.
+    uint24[2] public inventoryTolerancePips;
 
     /// @dev Transient-storage (EIP-1153) slot of the reentrancy lock: keccak256 of
     ///      "porkfolio.SharedCommitmentVault.reentrancyLock". Transient storage is cleared at the end of every
@@ -548,13 +574,13 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     /// @param currencyOut Asset the vault sells in the direction being configured. Must be asset0 or asset1.
     /// @param minInPerOutX96 New floor, Q64.96 raw input per raw output. Must be non-zero.
     function setSellFloor(Currency currencyOut, uint160 minInPerOutX96) external {
-        if (minInPerOutX96 == 0) revert ZeroPriceFloor();
+        if (minInPerOutX96 == 0 && address(riskAdapter) == address(0)) revert ZeroPriceFloor();
         Currency opposite = _otherAsset(currencyOut);
         SellPolicy storage policy = sellPolicy[currencyOut];
         uint160 previous = policy.minInPerOutX96;
         _authorize(previous != 0 && minInPerOutX96 >= previous);
         uint256 oppositeFloor = sellPolicy[opposite].minInPerOutX96;
-        if (oppositeFloor != 0) {
+        if (oppositeFloor != 0 && minInPerOutX96 != 0) {
             // ceil(2^192 / oppositeFloor): the smallest floor in this direction that keeps the pair non-crossing.
             uint256 requiredMinimum = FullMath.mulDivRoundingUp(FixedPoint96.Q96, FixedPoint96.Q96, oppositeFloor);
             if (minInPerOutX96 < requiredMinimum) {
@@ -577,6 +603,70 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         _authorize(halted);
         sellPolicy[currencyOut].halted = halted;
         emit SellHaltedSet(currencyOut, halted, msg.sender);
+    }
+
+    /// @notice Install, replace or remove (zero) the market-risk adapter.
+    /// @dev Owner only (never risk-reducing, so the guardian cannot call it; its emergency tools are halting a
+    ///      direction and pausing). Under `VaultGovernor` this waits the ordinary delay. A new adapter must price
+    ///      exactly this vault's pair, with each token's own `decimals()`, and must return a valid reading now.
+    ///      Its feeds are part of the adapter (immutable, identified by `configVersion`), so changing a feed means
+    ///      installing a different adapter through this function.
+    ///
+    ///      Removing the adapter returns the vault to static mode: directions without a stored floor close
+    ///      (`PriceFloorNotConfigured`), and the inventory floor keeps applying. Replacing it changes the floor of
+    ///      every live allocation at once, because fills read the adapter on every trade.
+    /// @param adapter New adapter, or zero for static mode.
+    function setRiskAdapter(IMarketRiskAdapter adapter) external {
+        _authorize(false);
+        bytes32 version;
+        if (address(adapter) != address(0)) {
+            (address c0, address c1, uint8 d0, uint8 d1) = adapter.pair();
+            if (
+                c0 != Currency.unwrap(asset0) || c1 != Currency.unwrap(asset1) || d0 != ERC20(c0).decimals()
+                    || d1 != ERC20(c1).decimals()
+            ) revert InvalidRiskAdapter(address(adapter));
+            _reading(adapter);
+            version = adapter.configVersion();
+        }
+        emit RiskAdapterSet(address(riskAdapter), address(adapter), version);
+        riskAdapter = adapter;
+    }
+
+    /// @notice Set the vault edge e and the largest accepted uncertainty, both in pips.
+    /// @dev Raising the edge or lowering the bound reduces risk (owner or guardian); anything else is owner only.
+    ///      See `_floorForFill` for how both enter the floor.
+    /// @param edgePips New edge beyond the reference band (1 pip = 0.0001%).
+    /// @param maxUncertainty New largest accepted reference uncertainty.
+    function setRiskBounds(uint24 edgePips, uint24 maxUncertainty) external {
+        _authorize(edgePips >= riskEdgePips && maxUncertainty <= maxUncertaintyPips);
+        riskEdgePips = edgePips;
+        maxUncertaintyPips = maxUncertainty;
+        emit RiskBoundsSet(edgePips, maxUncertainty, msg.sender);
+    }
+
+    /// @notice Set the inventory targets tau_a and tolerances kappa_a that define the inventory floor.
+    /// @dev The floor of asset a is L_a = ceil(S * tau_a * (1e6 - kappa_a) / (1e18 * 1e6)) raw units, and no fill may
+    ///      leave N_a below it. Raising a target or lowering a tolerance only raises floors (owner or guardian); any
+    ///      other change is owner only, and `VaultGovernor` gives it its longest delay, because the floor is what
+    ///      bounds LP losses under a wrong price. Raising a target to the current holding per share re-centres the
+    ///      floor after fees or skew have lifted holdings above it. Example: tau_0 = 2e15 (0.002 raw asset0 per share, scaled by
+    ///      1e18) and kappa_0 = 50,000 (5%) with S = 1e12 shares give L_0 = ceil(1e12 * 2e15 * 950,000 / 1e24) =
+    ///      1.9e9 raw asset0.
+    /// @param target0 tau_0, raw asset0 per share scaled by 1e18. Below 2^128.
+    /// @param target1 tau_1, raw asset1 per share scaled by 1e18. Below 2^128.
+    /// @param tolerance0 kappa_0, pips; at most 1e6 (1e6 = no floor).
+    /// @param tolerance1 kappa_1, pips; at most 1e6.
+    function setInventoryBounds(uint256 target0, uint256 target1, uint24 tolerance0, uint24 tolerance1) external {
+        if ((target0 | target1) >> 128 != 0 || tolerance0 > 1e6 || tolerance1 > 1e6) {
+            revert InventoryBoundsNotConfigured();
+        }
+        _authorize(
+            target0 >= inventoryTargetPerShare[0] && target1 >= inventoryTargetPerShare[1]
+                && tolerance0 <= inventoryTolerancePips[0] && tolerance1 <= inventoryTolerancePips[1]
+        );
+        inventoryTargetPerShare = [target0, target1];
+        inventoryTolerancePips = [tolerance0, tolerance1];
+        emit InventoryBoundsSet(target0, target1, tolerance0, tolerance1, msg.sender);
     }
 
     // ==================================================================
@@ -1202,7 +1292,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         // amountIn * 2^96 >= amountOut * max(f_v live now, f_c). amountOut < 2^127 and F < 2^160, so FullMath's
         // 512-bit product cannot overflow and the result (< 2^191) fits; ceil makes the comparison exact.
         // _effectiveFloor also reverts if this direction is unconfigured or halted.
-        uint256 requiredIn = FullMath.mulDivRoundingUp(amountOut, _effectiveFloor(a), FixedPoint96.Q96);
+        uint256 requiredIn = FullMath.mulDivRoundingUp(amountOut, _floorForFill(a, amountOut), FixedPoint96.Q96);
         if (amountIn < requiredIn) revert PriceBelowFloor(amountIn, requiredIn);
 
         uint256 backingIn = backing[cin];
@@ -1418,22 +1508,72 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         if (a.released) revert AllocationAlreadyReleased(allocationId);
     }
 
-    /// @dev Live vault floor of the direction selling `currencyOut`; reverts unless configured and not halted.
-    ///      A floor of zero means the direction was never opened, so it fails closed rather than allowing any price.
+    /// @dev Stored vault floor of the direction selling `currencyOut`; reverts if the direction is halted. In static
+    ///      mode a floor of zero means the direction was never opened, so it fails closed (`PriceFloorNotConfigured`)
+    ///      rather than allowing any price. In adapter mode a stored floor is optional (the adapter supplies the price)
+    ///      and an unset one counts as 1, the smallest non-zero floor, so a set one keeps binding as an extra limit.
     function _vaultFloor(Currency currencyOut) internal view returns (uint160 floor) {
         SellPolicy memory policy = sellPolicy[currencyOut];
         floor = policy.minInPerOutX96;
-        if (floor == 0) revert PriceFloorNotConfigured(currencyOut);
+        if (floor == 0) {
+            if (address(riskAdapter) == address(0)) revert PriceFloorNotConfigured(currencyOut);
+            floor = 1;
+        }
         if (policy.halted) revert DirectionHalted(currencyOut);
     }
 
-    /// @dev max(live vault floor, allocation's curator floor). The vault floor is read on every call, so a change by
-    ///      the owner or guardian applies to existing allocations immediately. Taking the max means lowering the
-    ///      vault floor can never weaken the floor a curator chose.
-    function _effectiveFloor(Allocation storage a) internal view returns (uint256) {
-        uint160 vaultFloor = _vaultFloor(a.currencyOut);
-        uint160 curatorFloor = a.minInPerOutX96;
-        return curatorFloor > vaultFloor ? curatorFloor : vaultFloor;
+    /// @dev Price floor of one fill, and the inventory check, before any balance moves.
+    ///
+    ///      Price floor = max(stored vault floor, allocation's curator floor, dynamic floor). The dynamic floor exists
+    ///      only in adapter mode: the vault reads the adapter itself (one call), refuses a zero price, an expired
+    ///      reading or an uncertainty u above `maxUncertaintyPips`, and requires the band around the reference P
+    ///      widened by w = 1e6 + u + e pips:
+    ///        selling asset0: F0 = ceil(P * w / 1e6);   selling asset1: F1 = ceil(ceil(2^192 / P) * w / 1e6),
+    ///      both rounded up, against the swapper. F0 * F1 >= 2^192 at every P, so the two directions never cross,
+    ///      and taking the max with the stored floors keeps that. A stored floor raised by the guardian therefore
+    ///      still binds after an adapter is installed.
+    ///
+    ///      Inventory floor, in every mode once tau_a is configured: N_a - amountOut >= L_a, with
+    ///      L_a = ceil(S * tau_a * (1e6 - kappa_a) / (1e18 * 1e6)). This check contains no price, so no adapter,
+    ///      hook or reference error can take N_a / S below tau_a (1 - kappa_a) (see
+    ///      docs/architecture/INVENTORY_FLOOR_GUARANTEE.md for what that does and does not bound). In adapter mode an
+    ///      unconfigured target refuses the fill.
+    /// @param a The allocation being consumed.
+    /// @param amountOut Raw units of a.currencyOut the fill pays out.
+    /// @return floor Q64.96 minimum raw input per raw output.
+    function _floorForFill(Allocation storage a, uint256 amountOut) internal view returns (uint256 floor) {
+        Currency out = a.currencyOut;
+        floor = _vaultFloor(out);
+        uint256 curatorFloor = a.minInPerOutX96;
+        if (curatorFloor > floor) floor = curatorFloor;
+        uint256 i = out == asset1 ? 1 : 0;
+        IMarketRiskAdapter adapter = riskAdapter;
+        if (address(adapter) != address(0)) {
+            IMarketRiskAdapter.Reading memory r = _reading(adapter);
+            (uint256 f0, uint256 f1) = VaultRiskBoundary.dynamicFloors(r.priceX96, r.uncertaintyPips, riskEdgePips);
+            uint256 dynamicFloor = i == 0 ? f0 : f1;
+            if (dynamicFloor > floor) floor = dynamicFloor;
+        }
+        uint256 target = inventoryTargetPerShare[i];
+        if (target != 0) {
+            VaultRiskBoundary.checkInventory(
+                _netAssets(out),
+                amountOut,
+                VaultRiskBoundary.inventoryFloor(totalShares, target, inventoryTolerancePips[i])
+            );
+        } else if (address(adapter) != address(0)) {
+            revert InventoryBoundsNotConfigured();
+        }
+    }
+
+    /// @dev Reads the adapter and rejects malformed answers: a zero price, a reading past its `validUntil`, or an
+    ///      uncertainty above `maxUncertaintyPips`. A revert inside the adapter (stale or contradictory sources, a
+    ///      sequencer outage) reverts the caller. Nothing in the reading is trusted beyond these checks: the inventory
+    ///      floor, not the reading, bounds what a wrong price can cost.
+    function _reading(IMarketRiskAdapter adapter) internal view returns (IMarketRiskAdapter.Reading memory r) {
+        r = adapter.currentReference();
+        if (r.priceX96 == 0 || r.validUntil < block.timestamp) revert InvalidReference();
+        VaultRiskBoundary.checkUncertainty(r.uncertaintyPips, maxUncertaintyPips);
     }
 
     /// @dev Returns the other asset of the pair. Reverts with `InvalidCurrency` if `currency` is not in the pair,

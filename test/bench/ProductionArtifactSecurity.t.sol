@@ -40,7 +40,7 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 ///      (`out/<File>.sol/<Name>.json`), not by name, so the result does not depend on the profile this file is
 ///      compiled under. `test_PA_deployedCodeIsProductionArtifacts` reads the compiler settings recorded in each of
 ///      those artifact files and checks that each deployed runtime code equals its artifact's with immutables masked.
-///      It does not rely on the 2,000-run test builds being present in `out/`: other tools (for example Slither's
+///      It does not rely on the 200-run test builds being present in `out/`: other tools (for example Slither's
 ///      `forge build --skip test`) can remove them. Reading artifacts needs the read-only `fs_permissions` entry for
 ///      `./out` in foundry.toml.
 ///
@@ -55,7 +55,7 @@ contract ProductionArtifactSecurityTest is Test {
     string internal constant HOOK_B_JSON = "out/HookB_BoundedImpact.sol/HookB_BoundedImpact.json";
     string internal constant PM_JSON = "out/PoolManager.sol/PoolManager.default.json";
     /// @dev Production optimizer settings from foundry.toml: the vault's compilation restriction and the default.
-    uint256 internal constant VAULT_RUNS = 2000;
+    uint256 internal constant VAULT_RUNS = 200;
     uint256 internal constant DEFAULT_RUNS = 44_444_444;
 
     uint160 internal constant HOOK_FLAGS =

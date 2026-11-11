@@ -21,15 +21,16 @@ ffi = false
 # writes (test/pricing/ checks the Solidity against them). Read-only; nothing else.
 fs_permissions = [{ access = "read", path = "./out" }, { access = "read", path = "./simulations/mm/vectors" }]
 
-# The vault alone is compiled with optimizer_runs = 2,000. At 44,444,444 runs its runtime is 22,814 bytes, which
-# leaves 1,762 bytes under the EIP-170 limit (24,576); at 2,000 runs it is 17,792 bytes. The cost is a little more
-# gas per call (measured by test/bench/run.sh). Everything else, including the hooks, keeps the setting above.
+# The vault alone is compiled with optimizer_runs = 200. With the market-risk boundary its runtime is 22,249 bytes
+# at 200 runs, 2,327 bytes under the EIP-170 limit (24,576); at 2,000 runs the same source is over the limit. The cost
+# is a little more gas per call than at higher settings (measured by test/bench/run.sh). Everything else, including
+# the hooks, keeps the setting above.
 #
 # solc compiles a file together with its imports, so every test file that imports the vault (and with it the
-# PoolManager, hooks and routers that file imports) is also built with 2,000 runs. Behaviour is the same; gas
+# PoolManager, hooks and routers that file imports) is also built with 200 runs. Behaviour is the same; gas
 # measured in those files is not the production gas. test/bench/ deploys the production builds instead.
-additional_compiler_profiles = [{ name = "vault", optimizer_runs = 2000 }]
-compilation_restrictions = [{ paths = "src/SharedCommitmentVault.sol", optimizer_runs = 2000 }]
+additional_compiler_profiles = [{ name = "vault", optimizer_runs = 200 }]
+compilation_restrictions = [{ paths = "src/SharedCommitmentVault.sol", optimizer_runs = 200 }]
 
 gas_reports = ["SharedCommitmentVault", "HookA_DynamicFee", "HookB_BoundedImpact", "PoolManager"]
 

@@ -5,8 +5,8 @@ import {Vm} from "forge-std/Vm.sol";
 
 /// @notice Paths of the production build artifacts, and a check that deployed code is exactly one of them.
 /// @dev Why paths and not names. A test file that imports the vault source is compiled, together with everything it
-///      imports, under the vault's optimizer profile (2,000 runs). In such a file `deployCode("HookA_DynamicFee.sol:
-///      HookA_DynamicFee")` resolves to the hook's 2,000-run build, not to the 44,444,444-run build that would be
+///      imports, under the vault's optimizer profile (200 runs). In such a file `deployCode("HookA_DynamicFee.sol:
+///      HookA_DynamicFee")` resolves to the hook's 200-run build, not to the 44,444,444-run build that would be
 ///      deployed. Deploying from an explicit artifact file avoids that: the bytecode is whatever that file holds,
 ///      whatever profile the calling test was compiled under. Reading `out/` needs the read-only `fs_permissions`
 ///      entry in foundry.toml.
@@ -25,7 +25,7 @@ library ProductionArtifacts {
     string internal constant LENS = "out/VaultLens.sol/VaultLens.json";
 
     /// @dev Production optimizer runs from foundry.toml: the vault's compilation restriction and the default.
-    uint256 internal constant VAULT_RUNS = 2000;
+    uint256 internal constant VAULT_RUNS = 200;
     uint256 internal constant DEFAULT_RUNS = 44_444_444;
 
     /// @dev One immutable placeholder in an artifact's runtime code. Fields in alphabetical order, as

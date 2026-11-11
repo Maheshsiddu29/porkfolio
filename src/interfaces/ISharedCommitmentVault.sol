@@ -351,6 +351,13 @@ interface ISharedCommitmentVault {
     /// @notice The two direction floors would cross: their product would be below 2^192, which would make a round
     ///         trip at the floors profitable. `requiredMinimum` = ceil(2^192 / opposite floor).
     error InconsistentDirectionalFloors(uint256 floor, uint256 requiredMinimum);
+    /// @notice The market-risk adapter does not price this vault's pair with the tokens' own decimals.
+    error InvalidRiskAdapter(address adapter);
+    /// @notice The market-risk adapter returned a zero price or a reading that is no longer valid.
+    error InvalidReference();
+    /// @notice A fill in adapter mode found no inventory target for the asset paid out, or a target or tolerance
+    ///         is out of range.
+    error InventoryBoundsNotConfigured();
 
     // ------------------------------------------------------------------
     // Events
@@ -392,6 +399,15 @@ interface ISharedCommitmentVault {
     event SellFloorSet(Currency indexed currencyOut, uint160 previousFloor, uint160 newFloor, address indexed by);
     /// @notice The direction selling `currencyOut` was halted or resumed. `by` is the owner or guardian.
     event SellHaltedSet(Currency indexed currencyOut, bool halted, address indexed by);
+    /// @notice The market-risk adapter changed. `configVersion` is the new adapter's configuration identifier (zero
+    ///         when the adapter was removed).
+    event RiskAdapterSet(address indexed previousAdapter, address indexed newAdapter, bytes32 configVersion);
+    /// @notice The vault's edge beyond the reference band and the largest accepted uncertainty changed (pips).
+    event RiskBoundsSet(uint24 edgePips, uint24 maxUncertaintyPips, address indexed by);
+    /// @notice The inventory targets (raw units per share, WAD) and tolerances (pips) changed.
+    event InventoryBoundsSet(
+        uint256 target0, uint256 target1, uint24 tolerance0, uint24 tolerance1, address indexed by
+    );
     /// @notice `caller` paid `amount0`/`amount1` and `receiver` was credited `shares` (for the first deposit, the
     ///         shares exclude the locked MIN_SHARES).
     event Deposited(address indexed caller, address indexed receiver, uint256 shares, uint256 amount0, uint256 amount1);

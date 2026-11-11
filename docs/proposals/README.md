@@ -1,10 +1,10 @@
-# Proposed production changes (NOT applied)
+# Proposed production changes
 
-Each file here is an exact change to production contracts, kept for review. None is applied to `src/`, none is
-approved, and each was compiled and tested only in a scratch copy outside the repository. `git apply --check <file>`
-confirms a patch still applies to the current tree; it does not apply it.
+Each patch here is an exact change to production contracts, kept for review. `git apply --check <file>` against the
+commit named in its row confirms it still applies; it does not apply it.
 
 | Patch | Status | Description |
 |---|---|---|
-| `oracle-risk-boundary.patch` | **current proposal** (Phase 1B-4.2) | Vault-side oracle risk boundary: time-locked `IMarketRiskAdapter`, uncertainty breaker, dynamic floor outside the reference band, price-free inventory floor. In adapter mode the static vault floor is not consulted; no static band. Includes the prototype test `test/proto/OracleRiskBoundaryProto.t.sol`. Measured: 25,269 B at 2,000 runs (over EIP-170), 22,424 B at 200 runs. See `docs/architecture/PHASE1B4_2_REPORT.md`. |
+| `vault-inline-change-delay.patch` | **measured alternative, not applied** (Phase 1B-4.3) | The delay for risk-increasing owner changes enforced inside the vault: `queueChange` / `cancelChange` and a calldata-keyed check in `_authorize`, 32 days for `setInventoryBounds`, 3 days otherwise, exempt before initialization. Against the integration commit before it was moved to `VaultGovernor`. Measured: 23,253 B at 200 runs (1,323 B headroom: misses the 2,048 B target by 725 B), 840 B more than without it. Selected instead: the same delays in `src/governance/VaultGovernor.sol`, as the vault's owner (0 B in the vault). See `docs/architecture/PHASE1B4_3_REPORT.md`. |
+| `oracle-risk-boundary.patch` | **superseded: integrated with corrections** (Phase 1B-4.2) | The scratch prototype of the vault-side boundary. Integrated in Phase 1B-4.3 with five corrections from the stateful search (`INVENTORY_FLOOR_GUARANTEE.md` §3): inventory floor in every mode, stored floors still binding in adapter mode, delayed floor loosening, adapter decimal validation, reading validity checks. Kept as evidence. |
 | `vault-dynamic-floor.patch` | **superseded, rejected by the owner** (Phase 1B-4.1) | Dynamic floor with a ±25% static outer band. Kept as evidence only. |

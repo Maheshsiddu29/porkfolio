@@ -33,7 +33,7 @@ import {ProductionArtifacts} from "./ProductionArtifacts.sol";
 /// @dev Production builds. The PoolManager, both hooks, the lens and the authorization module are deployed from their
 ///      production artifact files
 ///      (`ProductionArtifacts`), not compiled into this file: a file that imports the vault is compiled under the
-///      vault's 2,000-run profile, and a `new PoolManager` or a by-name `deployCode` here would deploy 2,000-run
+///      vault's 200-run profile, and a `new PoolManager` or a by-name `deployCode` here would deploy 200-run
 ///      builds. Curators allocate through the module's direct path (`_allocate`), the only way to create an
 ///      allocation. The vault has a single artifact, so `new SharedCommitmentVault` is already its production build.
 ///      `test/unit/ProductionBuilds.t.sol` checks every one of them against its artifact's recorded settings and
