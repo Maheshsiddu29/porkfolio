@@ -1,0 +1,6269 @@
+{
+ "format": "porkfolio.inventory-quote.vectors/1",
+ "quotes": [
+  {
+   "amountIn": "1000000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "997997688234008836751",
+    "cap": "150000000000000000000000",
+    "depth": "158001289277201521479000000",
+    "halfSpreadPips": "2000",
+    "inventoryAfter": "997997688234008836751",
+    "inventoryBefore": "0"
+   },
+   "note": "balanced vault, vault sells currency1",
+   "reference": {
+    "priceX96": "79228162514264337593543950336",
+    "uncertaintyPips": "0"
+   },
+   "vault": {
+    "n0": "1000000000000000000000000",
+    "n1": "1000000000000000000000000",
+    "shares": "1000000000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "1000000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "997993683635822205750",
+    "cap": "150000000000000000000000",
+    "depth": "158001289277201521479000000",
+    "halfSpreadPips": "2000",
+    "inventoryAfter": "-1000000000000000000000",
+    "inventoryBefore": "0"
+   },
+   "note": "balanced vault, vault buys currency1",
+   "reference": {
+    "priceX96": "79228162514264337593543950336",
+    "uncertaintyPips": "0"
+   },
+   "vault": {
+    "n0": "1000000000000000000000000",
+    "n1": "1000000000000000000000000",
+    "shares": "1000000000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "1",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "ZeroOutput"
+   },
+   "note": "dust: refused, never rounded toward the trader",
+   "reference": {
+    "priceX96": "79228162514264337593543950336",
+    "uncertaintyPips": "0"
+   },
+   "vault": {
+    "n0": "1000000000000000000000000",
+    "n1": "1000000000000000000000000",
+    "shares": "1000000000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "0",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "ZeroInput"
+   },
+   "note": "zero input",
+   "reference": {
+    "priceX96": "79228162514264337593543950336",
+    "uncertaintyPips": "0"
+   },
+   "vault": {
+    "n0": "1000000000000000000000000",
+    "n1": "1000000000000000000000000",
+    "shares": "1000000000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "170141183460469231731687303715884105728",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "AmountTooLarge"
+   },
+   "note": "above int128",
+   "reference": {
+    "priceX96": "79228162514264337593543950336",
+    "uncertaintyPips": "0"
+   },
+   "vault": {
+    "n0": "1000000000000000000000000",
+    "n1": "1000000000000000000000000",
+    "shares": "1000000000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "200000000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "would pass the inventory cap",
+   "reference": {
+    "priceX96": "79228162514264337593543950336",
+    "uncertaintyPips": "0"
+   },
+   "vault": {
+    "n0": "1000000000000000000000000",
+    "n1": "1000000000000000000000000",
+    "shares": "1000000000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "50000000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "49994881155394857614760",
+    "cap": "150000000000000000000000",
+    "depth": "158001289277201521479000000",
+    "halfSpreadPips": "2000",
+    "inventoryAfter": "150000000000000000000000",
+    "inventoryBefore": "200000000000000000000000"
+   },
+   "note": "beyond the cap (20% short currency1): inward trade priced on the linear extension",
+   "reference": {
+    "priceX96": "79228162514264337593543950336",
+    "uncertaintyPips": "0"
+   },
+   "vault": {
+    "n0": "1200000000000000000000000",
+    "n1": "800000000000000000000000",
+    "shares": "1000000000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "1000000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "beyond the cap: outward trade refused",
+   "reference": {
+    "priceX96": "79228162514264337593543950336",
+    "uncertaintyPips": "0"
+   },
+   "vault": {
+    "n0": "1200000000000000000000000",
+    "n1": "800000000000000000000000",
+    "shares": "1000000000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "1000000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "SpreadTooWide"
+   },
+   "note": "uncertainty pushes spread past max",
+   "reference": {
+    "priceX96": "79228162514264337593543950336",
+    "uncertaintyPips": "49000"
+   },
+   "vault": {
+    "n0": "1000000000000000000000000",
+    "n1": "1000000000000000000000000",
+    "shares": "1000000000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "1000000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "NoDepth"
+   },
+   "note": "no shares: no depth",
+   "reference": {
+    "priceX96": "79228162514264337593543950336",
+    "uncertaintyPips": "0"
+   },
+   "vault": {
+    "n0": "0",
+    "n1": "0",
+    "shares": "0"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "10000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "3324950809858693761",
+    "cap": "150000000000000000000",
+    "depth": "158001289277201521479000",
+    "halfSpreadPips": "2500",
+    "inventoryAfter": "3324950809858693761",
+    "inventoryBefore": "0"
+   },
+   "note": "6/18 decimals, stable in",
+   "reference": {
+    "priceX96": "26409387504754779197847983445333333333",
+    "uncertaintyPips": "500"
+   },
+   "vault": {
+    "n0": "3000000000000",
+    "n1": "1000000000000000000000",
+    "shares": "1000000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "3000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "8977329544",
+    "cap": "150000000000000000000",
+    "depth": "158001289277201521479000",
+    "halfSpreadPips": "2500",
+    "inventoryAfter": "-3000000000000000000",
+    "inventoryBefore": "0"
+   },
+   "note": "6/18 decimals, asset in",
+   "reference": {
+    "priceX96": "26409387504754779197847983445333333333",
+    "uncertaintyPips": "500"
+   },
+   "vault": {
+    "n0": "3000000000000",
+    "n1": "1000000000000000000000",
+    "shares": "1000000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "5361000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300179940067401157719",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "77191122376512932768999",
+    "cap": "22802722800000000000000000",
+    "depth": "22816399878258539719551457644",
+    "halfSpreadPips": "5056",
+    "inventoryAfter": "20689060689593620230139111",
+    "inventoryBefore": "20611869567217107297370112"
+   },
+   "note": "random 0",
+   "reference": {
+    "priceX96": "1148623992466102534748290154496",
+    "uncertaintyPips": "3056"
+   },
+   "vault": {
+    "n0": "96620945567217087389106176",
+    "n1": "55397206432782892702629888",
+    "shares": "76009076000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "9611098332016178235507404",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "120149812967290535936",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "1062038735269998019758689",
+    "cap": "14170689300000000000000000",
+    "depth": "5675352230041950825265135616",
+    "halfSpreadPips": "8282",
+    "inventoryAfter": "-2053741704998498522694348",
+    "inventoryBefore": "7557356627017679712813056"
+   },
+   "note": "random 1",
+   "reference": {
+    "priceX96": "711741041992799351736620810240",
+    "uncertaintyPips": "3282"
+   },
+   "vault": {
+    "n0": "54792987627017683895058432",
+    "n1": "39678274372982320287186944",
+    "shares": "47235631000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "1790239574268824937103153",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "100024993753123225600",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 2",
+   "reference": {
+    "priceX96": "1579990415513111103013233098752",
+    "uncertaintyPips": "592"
+   },
+   "vault": {
+    "n0": "22479187218558887007354880",
+    "n1": "32910812781441114087358464",
+    "shares": "27695000000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "491185",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "120149812967290535936",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "133787",
+    "cap": "19184756400000000000000000",
+    "depth": "7683482977610100333192019968",
+    "halfSpreadPips": "6774",
+    "inventoryAfter": "25256237163747795020579151",
+    "inventoryBefore": "25256237163747795021070336"
+   },
+   "note": "random 3",
+   "reference": {
+    "priceX96": "290353305033062189955505192960",
+    "uncertaintyPips": "1774"
+   },
+   "vault": {
+    "n0": "89205425163747787922210816",
+    "n1": "38692950836252204978929664",
+    "shares": "63949188000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "395601370938311430576016",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "334506940464090224755",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "1737299571297062604214371",
+    "cap": "2375662050000000000000000",
+    "depth": "15893508878442970694528480955",
+    "halfSpreadPips": "4365",
+    "inventoryAfter": "-11737665015388744235118493",
+    "inventoryBefore": "-13474964586685806839332864"
+   },
+   "note": "random 4",
+   "reference": {
+    "priceX96": "349347996394340690862115127296",
+    "uncertaintyPips": "4065"
+   },
+   "vault": {
+    "n0": "34038276413314190920384512",
+    "n1": "60988205586685806839332864",
+    "shares": "47513241000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "149703456467363054863231",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "50055055055000816542",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 5",
+   "reference": {
+    "priceX96": "1205020957018899146989849542656",
+    "uncertaintyPips": "3777"
+   },
+   "vault": {
+    "n0": "31692917516381513341468672",
+    "n1": "21066516483618488673370112",
+    "shares": "26379717000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "10754",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "50055055055000816542",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "180980",
+    "cap": "2160724850000000000000000",
+    "depth": "2163104026509167621451809374",
+    "halfSpreadPips": "4875",
+    "inventoryAfter": "-3017601067086724462099724",
+    "inventoryBefore": "-3017601067086724462280704"
+   },
+   "note": "random 6",
+   "reference": {
+    "priceX96": "1337353414813492141081256525824",
+    "uncertaintyPips": "2875"
+   },
+   "vault": {
+    "n0": "40196895932913274534756352",
+    "n1": "46232098067086724462280704",
+    "shares": "43214497000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "697251",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "500125006249631301521",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 7",
+   "reference": {
+    "priceX96": "898888154120554686940278947840",
+    "uncertaintyPips": "3324"
+   },
+   "vault": {
+    "n0": "56532931743123566858600448",
+    "n1": "99572746256876408471027712",
+    "shares": "78052839000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "3638000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "333441649800944418816",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 8",
+   "reference": {
+    "priceX96": "708330305859799837173503492096",
+    "uncertaintyPips": "266"
+   },
+   "vault": {
+    "n0": "67449660354341991033602048",
+    "n1": "40167895645658002929745920",
+    "shares": "53808778000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "19342380217974397371888262",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "334506940464090224755",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 9",
+   "reference": {
+    "priceX96": "305786730539142693901830193152",
+    "uncertaintyPips": "4774"
+   },
+   "vault": {
+    "n0": "105577373783188348552085504",
+    "n1": "54674836216811638201778176",
+    "shares": "80126105000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "1173606136390517742139885",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "100135206478944243853",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 10",
+   "reference": {
+    "priceX96": "794882698502274902751176556544",
+    "uncertaintyPips": "1913"
+   },
+   "vault": {
+    "n0": "5941069966143885261406208",
+    "n1": "9911154033856116567310336",
+    "shares": "7926112000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "9019000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "61305520603447705600",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 11",
+   "reference": {
+    "priceX96": "403620121214358022876190212096",
+    "uncertaintyPips": "4298"
+   },
+   "vault": {
+    "n0": "21749074404935388121530368",
+    "n1": "13807909595064612165779456",
+    "shares": "17778492000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "5666000000000000000000",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "334506940464090224755",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "408526929618843103344",
+    "cap": "3527573100000000000000000",
+    "depth": "23599953698888523856373841810",
+    "halfSpreadPips": "1334",
+    "inventoryAfter": "14730542273410838115123200",
+    "inventoryBefore": "14736208273410838115123200"
+   },
+   "note": "random 12",
+   "reference": {
+    "priceX96": "1097704815115359762279726841856",
+    "uncertaintyPips": "1034"
+   },
+   "vault": {
+    "n0": "85287670273410835738001408",
+    "n1": "55815253726589161884876800",
+    "shares": "70551462000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "78843932437397183847429",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "61305520603447705600",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "786811129617857891206075",
+    "cap": "2199039150000000000000000",
+    "depth": "898754932787420863947161600",
+    "halfSpreadPips": "9521",
+    "inventoryAfter": "-470727839871156237171781",
+    "inventoryBefore": "-1257538969489014128377856"
+   },
+   "note": "random 13",
+   "reference": {
+    "priceX96": "796640742017979571516727099392",
+    "uncertaintyPips": "4521"
+   },
+   "vault": {
+    "n0": "13402722030510986561060864",
+    "n1": "15917799969489014128377856",
+    "shares": "14660261000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "863876",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "20024968827881754624",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "9335353",
+    "cap": "1312558100000000000000000",
+    "depth": "525678700745674057478873088",
+    "halfSpreadPips": "5893",
+    "inventoryAfter": "-1736117005900324125904327",
+    "inventoryBefore": "-1736117005900324135239680"
+   },
+   "note": "random 14",
+   "reference": {
+    "priceX96": "856929139739099157218077966336",
+    "uncertaintyPips": "893"
+   },
+   "vault": {
+    "n0": "24515044994099679684722688",
+    "n1": "27987279005900324135239680",
+    "shares": "26251162000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "126293",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "666883299601888837632",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "10506",
+    "cap": "7788956100000000000000000",
+    "depth": "17314415814740865444652253184",
+    "halfSpreadPips": "4279",
+    "inventoryAfter": "-2357783430454987724287317",
+    "inventoryBefore": "-2357783430454987724161024"
+   },
+   "note": "random 15",
+   "reference": {
+    "priceX96": "947828045018528163274447388672",
+    "uncertaintyPips": "3279"
+   },
+   "vault": {
+    "n0": "23605403569545008419700736",
+    "n1": "28320970430454987724161024",
+    "shares": "25963187000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "609000000000000000000",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "1500375018748894101190",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 16",
+   "reference": {
+    "priceX96": "448678650659689911877241929728",
+    "uncertaintyPips": "104"
+   },
+   "vault": {
+    "n0": "65703889798286353398497280",
+    "n1": "45693020201713654319546368",
+    "shares": "55698455000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "5021583560666108249692598",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "122611041206895411200",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 17",
+   "reference": {
+    "priceX96": "1170028255721903912438586146816",
+    "uncertaintyPips": "4385"
+   },
+   "vault": {
+    "n0": "19113460091054782008000512",
+    "n1": "42152445908945223486013440",
+    "shares": "30632953000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "15951493228604959675765518",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300405619436832764330",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 18",
+   "reference": {
+    "priceX96": "954244562353477206108668952576",
+    "uncertaintyPips": "4687"
+   },
+   "vault": {
+    "n0": "60029555435377811777388544",
+    "n1": "111914698564622172951674880",
+    "shares": "85972127000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "9139000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "600149962518739550208",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "31924020778922087957005",
+    "cap": "6241389300000000000000000",
+    "depth": "12485898514866206927183413248",
+    "halfSpreadPips": "3764",
+    "inventoryAfter": "-2566273259477364267924979",
+    "inventoryBefore": "-2598197280256286355881984"
+   },
+   "note": "random 19",
+   "reference": {
+    "priceX96": "277683766020789928749611089920",
+    "uncertaintyPips": "2764"
+   },
+   "vault": {
+    "n0": "18206433719743708477259776",
+    "n1": "23402828280256286355881984",
+    "shares": "20804631000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "639175",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "333358331458696511488",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 20",
+   "reference": {
+    "priceX96": "1464738487492247462644950237184",
+    "uncertaintyPips": "2306"
+   },
+   "vault": {
+    "n0": "60199913317014784085852160",
+    "n1": "90715766682985208708333568",
+    "shares": "75457840000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "8000000000000000000000",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "2000149988752179331072",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "2895127556937814682736",
+    "cap": "15746345400000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "3534",
+    "inventoryAfter": "14479852699721583508848640",
+    "inventoryBefore": "14487852699721583508848640"
+   },
+   "note": "random 21",
+   "reference": {
+    "priceX96": "218314201300522670199656153088",
+    "uncertaintyPips": "3234"
+   },
+   "vault": {
+    "n0": "66975670699721578545938432",
+    "n1": "37999965300278416491151360",
+    "shares": "52487818000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "511742",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300179940067401157719",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "30599",
+    "cap": "28002910800000000000000000",
+    "depth": "28019706952189268691406294884",
+    "halfSpreadPips": "5505",
+    "inventoryAfter": "30667312696958148835553538",
+    "inventoryBefore": "30667312696958148836065280"
+   },
+   "note": "random 22",
+   "reference": {
+    "priceX96": "1320303732562580190863317532672",
+    "uncertaintyPips": "3505"
+   },
+   "vault": {
+    "n0": "124010348696958137580650496",
+    "n1": "62675723303041851163934720",
+    "shares": "93343036000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "836135",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "1000074994376089665536",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 23",
+   "reference": {
+    "priceX96": "1450022411640393304978118148096",
+    "uncertaintyPips": "3339"
+   },
+   "vault": {
+    "n0": "68975486994666187109957632",
+    "n1": "121518895005333817755959296",
+    "shares": "95247191000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "406231579312966991315553",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "414628390987010032057647",
+    "cap": "6852873450000000000000000",
+    "depth": "7218418935690026645620292217",
+    "halfSpreadPips": "4237",
+    "inventoryAfter": "15980017710633418583473567",
+    "inventoryBefore": "16386249289946385574789120"
+   },
+   "note": "random 24",
+   "reference": {
+    "priceX96": "77441758889481984744968159232",
+    "uncertaintyPips": "2237"
+   },
+   "vault": {
+    "n0": "62072072289946393036980224",
+    "n1": "29299573710053614425210880",
+    "shares": "45685823000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "9536000000000000000000",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "2007041642784541479614",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "142681083641010720610416",
+    "cap": "14744397900000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "3880",
+    "inventoryAfter": "-11065485936037713637533584",
+    "inventoryBefore": "-11208167019678724358144000"
+   },
+   "note": "random 25",
+   "reference": {
+    "priceX96": "1189371116813207150785286111232",
+    "uncertaintyPips": "3580"
+   },
+   "vault": {
+    "n0": "37939825980321263234580480",
+    "n1": "60356160019678724358144000",
+    "shares": "49147993000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "12068599165223442182227086",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "20024968827881754624",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 26",
+   "reference": {
+    "priceX96": "503564996695491513840564174848",
+    "uncertaintyPips": "3974"
+   },
+   "vault": {
+    "n0": "52064604917604742015746048",
+    "n1": "107673891082395253253079040",
+    "shares": "79869248000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "147173",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "52667096425733832301",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "91790",
+    "cap": "1105226450000000000000000",
+    "depth": "1164181360288429842378591229",
+    "halfSpreadPips": "2518",
+    "inventoryAfter": "5245106116790630450577691",
+    "inventoryBefore": "5245106116790630450724864"
+   },
+   "note": "random 27",
+   "reference": {
+    "priceX96": "126952011787011835739871641600",
+    "uncertaintyPips": "518"
+   },
+   "vault": {
+    "n0": "27349635116790628952834048",
+    "n1": "16859422883209369549275136",
+    "shares": "22104529000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "3518778596772120523928850",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "60086968914878701568",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 28",
+   "reference": {
+    "priceX96": "405423853723986008283950350336",
+    "uncertaintyPips": "1884"
+   },
+   "vault": {
+    "n0": "23559231680986209033650176",
+    "n1": "41073830319013789828120576",
+    "shares": "32316531000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "456619",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "111147216600314806272",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 29",
+   "reference": {
+    "priceX96": "589506338822998200507156135936",
+    "uncertaintyPips": "650"
+   },
+   "vault": {
+    "n0": "39968877729521945920143360",
+    "n1": "30578846270478049303592960",
+    "shares": "35273862000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "7778000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300074981259369775104",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 30",
+   "reference": {
+    "priceX96": "882785299778975052856891015168",
+    "uncertaintyPips": "3043"
+   },
+   "vault": {
+    "n0": "36729215985989482377641984",
+    "n1": "59923456014010518595436544",
+    "shares": "48326336000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "168565",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "20028989638292897792",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 31",
+   "reference": {
+    "priceX96": "1550001466425064211331065839616",
+    "uncertaintyPips": "721"
+   },
+   "vault": {
+    "n0": "57618720295173461091811328",
+    "n1": "31151819704826538703716352",
+    "shares": "44385270000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "573368",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "60086968914878701568",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 32",
+   "reference": {
+    "priceX96": "106941309942924496209340006400",
+    "uncertaintyPips": "321"
+   },
+   "vault": {
+    "n0": "117607715344457828994646016",
+    "n1": "71679828655542178943074304",
+    "shares": "94643772000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "3367448175777652209534601",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "100135206478944243853",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 33",
+   "reference": {
+    "priceX96": "717220049983380249038976712704",
+    "uncertaintyPips": "4914"
+   },
+   "vault": {
+    "n0": "27990036852954978051948544",
+    "n1": "27692519147045020967632896",
+    "shares": "27841278000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "2764000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300405619436832764330",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 34",
+   "reference": {
+    "priceX96": "1019284103613347427143861141504",
+    "uncertaintyPips": "4344"
+   },
+   "vault": {
+    "n0": "79828481040632287932186624",
+    "n1": "56885104959367713166196736",
+    "shares": "68356793000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "31946",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "3000750037497788202379",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "323962",
+    "cap": "29894455500000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "3352",
+    "inventoryAfter": "-33381558312959502097780358",
+    "inventoryBefore": "-33381558312959502098104320"
+   },
+   "note": "random 35",
+   "reference": {
+    "priceX96": "804950248379350563045089738752",
+    "uncertaintyPips": "3052"
+   },
+   "vault": {
+    "n0": "66266626687040491484086272",
+    "n1": "133029743312959502098104320",
+    "shares": "99648185000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "3867000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "316002578554403042958",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "227355587774254254715",
+    "cap": "2708441100000000000000000",
+    "depth": "2852914571542412625041709246",
+    "halfSpreadPips": "4743",
+    "inventoryAfter": "1044769613803277201702912",
+    "inventoryBefore": "1048636613803277201702912"
+   },
+   "note": "random 36",
+   "reference": {
+    "priceX96": "1342153222461406612143541846016",
+    "uncertaintyPips": "2743"
+   },
+   "vault": {
+    "n0": "10076773613803277503168512",
+    "n1": "7979500386196722798297088",
+    "shares": "9028137000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "4636000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300405619436832764330",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 37",
+   "reference": {
+    "priceX96": "960788867461360228051185565696",
+    "uncertaintyPips": "1049"
+   },
+   "vault": {
+    "n0": "30202326164878568833679360",
+    "n1": "41521373835121439314804736",
+    "shares": "35861850000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "337481921843997344655163",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "20028989638292897792",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 38",
+   "reference": {
+    "priceX96": "94983781262747514697259417600",
+    "uncertaintyPips": "1833"
+   },
+   "vault": {
+    "n0": "50286963253531271648772096",
+    "n1": "79348382746468738735800320",
+    "shares": "64817673000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "747140",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "1000074994376089665536",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "68946",
+    "cap": "12306035850000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "5168",
+    "inventoryAfter": "7095920803774340508195196",
+    "inventoryBefore": "7095920803774340508942336"
+   },
+   "note": "random 39",
+   "reference": {
+    "priceX96": "854408996814622223547532050432",
+    "uncertaintyPips": "4868"
+   },
+   "vault": {
+    "n0": "89136159803774335094620160",
+    "n1": "74944318196225659491057664",
+    "shares": "82040239000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "14346646051106783248330017",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "316002578554403042958",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 40",
+   "reference": {
+    "priceX96": "824083305232544424677641027584",
+    "uncertaintyPips": "51"
+   },
+   "vault": {
+    "n0": "85774495768965368883707904",
+    "n1": "46331048231034626685009920",
+    "shares": "66052772000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "9663000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "122611041206895411200",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "86128432180498141129590",
+    "cap": "17919525300000000000000000",
+    "depth": "7323772183221016184841011200",
+    "halfSpreadPips": "7082",
+    "inventoryAfter": "-11160542901992668781761674",
+    "inventoryBefore": "-11246671334173166922891264"
+   },
+   "note": "random 41",
+   "reference": {
+    "priceX96": "709008208204400301355107876864",
+    "uncertaintyPips": "2082"
+   },
+   "vault": {
+    "n0": "48485079665826825687269376",
+    "n1": "70978422334173166922891264",
+    "shares": "59731751000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "129238",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "600149962518739550208",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "2531851",
+    "cap": "27001783500000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "3898",
+    "inventoryAfter": "-21523479207047131596938741",
+    "inventoryBefore": "-21523479207047131599470592"
+   },
+   "note": "random 42",
+   "reference": {
+    "priceX96": "1556489798755446869299812106240",
+    "uncertaintyPips": "2898"
+   },
+   "vault": {
+    "n0": "68482465792952843863326720",
+    "n1": "111529424207047131599470592",
+    "shares": "90005945000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "5706917393529696255959677",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "600149962518739550208",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 43",
+   "reference": {
+    "priceX96": "574026271490654639294911610880",
+    "uncertaintyPips": "1164"
+   },
+   "vault": {
+    "n0": "45464994655924232516534272",
+    "n1": "72352683344075770092847104",
+    "shares": "58908839000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "645143",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "333441649800944418816",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "161312",
+    "cap": "8142470250000000000000000",
+    "depth": "18100258090767389014085468160",
+    "halfSpreadPips": "2906",
+    "inventoryAfter": "-7703293987377639467112471",
+    "inventoryBefore": "-7703293987377639466467328"
+   },
+   "note": "random 44",
+   "reference": {
+    "priceX96": "315668686746458286608649027584",
+    "uncertaintyPips": "1906"
+   },
+   "vault": {
+    "n0": "46579841012622357627404288",
+    "n1": "61986428987377639466467328",
+    "shares": "54283135000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "93230",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300179940067401157719",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "127694",
+    "cap": "24173276700000000000000000",
+    "depth": "24187775836795682784805759491",
+    "halfSpreadPips": "4273",
+    "inventoryAfter": "17838060586651092834972366",
+    "inventoryBefore": "17838060586651092834844672"
+   },
+   "note": "random 45",
+   "reference": {
+    "priceX96": "109142293440505601636291313664",
+    "uncertaintyPips": "2273"
+   },
+   "vault": {
+    "n0": "98415649586651099555692544",
+    "n1": "62739528413348907165155328",
+    "shares": "80577589000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "3308000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "61305520603447705600",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "189797112814866779125",
+    "cap": "14039555550000000000000000",
+    "depth": "5738015080225157228608307200",
+    "halfSpreadPips": "9354",
+    "inventoryAfter": "33397553089573790354243584",
+    "inventoryBefore": "33400861089573790354243584"
+   },
+   "note": "random 46",
+   "reference": {
+    "priceX96": "1374680612294960712083235143680",
+    "uncertaintyPips": "4354"
+   },
+   "vault": {
+    "n0": "126997898089573817413271552",
+    "n1": "60196175910426209645756416",
+    "shares": "93597037000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "894932",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "100135206478944243853",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "121876",
+    "cap": "2587564800000000000000000",
+    "depth": "5182126710512961331132783488",
+    "halfSpreadPips": "3232",
+    "inventoryAfter": "202783380417597425211436",
+    "inventoryBefore": "202783380417597426106368"
+   },
+   "note": "random 47",
+   "reference": {
+    "priceX96": "579927794583832140011955814400",
+    "uncertaintyPips": "2232"
+   },
+   "vault": {
+    "n0": "51954079380417582729265152",
+    "n1": "51548512619582402573893632",
+    "shares": "51751296000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "2042000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "100024993753123225600",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 48",
+   "reference": {
+    "priceX96": "621014837495690891260466298880",
+    "uncertaintyPips": "4322"
+   },
+   "vault": {
+    "n0": "97048553883576785407311872",
+    "n1": "70939402116423204068130816",
+    "shares": "83993978000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "917593818593312063882023",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "60074906483645267968",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 49",
+   "reference": {
+    "priceX96": "661056048416679926686254366720",
+    "uncertaintyPips": "1094"
+   },
+   "vault": {
+    "n0": "11164155619645467834449920",
+    "n1": "7057144380354531438886912",
+    "shares": "9110650000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "4044000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 50",
+   "reference": {
+    "priceX96": "948549773569262573351046479872",
+    "uncertaintyPips": "2573"
+   },
+   "vault": {
+    "n0": "30784897638850765038551040",
+    "n1": "42393704361149242118504448",
+    "shares": "36589301000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "1056287227665145757949582",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "20028989638292897792",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 51",
+   "reference": {
+    "priceX96": "503243154010980613429089271808",
+    "uncertaintyPips": "1051"
+   },
+   "vault": {
+    "n0": "11832043768536738232795136",
+    "n1": "12527502231463262611832832",
+    "shares": "12179773000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "6976970264651557414378398",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "20435173534482567168",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "1888441778410173049168683",
+    "cap": "2879306900000000000000000",
+    "depth": "1176782723210660871530717184",
+    "halfSpreadPips": "5327",
+    "inventoryAfter": "-6453161361331645068516565",
+    "inventoryBefore": "-8341603139741818117685248"
+   },
+   "note": "random 52",
+   "reference": {
+    "priceX96": "21453641722654037218462531584",
+    "uncertaintyPips": "327"
+   },
+   "vault": {
+    "n0": "49244534860258176005046272",
+    "n1": "65927741139741818117685248",
+    "shares": "57586138000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "893302",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300074981259369775104",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "3996754",
+    "cap": "5064409200000000000000000",
+    "depth": "10131349971865199168257523712",
+    "halfSpreadPips": "2886",
+    "inventoryAfter": "827166897446815524518994",
+    "inventoryBefore": "827166897446815520522240"
+   },
+   "note": "random 53",
+   "reference": {
+    "priceX96": "355559002277336473338011189248",
+    "uncertaintyPips": "1886"
+   },
+   "vault": {
+    "n0": "34589894897446811842117632",
+    "n1": "32935561102553184479477760",
+    "shares": "33762728000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "12486835917409625020614810",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "60074906483645267968",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 54",
+   "reference": {
+    "priceX96": "1343003311444707028558025850880",
+    "uncertaintyPips": "4966"
+   },
+   "vault": {
+    "n0": "49683893523282092122701824",
+    "n1": "55564128476717903203270656",
+    "shares": "52624011000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "8360000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300330330330004932022",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "1239908542907431376593",
+    "cap": "6368313900000000000000000",
+    "depth": "6375326057440539985547525686",
+    "halfSpreadPips": "6072",
+    "inventoryAfter": "7849683500985183182782464",
+    "inventoryBefore": "7858043500985183182782464"
+   },
+   "note": "random 55",
+   "reference": {
+    "priceX96": "532009272108285018754475098112",
+    "uncertaintyPips": "4072"
+   },
+   "vault": {
+    "n0": "29085756500985186860662784",
+    "n1": "13369669499014816817217536",
+    "shares": "21227713000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "477784",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "100024993753123225600",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "4592635",
+    "cap": "1125342200000000000000000",
+    "depth": "2251246930502518951356006400",
+    "halfSpreadPips": "1367",
+    "inventoryAfter": "-7807711829388950441159685",
+    "inventoryBefore": "-7807711829388950445752320"
+   },
+   "note": "random 56",
+   "reference": {
+    "priceX96": "761850776038580541572935319552",
+    "uncertaintyPips": "367"
+   },
+   "vault": {
+    "n0": "14699132170611051838046208",
+    "n1": "30314555829388950445752320",
+    "shares": "22506844000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "945000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300405619436832764330",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "11245100946229404643367",
+    "cap": "5501002800000000000000000",
+    "depth": "11016881024385009731407134160",
+    "halfSpreadPips": "1373",
+    "inventoryAfter": "3711957107276233298161703",
+    "inventoryBefore": "3700712006330003893518336"
+   },
+   "note": "random 57",
+   "reference": {
+    "priceX96": "944711655710205093997696778240",
+    "uncertaintyPips": "373"
+   },
+   "vault": {
+    "n0": "40374064006329999057485824",
+    "n1": "32972639993669996106481664",
+    "shares": "36673352000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "710872",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 58",
+   "reference": {
+    "priceX96": "929138483163941527383393173504",
+    "uncertaintyPips": "3021"
+   },
+   "vault": {
+    "n0": "29831778881631142568525824",
+    "n1": "48236279118368865532248064",
+    "shares": "39034029000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "7959000000000000000000",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "3000750037497788202379",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "1167885713832778836018",
+    "cap": "24241155300000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "3201",
+    "inventoryAfter": "31566371964403396836851712",
+    "inventoryBefore": "31574330964403396836851712"
+   },
+   "note": "random 59",
+   "reference": {
+    "priceX96": "538861327748423681539242459136",
+    "uncertaintyPips": "2901"
+   },
+   "vault": {
+    "n0": "112378181964403387666530304",
+    "n1": "49229520035596603163148288",
+    "shares": "80803851000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "7893000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "150165165165002466011",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "405417750462400479822",
+    "cap": "2076975900000000000000000",
+    "depth": "2079262860448197635636107566",
+    "halfSpreadPips": "6064",
+    "inventoryAfter": "2581157121042065747345408",
+    "inventoryBefore": "2589050121042065747345408"
+   },
+   "note": "random 60",
+   "reference": {
+    "priceX96": "1536191702871439254267711455232",
+    "uncertaintyPips": "4064"
+   },
+   "vault": {
+    "n0": "16435556121042061539409920",
+    "n1": "11257455878957934252654592",
+    "shares": "13846506000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "4925000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "52667096425733832301",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "250961695510703585362",
+    "cap": "3600091100000000000000000",
+    "depth": "3792126902102523612714452422",
+    "halfSpreadPips": "3783",
+    "inventoryAfter": "25927099425962374048514048",
+    "inventoryBefore": "25932024425962374048514048"
+   },
+   "note": "random 61",
+   "reference": {
+    "priceX96": "1551877090680951561519053668352",
+    "uncertaintyPips": "1783"
+   },
+   "vault": {
+    "n0": "97933846425962377212067840",
+    "n1": "46069797574037625951485952",
+    "shares": "72001822000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "915717",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "3000750037497788202379",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "146457",
+    "cap": "20475587100000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "4391",
+    "inventoryAfter": "-6681377954996529732909317",
+    "inventoryBefore": "-6681377954996529731993600"
+   },
+   "note": "random 62",
+   "reference": {
+    "priceX96": "493026411762445622331205222400",
+    "uncertaintyPips": "4091"
+   },
+   "vault": {
+    "n0": "61570579045003463432863744",
+    "n1": "74933334954996529731993600",
+    "shares": "68251957000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "429451",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "26767",
+    "cap": "3706358550000000000000000",
+    "depth": "3904062862823861194711335303",
+    "halfSpreadPips": "6105",
+    "inventoryAfter": "-2234315747735219113987467",
+    "inventoryBefore": "-2234315747735219113558016"
+   },
+   "note": "random 63",
+   "reference": {
+    "priceX96": "1261873139033625743108557766656",
+    "uncertaintyPips": "4105"
+   },
+   "vault": {
+    "n0": "22474741252264781477314560",
+    "n1": "26943372747735219113558016",
+    "shares": "24709057000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "2608185749168702781373548",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "600811238873665528660",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "287807094328864944487712",
+    "cap": "3745121100000000000000000",
+    "depth": "7500369492743016685757402420",
+    "halfSpreadPips": "4809",
+    "inventoryAfter": "368102739368603195294612",
+    "inventoryBefore": "2976288488537305976668160"
+   },
+   "note": "random 64",
+   "reference": {
+    "priceX96": "714852979366435035766069395456",
+    "uncertaintyPips": "3809"
+   },
+   "vault": {
+    "n0": "15460025488537307226046464",
+    "n1": "9507448511462694023331840",
+    "shares": "12483737000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "623413",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "61305520603447705600",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "1524465",
+    "cap": "12551128950000000000000000",
+    "depth": "5129689962938359783781580800",
+    "halfSpreadPips": "6569",
+    "inventoryAfter": "5733612644075347738575601",
+    "inventoryBefore": "5733612644075347737051136"
+   },
+   "note": "random 65",
+   "reference": {
+    "priceX96": "195450599683101415219243515904",
+    "uncertaintyPips": "1569"
+   },
+   "vault": {
+    "n0": "89407805644075343219261440",
+    "n1": "77940580355924652262948864",
+    "shares": "83674193000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "7561000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "60074906483645267968",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "1295803062726502713372",
+    "cap": "14489499900000000000000000",
+    "depth": "5803035676581916412385394688",
+    "halfSpreadPips": "5284",
+    "inventoryAfter": "-6671986783120713347497984",
+    "inventoryBefore": "-6664425783120713347497984"
+   },
+   "note": "random 66",
+   "reference": {
+    "priceX96": "458797888007678088564348813312",
+    "uncertaintyPips": "284"
+   },
+   "vault": {
+    "n0": "89932240216879285355413504",
+    "n1": "103261091783120713347497984",
+    "shares": "96596666000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "2527000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300405619436832764330",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "212804937304251288548",
+    "cap": "2048072250000000000000000",
+    "depth": "4101682752750918750100418950",
+    "halfSpreadPips": "1379",
+    "inventoryAfter": "3722533418822487525818368",
+    "inventoryBefore": "3725060418822487525818368"
+   },
+   "note": "random 67",
+   "reference": {
+    "priceX96": "940454170758756135903627837440",
+    "uncertaintyPips": "379"
+   },
+   "vault": {
+    "n0": "17378875418822485831843840",
+    "n1": "9928754581177512474181632",
+    "shares": "13653815000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "246000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "120149812967290535936",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "36149096006285018577",
+    "cap": "18585011100000000000000000",
+    "depth": "7443285358866728490985029632",
+    "halfSpreadPips": "6478",
+    "inventoryAfter": "-10635638084047705957728256",
+    "inventoryBefore": "-10635392084047705957728256"
+   },
+   "note": "random 68",
+   "reference": {
+    "priceX96": "534139283903430355985461411840",
+    "uncertaintyPips": "1478"
+   },
+   "vault": {
+    "n0": "51314644915952296585592832",
+    "n1": "72585429084047705957728256",
+    "shares": "61950037000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "9567421421249139612465010",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "120149812967290535936",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 69",
+   "reference": {
+    "priceX96": "194478502083384406735904047104",
+    "uncertaintyPips": "626"
+   },
+   "vault": {
+    "n0": "68597100448483653355307008",
+    "n1": "48345447551516344651350016",
+    "shares": "58471274000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "121377",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "60086968914878701568",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 70",
+   "reference": {
+    "priceX96": "790025292839975385955420864512",
+    "uncertaintyPips": "3293"
+   },
+   "vault": {
+    "n0": "29388945681402954306813952",
+    "n1": "45998630318597044218888192",
+    "shares": "37693788000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "9091000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "150165165165002466011",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "14216098340933510460889",
+    "cap": "8543720400000000000000000",
+    "depth": "8553127899930672899389915496",
+    "halfSpreadPips": "4897",
+    "inventoryAfter": "-19108228873428176593390119",
+    "inventoryBefore": "-19122444971769110103851008"
+   },
+   "note": "random 71",
+   "reference": {
+    "priceX96": "124251801497029443397638684672",
+    "uncertaintyPips": "2897"
+   },
+   "vault": {
+    "n0": "37835691028230896342794240",
+    "n1": "76080580971769110103851008",
+    "shares": "56958136000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "915859",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "600149962518739550208",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "4415561",
+    "cap": "15041880300000000000000000",
+    "depth": "30091279660854556070348587008",
+    "halfSpreadPips": "1799",
+    "inventoryAfter": "3001488336022295982596169",
+    "inventoryBefore": "3001488336022295978180608"
+   },
+   "note": "random 72",
+   "reference": {
+    "priceX96": "382740481074324529115060764672",
+    "uncertaintyPips": "799"
+   },
+   "vault": {
+    "n0": "53141089336022310586417152",
+    "n1": "47138112663977704021819392",
+    "shares": "50139601000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "11877872372545942666136804",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300405619436832764330",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 73",
+   "reference": {
+    "priceX96": "1131271787951604210979972317184",
+    "uncertaintyPips": "3654"
+   },
+   "vault": {
+    "n0": "44630836838108561504468992",
+    "n1": "75317771161891430761234432",
+    "shares": "59974304000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "9306000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "20435173534482567168",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 74",
+   "reference": {
+    "priceX96": "1035305377418014681680184344576",
+    "uncertaintyPips": "3021"
+   },
+   "vault": {
+    "n0": "25970967766086983423623168",
+    "n1": "33797186233913013671297024",
+    "shares": "29884077000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "560923",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "120173937829757403136",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 75",
+   "reference": {
+    "priceX96": "1318026361804057453925968642048",
+    "uncertaintyPips": "318"
+   },
+   "vault": {
+    "n0": "106515525716900368336551936",
+    "n1": "56242492283099619503636480",
+    "shares": "81379009000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "760391",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "316002578554403042958",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 76",
+   "reference": {
+    "priceX96": "1050738805483102910974510759936",
+    "uncertaintyPips": "1831"
+   },
+   "vault": {
+    "n0": "76060592571134404164845568",
+    "n1": "39217845428865589495988224",
+    "shares": "57639219000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "694000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "600149962518739550208",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "2641569943377535364911",
+    "cap": "1934174400000000000000000",
+    "depth": "3869315645549018527599427584",
+    "halfSpreadPips": "2859",
+    "inventoryAfter": "835417268789934300917551",
+    "inventoryBefore": "832775698846556765552640"
+   },
+   "note": "random 77",
+   "reference": {
+    "priceX96": "302558503413052629858849390592",
+    "uncertaintyPips": "1859"
+   },
+   "vault": {
+    "n0": "7280023698846557562470400",
+    "n1": "5614472301153443234447360",
+    "shares": "6447248000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "7085000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "600149962518739550208",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "36200396856868435632113",
+    "cap": "22377105000000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "4850",
+    "inventoryAfter": "-730456326649624557281295",
+    "inventoryBefore": "-766656723506492992913408"
+   },
+   "note": "random 78",
+   "reference": {
+    "priceX96": "406759668518971135992057036800",
+    "uncertaintyPips": "3850"
+   },
+   "vault": {
+    "n0": "73823693276493511521206272",
+    "n1": "75357006723506492992913408",
+    "shares": "74590350000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "122911",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "111147216600314806272",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "6991",
+    "cap": "3683192650000000000000000",
+    "depth": "8187532225004749642944086016",
+    "halfSpreadPips": "3664",
+    "inventoryAfter": "886722400188330786562017",
+    "inventoryBefore": "886722400188330786684928"
+   },
+   "note": "random 79",
+   "reference": {
+    "priceX96": "1387806703048541713764213325824",
+    "uncertaintyPips": "2664"
+   },
+   "vault": {
+    "n0": "74550575400188328854683648",
+    "n1": "72777130599811669213315072",
+    "shares": "73663853000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "95258158368334459651440",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "61305520603447705600",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 80",
+   "reference": {
+    "priceX96": "279540894056998893203369230336",
+    "uncertaintyPips": "1909"
+   },
+   "vault": {
+    "n0": "12912338684697341990010880",
+    "n1": "21126827315302656546701312",
+    "shares": "17019583000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "12528623235019399621846207",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300179940067401157719",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 81",
+   "reference": {
+    "priceX96": "1007959926685756729854554800128",
+    "uncertaintyPips": "2805"
+   },
+   "vault": {
+    "n0": "62741349775726088189640704",
+    "n1": "39492890224273917950820352",
+    "shares": "51117120000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "4639785063338504195467088",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "3000750037497788202379",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "1281863286215677848206987",
+    "cap": "7525014000000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "1245",
+    "inventoryAfter": "186151935580653270014128",
+    "inventoryBefore": "4825936998919157465481216"
+   },
+   "note": "random 82",
+   "reference": {
+    "priceX96": "286450546422099701605811093504",
+    "uncertaintyPips": "945"
+   },
+   "vault": {
+    "n0": "29909316998919154267324416",
+    "n1": "20257443001080842534518784",
+    "shares": "25083380000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "1577000000000000000000",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "334506940464090224755",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "23764112492833881782572",
+    "cap": "3943399300000000000000000",
+    "depth": "26381888697424701348714193430",
+    "halfSpreadPips": "1154",
+    "inventoryAfter": "-11474642536362567737738964",
+    "inventoryBefore": "-11498406648855401619521536"
+   },
+   "note": "random 83",
+   "reference": {
+    "priceX96": "1194924746450938349430362865664",
+    "uncertaintyPips": "854"
+   },
+   "vault": {
+    "n0": "67369579351144609217511424",
+    "n1": "90366392648855401619521536",
+    "shares": "78867986000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "13519593470580241288802187",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "600811238873665528660",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "2033695730942129629788859",
+    "cap": "27146498700000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "3408",
+    "inventoryAfter": "-1458393071657301946281867",
+    "inventoryBefore": "12061200398922939342520320"
+   },
+   "note": "random 84",
+   "reference": {
+    "priceX96": "525038192956961162855284998144",
+    "uncertaintyPips": "2408"
+   },
+   "vault": {
+    "n0": "102549529398922929862868992",
+    "n1": "78427128601077060657479680",
+    "shares": "90488329000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "463705",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300179940067401157719",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "3526329",
+    "cap": "1361688300000000000000000",
+    "depth": "1362505040948271226241389959",
+    "halfSpreadPips": "5153",
+    "inventoryAfter": "-691776343272405787357511",
+    "inventoryBefore": "-691776343272405790883840"
+   },
+   "note": "random 85",
+   "reference": {
+    "priceX96": "604996707918979482436570710016",
+    "uncertaintyPips": "3153"
+   },
+   "vault": {
+    "n0": "3847184656727593717858304",
+    "n1": "5230737343272405790883840",
+    "shares": "4538961000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "872202",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "334506940464090224755",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "89329",
+    "cap": "4325653450000000000000000",
+    "depth": "28939222021348729636454823095",
+    "halfSpreadPips": "1146",
+    "inventoryAfter": "20886102055256599202017526",
+    "inventoryBefore": "20886102055256599202889728"
+   },
+   "note": "random 86",
+   "reference": {
+    "priceX96": "772903591389565381348008394752",
+    "uncertaintyPips": "846"
+   },
+   "vault": {
+    "n0": "107399171055256605021962240",
+    "n1": "65626966944743400797110272",
+    "shares": "86513069000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "450038",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "600149962518739550208",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "5217002",
+    "cap": "14838698100000000000000000",
+    "depth": "29684813695139639260221014016",
+    "halfSpreadPips": "4867",
+    "inventoryAfter": "3764053451421702117104362",
+    "inventoryBefore": "3764053451421702111887360"
+   },
+   "note": "random 87",
+   "reference": {
+    "priceX96": "923147919456807752505327878144",
+    "uncertaintyPips": "3867"
+   },
+   "vault": {
+    "n0": "53226380451421698673082368",
+    "n1": "45698273548578297888112640",
+    "shares": "49462327000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "9737000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "122611041206895411200",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "1091934019343161810747",
+    "cap": "11877034500000000000000000",
+    "depth": "4854185221650728122380288000",
+    "halfSpreadPips": "7375",
+    "inventoryAfter": "-2860893408082507482005504",
+    "inventoryBefore": "-2851156408082507482005504"
+   },
+   "note": "random 88",
+   "reference": {
+    "priceX96": "700458920354178759485454024704",
+    "uncertaintyPips": "2375"
+   },
+   "vault": {
+    "n0": "36738958591917481321824256",
+    "n1": "42441271408082507482005504",
+    "shares": "39590115000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "89692",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "333358331458696511488",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "539420",
+    "cap": "2921877750000000000000000",
+    "depth": "19480645829325807618388131840",
+    "halfSpreadPips": "3944",
+    "inventoryAfter": "-13147286834452993518847204",
+    "inventoryBefore": "-13147286834452993519386624"
+   },
+   "note": "random 89",
+   "reference": {
+    "priceX96": "478232867999389801858973302784",
+    "uncertaintyPips": "3644"
+   },
+   "vault": {
+    "n0": "45290268165547020206997504",
+    "n1": "71584841834452993519386624",
+    "shares": "58437555000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "205638",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300330330330004932022",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "4005573",
+    "cap": "21025069200000000000000000",
+    "depth": "21048219926824041773679486408",
+    "halfSpreadPips": "3608",
+    "inventoryAfter": "-11826062862961327123652923",
+    "inventoryBefore": "-11826062862961327127658496"
+   },
+   "note": "random 90",
+   "reference": {
+    "priceX96": "1547108176756598021207793598464",
+    "uncertaintyPips": "1608"
+   },
+   "vault": {
+    "n0": "58257501137038681590202368",
+    "n1": "81909626862961327127658496",
+    "shares": "70083564000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "599883",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "20024968827881754624",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "75808",
+    "cap": "2861552100000000000000000",
+    "depth": "1146049832037191469919838208",
+    "halfSpreadPips": "6517",
+    "inventoryAfter": "6317681173671570153855157",
+    "inventoryBefore": "6317681173671570154455040"
+   },
+   "note": "random 91",
+   "reference": {
+    "priceX96": "625967486255459564086521495552",
+    "uncertaintyPips": "1517"
+   },
+   "vault": {
+    "n0": "63548723173671568484073472",
+    "n1": "50913360826328429845544960",
+    "shares": "57231042000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "4651000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "122611041206895411200",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "312542544367977420161",
+    "cap": "21224096100000000000000000",
+    "depth": "8674361738320693966526054400",
+    "halfSpreadPips": "5984",
+    "inventoryAfter": "-19461782035183052836044800",
+    "inventoryBefore": "-19457131035183052836044800"
+   },
+   "note": "random 92",
+   "reference": {
+    "priceX96": "1166712378076631948908478595072",
+    "uncertaintyPips": "984"
+   },
+   "vault": {
+    "n0": "51289855964816954586300416",
+    "n1": "90204118035183052836044800",
+    "shares": "70746987000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "6465000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "100024993753123225600",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "34003569342597094437048",
+    "cap": "770099500000000000000000",
+    "depth": "1540583953535666389458944000",
+    "halfSpreadPips": "2827",
+    "inventoryAfter": "-2876079649625133367955272",
+    "inventoryBefore": "-2910083218967730462392320"
+   },
+   "note": "random 93",
+   "reference": {
+    "priceX96": "417472144239234316522483613696",
+    "uncertaintyPips": "1827"
+   },
+   "vault": {
+    "n0": "12491906781032269660291072",
+    "n1": "18312073218967730462392320",
+    "shares": "15401990000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "740712",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "50055055055000816542",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "1574584",
+    "cap": "1425457600000000000000000",
+    "depth": "1427027172931386638919992384",
+    "halfSpreadPips": "5318",
+    "inventoryAfter": "794274286581035664978584",
+    "inventoryBefore": "794274286581035665719296"
+   },
+   "note": "random 94",
+   "reference": {
+    "priceX96": "37113390919586796090054148096",
+    "uncertaintyPips": "3318"
+   },
+   "vault": {
+    "n0": "29303426286581034474536960",
+    "n1": "27714877713418964334280704",
+    "shares": "28509152000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "1233859052427782150890116",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "120149812967290535936",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 95",
+   "reference": {
+    "priceX96": "1088366623803985170505842819072",
+    "uncertaintyPips": "2022"
+   },
+   "vault": {
+    "n0": "5512879554553369040257024",
+    "n1": "4441380445446631315210240",
+    "shares": "4977130000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "8735000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "20435173534482567168",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 96",
+   "reference": {
+    "priceX96": "1510276378697610417247004655616",
+    "uncertaintyPips": "2393"
+   },
+   "vault": {
+    "n0": "56619876249508491577786368",
+    "n1": "31634349750491516994846720",
+    "shares": "44127113000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "247116",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "20024968827881754624",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "15742",
+    "cap": "1973764250000000000000000",
+    "depth": "790491351596748210082467840",
+    "halfSpreadPips": "5032",
+    "inventoryAfter": "-1544465432474393015993676",
+    "inventoryBefore": "-1544465432474393015746560"
+   },
+   "note": "random 97",
+   "reference": {
+    "priceX96": "1232510168798136105928218378240",
+    "uncertaintyPips": "32"
+   },
+   "vault": {
+    "n0": "37930819567525594495188992",
+    "n1": "41019750432474393015746560",
+    "shares": "39475285000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "458790",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "1000074994376089665536",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 98",
+   "reference": {
+    "priceX96": "334866712174055371679295602688",
+    "uncertaintyPips": "1298"
+   },
+   "vault": {
+    "n0": "59885112271118230181904384",
+    "n1": "130253441728881770914381824",
+    "shares": "95069277000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "275481",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "120149812967290535936",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 99",
+   "reference": {
+    "priceX96": "675971697659344989243345731584",
+    "uncertaintyPips": "2356"
+   },
+   "vault": {
+    "n0": "69944685053343381181169664",
+    "n1": "30798292946656624660971520",
+    "shares": "50371489000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "3583013789624303160126634",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "150165165165002466011",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 100",
+   "reference": {
+    "priceX96": "881038366171200911812402872320",
+    "uncertaintyPips": "1624"
+   },
+   "vault": {
+    "n0": "43773314439769421292503040",
+    "n1": "65665029560230564193107968",
+    "shares": "54719172000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "17957607586849950327405608",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "150089970033700578860",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 101",
+   "reference": {
+    "priceX96": "1548611828891235741109294465024",
+    "uncertaintyPips": "2034"
+   },
+   "vault": {
+    "n0": "114264085595018542102609920",
+    "n1": "80951348404981469122920448",
+    "shares": "97607717000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "2981449681004454912048676",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "111147216600314806272",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "3793421956678308997064642",
+    "cap": "1248214950000000000000000",
+    "depth": "2774712348228022317901283328",
+    "halfSpreadPips": "4319",
+    "inventoryAfter": "-3643422168138416990492734",
+    "inventoryBefore": "-7436844124816725987557376"
+   },
+   "note": "random 102",
+   "reference": {
+    "priceX96": "101149626167471352513808039936",
+    "uncertaintyPips": "3319"
+   },
+   "vault": {
+    "n0": "17527454875183274673569792",
+    "n1": "32401143124816725987557376",
+    "shares": "24964299000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "327000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "120173937829757403136",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "21110976455662704779",
+    "cap": "12882327600000000000000000",
+    "depth": "5160400120349892985744064512",
+    "halfSpreadPips": "7315",
+    "inventoryAfter": "15299037412983630164393984",
+    "inventoryBefore": "15299364412983630164393984"
+   },
+   "note": "random 103",
+   "reference": {
+    "priceX96": "1224338524345502118286813298688",
+    "uncertaintyPips": "2315"
+   },
+   "vault": {
+    "n0": "58240456412983622511886336",
+    "n1": "27641727587016369835606016",
+    "shares": "42941092000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "896621",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "50029990011233523556",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "226154",
+    "cap": "965130950000000000000000",
+    "depth": "965709835760646425228993164",
+    "halfSpreadPips": "3906",
+    "inventoryAfter": "249299617692738037633427",
+    "inventoryBefore": "249299617692738038530048"
+   },
+   "note": "random 104",
+   "reference": {
+    "priceX96": "313043947251123062300525723648",
+    "uncertaintyPips": "1906"
+   },
+   "vault": {
+    "n0": "19551918617692741711167488",
+    "n1": "19053319382307261961469952",
+    "shares": "19302619000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "2033000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "600811238873665528660",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "5915193175617988584707",
+    "cap": "22724469000000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "3869",
+    "inventoryAfter": "-20437228805932095722225664",
+    "inventoryBefore": "-20435195805932095722225664"
+   },
+   "note": "random 105",
+   "reference": {
+    "priceX96": "27096706770406006117730615296",
+    "uncertaintyPips": "2869"
+   },
+   "vault": {
+    "n0": "55313034194067903930695680",
+    "n1": "96183425805932095722225664",
+    "shares": "75748230000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "354157",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "316002578554403042958",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "606269",
+    "cap": "456732000000000000000000",
+    "depth": "481094965694365368720977520",
+    "halfSpreadPips": "4939",
+    "inventoryAfter": "-396751423591158073704387",
+    "inventoryBefore": "-396751423591158074310656"
+   },
+   "note": "random 106",
+   "reference": {
+    "priceX96": "136073693881634680971580145664",
+    "uncertaintyPips": "2939"
+   },
+   "vault": {
+    "n0": "1125688576408841552396288",
+    "n1": "1919191423591158074310656",
+    "shares": "1522440000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "9892769488253936298232122",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "2000149988752179331072",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 107",
+   "reference": {
+    "priceX96": "1425568766633191901554016256000",
+    "uncertaintyPips": "2555"
+   },
+   "vault": {
+    "n0": "39070961349968178377129984",
+    "n1": "55285006650031813972459520",
+    "shares": "47177984000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "2423023932349694251793994",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "1000074994376089665536",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 108",
+   "reference": {
+    "priceX96": "1161318126775383152686130003968",
+    "uncertaintyPips": "1347"
+   },
+   "vault": {
+    "n0": "23830627232905033100034048",
+    "n1": "26219304767094964908720128",
+    "shares": "25024966000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "5253000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "318376135264107845792",
+    "cap": "2252058000000000000000000",
+    "depth": "2372187116846906027059691880",
+    "halfSpreadPips": "5218",
+    "inventoryAfter": "557480361805820252127232",
+    "inventoryBefore": "562733361805820252127232"
+   },
+   "note": "random 109",
+   "reference": {
+    "priceX96": "1301006620727607363074906914816",
+    "uncertaintyPips": "3218"
+   },
+   "vault": {
+    "n0": "15576453361805822185701376",
+    "n1": "14450986638194179747872768",
+    "shares": "15013720000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "605354532090171874191728",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "100135206478944243853",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 110",
+   "reference": {
+    "priceX96": "444946624729011743172279140352",
+    "uncertaintyPips": "1137"
+   },
+   "vault": {
+    "n0": "48732330574093157882920960",
+    "n1": "75473265425906846564089856",
+    "shares": "62102798000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "946012",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "500125006249631301521",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "17865120",
+    "cap": "1520336600000000000000000",
+    "depth": "15207167031530864084160239372",
+    "halfSpreadPips": "2258",
+    "inventoryAfter": "-4870247111998362496231008",
+    "inventoryBefore": "-4870247111998362514096128"
+   },
+   "note": "random 111",
+   "reference": {
+    "priceX96": "1499277642212811007745538916352",
+    "uncertaintyPips": "1958"
+   },
+   "vault": {
+    "n0": "25536484888001641187377152",
+    "n1": "35276979111998362514096128",
+    "shares": "30406732000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "4680579780152499087677250",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "600149962518739550208",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 112",
+   "reference": {
+    "priceX96": "111461199370348352996923932672",
+    "uncertaintyPips": "1224"
+   },
+   "vault": {
+    "n0": "49109258048331643631960064",
+    "n1": "90273019951668363274485760",
+    "shares": "69691139000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "759453083940754590956631",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "50029990011233523556",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 113",
+   "reference": {
+    "priceX96": "768184190612079587208078557184",
+    "uncertaintyPips": "3278"
+   },
+   "vault": {
+    "n0": "55539261236416745478029312",
+    "n1": "32271720763583249306877952",
+    "shares": "43905491000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "2979895600255577869013759",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "52667096425733832301",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 114",
+   "reference": {
+    "priceX96": "1299987858255834516849342545920",
+    "uncertaintyPips": "3351"
+   },
+   "vault": {
+    "n0": "57181653313944305721671680",
+    "n1": "38363028686055699589890048",
+    "shares": "47772341000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "5780000000000000000000",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "1000074994376089665536",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "344402866486351792394",
+    "cap": "297786750000000000000000",
+    "depth": "1985393882210160128057016320",
+    "halfSpreadPips": "1874",
+    "inventoryAfter": "-169477464156553432793088",
+    "inventoryBefore": "-163697464156553432793088"
+   },
+   "note": "random 115",
+   "reference": {
+    "priceX96": "1326945714196488570104593776640",
+    "uncertaintyPips": "1574"
+   },
+   "vault": {
+    "n0": "1821547535843446791077888",
+    "n1": "2148942464156553432793088",
+    "shares": "1985245000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "5450042876336665072731144",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "2000149988752179331072",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "315403864799874063454505",
+    "cap": "28870914300000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "3736",
+    "inventoryAfter": "26217158799388356755880952",
+    "inventoryBefore": "31667201675725021828612096"
+   },
+   "note": "random 116",
+   "reference": {
+    "priceX96": "1365859462334255755645574709248",
+    "uncertaintyPips": "3436"
+   },
+   "vault": {
+    "n0": "127903582675725015542923264",
+    "n1": "64569179324274978171387904",
+    "shares": "96236381000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "192118",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "333441649800944418816",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "832299",
+    "cap": "748455450000000000000000",
+    "depth": "1663774800336721769399451648",
+    "halfSpreadPips": "2105",
+    "inventoryAfter": "459716761751058131759915",
+    "inventoryBefore": "459716761751058130927616"
+   },
+   "note": "random 117",
+   "reference": {
+    "priceX96": "344149792965652274805538291712",
+    "uncertaintyPips": "1105"
+   },
+   "vault": {
+    "n0": "5449419761751058139840512",
+    "n1": "4529986238248941869072384",
+    "shares": "4989703000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "957953784133809169568912",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "100135206478944243853",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 118",
+   "reference": {
+    "priceX96": "695423258178316962454845784064",
+    "uncertaintyPips": "2524"
+   },
+   "vault": {
+    "n0": "64741382981399136260063232",
+    "n1": "58980467018600863108169728",
+    "shares": "61860925000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "742240",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300074981259369775104",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "5442050",
+    "cap": "14122475850000000000000000",
+    "depth": "28252011173497681567507808256",
+    "halfSpreadPips": "3926",
+    "inventoryAfter": "21803604604567872265563296",
+    "inventoryBefore": "21803604604567872266305536"
+   },
+   "note": "random 119",
+   "reference": {
+    "priceX96": "10774253548654396382006738944",
+    "uncertaintyPips": "2926"
+   },
+   "vault": {
+    "n0": "115953443604567861198061568",
+    "n1": "72346234395432127733694464",
+    "shares": "94149839000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "8500607443430064096128116",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "1000074994376089665536",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 120",
+   "reference": {
+    "priceX96": "643325084340048996233241427968",
+    "uncertaintyPips": "946"
+   },
+   "vault": {
+    "n0": "55624893743277500505522176",
+    "n1": "70120726256722491394228224",
+    "shares": "62872810000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "4383000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "61305520603447705600",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "40316990226097409764886",
+    "cap": "4824981450000000000000000",
+    "depth": "1971986664628186570433740800",
+    "halfSpreadPips": "9456",
+    "inventoryAfter": "-5616380688314757942727146",
+    "inventoryBefore": "-5656697678540855352492032"
+   },
+   "note": "random 121",
+   "reference": {
+    "priceX96": "732084101895935419106923118592",
+    "uncertaintyPips": "4456"
+   },
+   "vault": {
+    "n0": "26509845321459152940171264",
+    "n1": "37823240678540855352492032",
+    "shares": "32166543000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "1931871250798909655493193",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "50029990011233523556",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "5221416686262606120720710",
+    "cap": "3304956200000000000000000",
+    "depth": "3306938513471286066484964944",
+    "halfSpreadPips": "2167",
+    "inventoryAfter": "-20046967600158478335370938",
+    "inventoryBefore": "-25268384286421084456091648"
+   },
+   "note": "random 122",
+   "reference": {
+    "priceX96": "214171767103717625113874530304",
+    "uncertaintyPips": "167"
+   },
+   "vault": {
+    "n0": "40830739713578918284886016",
+    "n1": "91367508286421084456091648",
+    "shares": "66099124000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "7249000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "61305520603447705600",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "127119551376652978153260",
+    "cap": "12931671600000000000000000",
+    "depth": "5285219064738797043951206400",
+    "halfSpreadPips": "8727",
+    "inventoryAfter": "-24914177815444240303331540",
+    "inventoryBefore": "-25041297366820893281484800"
+   },
+   "note": "random 123",
+   "reference": {
+    "priceX96": "1394648764764067589372929638400",
+    "uncertaintyPips": "3727"
+   },
+   "vault": {
+    "n0": "61169846633179091816153088",
+    "n1": "111252441366820893281484800",
+    "shares": "86211144000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "3122869288621768851963948",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300074981259369775104",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 124",
+   "reference": {
+    "priceX96": "319828347263021996556649758720",
+    "uncertaintyPips": "4313"
+   },
+   "vault": {
+    "n0": "32251566705088758642900992",
+    "n1": "44678119294911248930439168",
+    "shares": "38464843000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "8224827695937569256463697",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "1500375018748894101190",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "15994013478017384761517986",
+    "cap": "14314836450000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "833",
+    "inventoryAfter": "-10295614054669164083419230",
+    "inventoryBefore": "-26289627532686548844937216"
+   },
+   "note": "random 125",
+   "reference": {
+    "priceX96": "154088101808112189304314265600",
+    "uncertaintyPips": "533"
+   },
+   "vault": {
+    "n0": "69142615467313457029709824",
+    "n1": "121721870532686548844937216",
+    "shares": "95432243000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "5044000000000000000000",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "1500375018748894101190",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 126",
+   "reference": {
+    "priceX96": "234187229314639806245149605888",
+    "uncertaintyPips": "920"
+   },
+   "vault": {
+    "n0": "67955456112745525207367680",
+    "n1": "118009159887254472844378112",
+    "shares": "92982308000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "760000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "60086968914878701568",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 127",
+   "reference": {
+    "priceX96": "1157420139787948766538577739776",
+    "uncertaintyPips": "3037"
+   },
+   "vault": {
+    "n0": "12590792545020747767087104",
+    "n1": "8084533454979253353316352",
+    "shares": "10337663000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "19101996305426746943255859",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "150165165165002466011",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 128",
+   "reference": {
+    "priceX96": "457345924234955661015391404032",
+    "uncertaintyPips": "327"
+   },
+   "vault": {
+    "n0": "130257543781581791986450432",
+    "n1": "58698628218418207733579776",
+    "shares": "94478086000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "2991000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "666883299601888837632",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "49277840527746967968537",
+    "cap": "25563546900000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "4512",
+    "inventoryAfter": "16391479734756611831536409",
+    "inventoryBefore": "16342201894228864863567872"
+   },
+   "note": "random 129",
+   "reference": {
+    "priceX96": "1312287238804934408157821665280",
+    "uncertaintyPips": "3512"
+   },
+   "vault": {
+    "n0": "101554024894228855556931584",
+    "n1": "68869621105771135136432128",
+    "shares": "85211823000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "145247",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "20435173534482567168",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 130",
+   "reference": {
+    "priceX96": "1218705663344141431225704251392",
+    "uncertaintyPips": "1292"
+   },
+   "vault": {
+    "n0": "4423100182809811678658560",
+    "n1": "9904057817190187850006528",
+    "shares": "7163579000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "702617",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "333358331458696511488",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 131",
+   "reference": {
+    "priceX96": "816085309982646018040697716736",
+    "uncertaintyPips": "4570"
+   },
+   "vault": {
+    "n0": "44914276257236676750868480",
+    "n1": "84533913742763306250141696",
+    "shares": "64724095000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "7436000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "52667096425733832301",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "66326855224952221491967",
+    "cap": "1227768050000000000000000",
+    "depth": "1293259565555703942064515661",
+    "halfSpreadPips": "2476",
+    "inventoryAfter": "-948121745424319211478273",
+    "inventoryBefore": "-1014448600649271432970240"
+   },
+   "note": "random 132",
+   "reference": {
+    "priceX96": "707366983335968841462060154880",
+    "uncertaintyPips": "476"
+   },
+   "vault": {
+    "n0": "23540912399350730416193536",
+    "n1": "25569809600649271432970240",
+    "shares": "24555361000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "859236657121558741738233",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "333441649800944418816",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 133",
+   "reference": {
+    "priceX96": "933895563879572575336961933312",
+    "uncertaintyPips": "2740"
+   },
+   "vault": {
+    "n0": "26208225473470793684877312",
+    "n1": "37388668526529208551211008",
+    "shares": "31798447000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "11741193324464601234381899",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300405619436832764330",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "597957039773354143862718",
+    "cap": "8460728100000000000000000",
+    "depth": "16944335105114114294450057820",
+    "halfSpreadPips": "3214",
+    "inventoryAfter": "-2128391143702717761821771",
+    "inventoryBefore": "9612802180761883472560128"
+   },
+   "note": "random 134",
+   "reference": {
+    "priceX96": "1551360652692557442776806981632",
+    "uncertaintyPips": "2214"
+   },
+   "vault": {
+    "n0": "66017656180761866692198400",
+    "n1": "46792051819238116527439872",
+    "shares": "56404854000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "24537",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "600149962518739550208",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "4343",
+    "cap": "23583533400000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "2477",
+    "inventoryAfter": "26872132189060960528867367",
+    "inventoryBefore": "26872132189060960528891904"
+   },
+   "note": "random 135",
+   "reference": {
+    "priceX96": "446932577899231443787731435520",
+    "uncertaintyPips": "1477"
+   },
+   "vault": {
+    "n0": "105483910189060976776577024",
+    "n1": "51739645810939039471108096",
+    "shares": "78611778000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "1313000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "100135206478944243853",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "6704796424419935411576",
+    "cap": "4765153800000000000000000",
+    "depth": "9543193193338515671684991828",
+    "halfSpreadPips": "3326",
+    "inventoryAfter": "-6513315962998391553499784",
+    "inventoryBefore": "-6520020759422811488911360"
+   },
+   "note": "random 136",
+   "reference": {
+    "priceX96": "405516864743966111671292788736",
+    "uncertaintyPips": "2326"
+   },
+   "vault": {
+    "n0": "88783055240577214815666176",
+    "n1": "101823096759422811488911360",
+    "shares": "95303076000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "5362000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "600811238873665528660",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "646378015010983661197",
+    "cap": "20957037900000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "1072",
+    "inventoryAfter": "9200878624667343183937536",
+    "inventoryBefore": "9206240624667343183937536"
+   },
+   "note": "random 137",
+   "reference": {
+    "priceX96": "656834304492341509999170682880",
+    "uncertaintyPips": "72"
+   },
+   "vault": {
+    "n0": "79063033624667349063827456",
+    "n1": "60650552375332656816062464",
+    "shares": "69856793000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "129431",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "60074906483645267968",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "361313",
+    "cap": "13454970300000000000000000",
+    "depth": "5388707216751496774966542336",
+    "halfSpreadPips": "9243",
+    "inventoryAfter": "-1431213226519513120537759",
+    "inventoryBefore": "-1431213226519513120899072"
+   },
+   "note": "random 138",
+   "reference": {
+    "priceX96": "223097809576709996863597576192",
+    "uncertaintyPips": "4243"
+   },
+   "vault": {
+    "n0": "88268588773480484759928832",
+    "n1": "91131015226519513120899072",
+    "shares": "89699802000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "2401839301472985309615824",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "3000750037497788202379",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 139",
+   "reference": {
+    "priceX96": "1417372011925522354805135114240",
+    "uncertaintyPips": "4994"
+   },
+   "vault": {
+    "n0": "14012690119560901232164864",
+    "n1": "11542877880439099778662400",
+    "shares": "12777784000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "4770000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "316002578554403042958",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "63503137714421400697897",
+    "cap": "1768721400000000000000000",
+    "depth": "1863068410481179087683113004",
+    "halfSpreadPips": "2262",
+    "inventoryAfter": "-872829908488275983762391",
+    "inventoryBefore": "-936333046202697384460288"
+   },
+   "note": "random 140",
+   "reference": {
+    "priceX96": "1056126713276753422768976953344",
+    "uncertaintyPips": "262"
+   },
+   "vault": {
+    "n0": "4959404953797302459301888",
+    "n1": "6832071046202697384460288",
+    "shares": "5895738000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "402089",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "100135206478944243853",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 141",
+   "reference": {
+    "priceX96": "791888624908890538466378514432",
+    "uncertaintyPips": "199"
+   },
+   "vault": {
+    "n0": "89103127263060383517114368",
+    "n1": "103343324736939624413265920",
+    "shares": "96223226000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "2609000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "150165165165002466011",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "30828458318273760937783",
+    "cap": "9125117100000000000000000",
+    "depth": "9135164776476588827594299254",
+    "halfSpreadPips": "4994",
+    "inventoryAfter": "-18547220696363502157215945",
+    "inventoryBefore": "-18578049154681775918153728"
+   },
+   "note": "random 142",
+   "reference": {
+    "priceX96": "938974028151940596048106356736",
+    "uncertaintyPips": "2994"
+   },
+   "vault": {
+    "n0": "42256064845318227981500416",
+    "n1": "79412163154681775918153728",
+    "shares": "60834114000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "8155000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "100135206478944243853",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 143",
+   "reference": {
+    "priceX96": "451152442739609102353866686464",
+    "uncertaintyPips": "3741"
+   },
+   "vault": {
+    "n0": "3448077247653948774416384",
+    "n1": "4326156752346050686091264",
+    "shares": "3887117000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "23552983145559057246287862",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "1500375018748894101190",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 144",
+   "reference": {
+    "priceX96": "635004158003889972180640858112",
+    "uncertaintyPips": "349"
+   },
+   "vault": {
+    "n0": "84732970344768889052725248",
+    "n1": "108408249655231120190472192",
+    "shares": "96570610000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "2113000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "50029990011233523556",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "18441955588976944273536",
+    "cap": "3689362650000000000000000",
+    "depth": "3691575530546360844708031668",
+    "halfSpreadPips": "4742",
+    "inventoryAfter": "-17458312444694143644280704",
+    "inventoryBefore": "-17476754400283120588554240"
+   },
+   "note": "random 145",
+   "reference": {
+    "priceX96": "693384262878078111524509974528",
+    "uncertaintyPips": "2742"
+   },
+   "vault": {
+    "n0": "56310498599716881669554176",
+    "n1": "91264007400283120588554240",
+    "shares": "73787253000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "16298592358083712264900038",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "666883299601888837632",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "10035552482940973970925867",
+    "cap": "24147355500000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "5852",
+    "inventoryAfter": "-6877365636328199028168405",
+    "inventoryBefore": "-16912918119269172999094272"
+   },
+   "note": "random 146",
+   "reference": {
+    "priceX96": "49039280121807200751166947328",
+    "uncertaintyPips": "4852"
+   },
+   "vault": {
+    "n0": "63578266880730816124551168",
+    "n1": "97404103119269172999094272",
+    "shares": "80491185000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "6995000000000000000000",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "2000149988752179331072",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "391095228560848228632",
+    "cap": "8983049400000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "2982",
+    "inventoryAfter": "11009468119970960065167360",
+    "inventoryBefore": "11016463119970960065167360"
+   },
+   "note": "random 147",
+   "reference": {
+    "priceX96": "1413464063275363026239712395264",
+    "uncertaintyPips": "2682"
+   },
+   "vault": {
+    "n0": "40959961119970954263396352",
+    "n1": "18927034880029039934832640",
+    "shares": "29943498000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "4695000000000000000000",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "334506940464090224755",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 148",
+   "reference": {
+    "priceX96": "673401466246959826195110166528",
+    "uncertaintyPips": "4785"
+   },
+   "vault": {
+    "n0": "875283378498849487192064",
+    "n1": "1357306621501150454611968",
+    "shares": "1116295000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "5861000000000000000000",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "3000750037497788202379",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "4354566210404429377243",
+    "cap": "18865080900000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "1364",
+    "inventoryAfter": "-7893764251076665499189248",
+    "inventoryBefore": "-7887903251076665499189248"
+   },
+   "note": "random 149",
+   "reference": {
+    "priceX96": "106448764576497322514532270080",
+    "uncertaintyPips": "1064"
+   },
+   "vault": {
+    "n0": "54995699748923341734412288",
+    "n1": "70771506251076665499189248",
+    "shares": "62883603000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "923466",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "333358331458696511488",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 150",
+   "reference": {
+    "priceX96": "1532728075953859277130714578944",
+    "uncertaintyPips": "1452"
+   },
+   "vault": {
+    "n0": "13344489813850657524809728",
+    "n1": "24155594186149340288909312",
+    "shares": "18750042000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "92288",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "150089970033700578860",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "5936",
+    "cap": "2605003350000000000000000",
+    "depth": "2606565831594597472181594540",
+    "halfSpreadPips": "2601",
+    "inventoryAfter": "4632014327122130580445056",
+    "inventoryBefore": "4632014327122130580537344"
+   },
+   "note": "random 151",
+   "reference": {
+    "priceX96": "1230585276607219553825405796352",
+    "uncertaintyPips": "601"
+   },
+   "vault": {
+    "n0": "21998703327122130651316224",
+    "n1": "12734674672877869419462656",
+    "shares": "17366689000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "229245",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "1000074994376089665536",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 152",
+   "reference": {
+    "priceX96": "497311567527005022557669687296",
+    "uncertaintyPips": "733"
+   },
+   "vault": {
+    "n0": "95954401728631789028638720",
+    "n1": "52565788271368230211158016",
+    "shares": "74260095000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "258465329465159974445692",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300405619436832764330",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 153",
+   "reference": {
+    "priceX96": "837794555779192369661509369856",
+    "uncertaintyPips": "4463"
+   },
+   "vault": {
+    "n0": "47353767804344694518841344",
+    "n1": "34200618195655309305839616",
+    "shares": "40777193000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "18324679377106852597957729",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "666883299601888837632",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 154",
+   "reference": {
+    "priceX96": "120456761585688886297998917632",
+    "uncertaintyPips": "4872"
+   },
+   "vault": {
+    "n0": "110205809980477337447170048",
+    "n1": "60841630019522670635253760",
+    "shares": "85523720000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "2489000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "61305520603447705600",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "42889147293470835142461",
+    "cap": "10290880800000000000000000",
+    "depth": "4205918699413496049087283200",
+    "halfSpreadPips": "7936",
+    "inventoryAfter": "-12699848375888402089709763",
+    "inventoryBefore": "-12742737523181872924852224"
+   },
+   "note": "random 155",
+   "reference": {
+    "priceX96": "1369343553112493804834649014272",
+    "uncertaintyPips": "2936"
+   },
+   "vault": {
+    "n0": "55863134476818126513111040",
+    "n1": "81348609523181872924852224",
+    "shares": "68605872000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "2629810509122592369126404",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "1003520821392270739807",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 156",
+   "reference": {
+    "priceX96": "1209780680020993642631146766336",
+    "uncertaintyPips": "3662"
+   },
+   "vault": {
+    "n0": "9518688602310488683970560",
+    "n1": "14711541397689510249103360",
+    "shares": "12115115000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "737509",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "666883299601888837632",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 157",
+   "reference": {
+    "priceX96": "863050865204985843591034175488",
+    "uncertaintyPips": "1726"
+   },
+   "vault": {
+    "n0": "121680106564690378299015168",
+    "n1": "53176121435309626364002304",
+    "shares": "87428114000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "429293",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "20028989638292897792",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "73592",
+    "cap": "4410118000000000000000000",
+    "depth": "1766604154512979956493189120",
+    "halfSpreadPips": "7154",
+    "inventoryAfter": "32649758009954133262037779",
+    "inventoryBefore": "32649758009954133262467072"
+   },
+   "note": "random 158",
+   "reference": {
+    "priceX96": "461156215395195512008841625600",
+    "uncertaintyPips": "2154"
+   },
+   "vault": {
+    "n0": "120852118009954121220620288",
+    "n1": "55552601990045866737532928",
+    "shares": "88202360000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "2437000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "60074906483645267968",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "36604926311478289365478",
+    "cap": "11499998550000000000000000",
+    "depth": "4605742249688707868975742976",
+    "halfSpreadPips": "7468",
+    "inventoryAfter": "1854255961671058317244902",
+    "inventoryBefore": "1817651035359580027879424"
+   },
+   "note": "random 159",
+   "reference": {
+    "priceX96": "1199889244468429562163891273728",
+    "uncertaintyPips": "2468"
+   },
+   "vault": {
+    "n0": "78484308035359583789645824",
+    "n1": "74849005964640419972120576",
+    "shares": "76666657000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "126805",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "2111292",
+    "cap": "12630308850000000000000000",
+    "depth": "13304033881794989866464525261",
+    "halfSpreadPips": "2769",
+    "inventoryAfter": "3196328250783124387804988",
+    "inventoryBefore": "3196328250783124385693696"
+   },
+   "note": "random 160",
+   "reference": {
+    "priceX96": "1323444307624790697190528909312",
+    "uncertaintyPips": "769"
+   },
+   "vault": {
+    "n0": "87398387250783140951621632",
+    "n1": "81005730749216875614306304",
+    "shares": "84202059000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "393244",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "20028989638292897792",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "6555929",
+    "cap": "307722300000000000000000",
+    "depth": "123267335163433171644383232",
+    "halfSpreadPips": "9889",
+    "inventoryAfter": "-2122450268934701205157607",
+    "inventoryBefore": "-2122450268934701211713536"
+   },
+   "note": "random 161",
+   "reference": {
+    "priceX96": "1327273059445444193886215864320",
+    "uncertaintyPips": "4889"
+   },
+   "vault": {
+    "n0": "4031995731065298705448960",
+    "n1": "8276896268934701211713536",
+    "shares": "6154446000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "6952000000000000000000",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "2000149988752179331072",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "349229475078209239713",
+    "cap": "21009698761719602351489925",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "1061",
+    "inventoryAfter": "21517179266593278144544768",
+    "inventoryBefore": "21524131266593278144544768"
+   },
+   "note": "random 162",
+   "reference": {
+    "priceX96": "1577168924504298544877981925376",
+    "uncertaintyPips": "761"
+   },
+   "vault": {
+    "n0": "119053882266593277339762688",
+    "n1": "76005619733406721855455232",
+    "shares": "97529751000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "13927911928665971614480009",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "2000149988752179331072",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "23990213079096055760537535",
+    "cap": "11743834327330885787894934",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "593",
+    "inventoryAfter": "16239481788787485220866423",
+    "inventoryBefore": "30167393717453456835346432"
+   },
+   "note": "random 163",
+   "reference": {
+    "priceX96": "45997201944544606810173079552",
+    "uncertaintyPips": "293"
+   },
+   "vault": {
+    "n0": "117001821717453463598661632",
+    "n1": "56667034282546543164653568",
+    "shares": "86834428000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "632231",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "100024993753123225600",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "12473563",
+    "cap": "2905209200000000000000000",
+    "depth": "5811870641630322474935910400",
+    "halfSpreadPips": "3219",
+    "inventoryAfter": "-1022815870701171122481957",
+    "inventoryBefore": "-1022815870701171134955520"
+   },
+   "note": "random 164",
+   "reference": {
+    "priceX96": "1567610304068131688805914640384",
+    "uncertaintyPips": "2219"
+   },
+   "vault": {
+    "n0": "57081368129298835479461888",
+    "n1": "59126999870701171134955520",
+    "shares": "58104184000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "8372000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "20024968827881754624",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 165",
+   "reference": {
+    "priceX96": "1035290013218799244385873559552",
+    "uncertaintyPips": "1080"
+   },
+   "vault": {
+    "n0": "42369482505124362850402304",
+    "n1": "88903089494875628820758528",
+    "shares": "65636286000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "10816325038477456179058661",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 166",
+   "reference": {
+    "priceX96": "1108144937158403607199997755392",
+    "uncertaintyPips": "251"
+   },
+   "vault": {
+    "n0": "70373379294371233583333376",
+    "n1": "108855582705628779850498048",
+    "shares": "89614481000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "3677000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "150165165165002466011",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "15595296908383087898029",
+    "cap": "3056017500000000000000000",
+    "depth": "3059382484230919491151807950",
+    "halfSpreadPips": "3534",
+    "inventoryAfter": "2678243651385097304550829",
+    "inventoryBefore": "2662648354476714216652800"
+   },
+   "note": "random 167",
+   "reference": {
+    "priceX96": "337808201573022449093868257280",
+    "uncertaintyPips": "1534"
+   },
+   "vault": {
+    "n0": "23036098354476712575631360",
+    "n1": "17710801645523285783347200",
+    "shares": "20373450000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "897211",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "334506940464090224755",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 168",
+   "reference": {
+    "priceX96": "320425427550848750794370449408",
+    "uncertaintyPips": "2837"
+   },
+   "vault": {
+    "n0": "54043554710998169327501312",
+    "n1": "32461291289001819709112320",
+    "shares": "43252423000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "523309",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "50029990011233523556",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "26670",
+    "cap": "2716642700000000000000000",
+    "depth": "2718272142901809395273708824",
+    "halfSpreadPips": "4416",
+    "inventoryAfter": "12508090773345338439762899",
+    "inventoryBefore": "12508090773345338440286208"
+   },
+   "note": "random 169",
+   "reference": {
+    "priceX96": "1550737960845325352209899061248",
+    "uncertaintyPips": "2416"
+   },
+   "vault": {
+    "n0": "66840944773345346322432000",
+    "n1": "41824763226654661559713792",
+    "shares": "54332854000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "7370000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "50055055055000816542",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 170",
+   "reference": {
+    "priceX96": "83398906170033919098066305024",
+    "uncertaintyPips": "2710"
+   },
+   "vault": {
+    "n0": "113912624484739813652561920",
+    "n1": "80949257515260184323162112",
+    "shares": "97430941000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "829241",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "1500375018748894101190",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "47146",
+    "cap": "57071700000000000000000",
+    "depth": "570859686383541729832568820",
+    "halfSpreadPips": "1313",
+    "inventoryAfter": "-21356652917410955044665",
+    "inventoryBefore": "-21356652917410954215424"
+   },
+   "note": "random 171",
+   "reference": {
+    "priceX96": "1391582362379774648881822826496",
+    "uncertaintyPips": "1013"
+   },
+   "vault": {
+    "n0": "359121347082589105553408",
+    "n1": "401834652917410954215424",
+    "shares": "380478000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "438685",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "52667096425733832301",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 172",
+   "reference": {
+    "priceX96": "1220754464496370939086870937600",
+    "uncertaintyPips": "332"
+   },
+   "vault": {
+    "n0": "107337736644765809337434112",
+    "n1": "73758273355234186989928448",
+    "shares": "90548005000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "4254527559413955434097628",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "120173937829757403136",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 173",
+   "reference": {
+    "priceX96": "1178546551830128622588965945344",
+    "uncertaintyPips": "3452"
+   },
+   "vault": {
+    "n0": "41218578339284599567286272",
+    "n1": "23468181660715401479192576",
+    "shares": "32343380000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "10062052970420067121566185",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "500125006249631301521",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 174",
+   "reference": {
+    "priceX96": "146651525049797108334891892736",
+    "uncertaintyPips": "2852"
+   },
+   "vault": {
+    "n0": "53366126526753373488676864",
+    "n1": "110323729473246629095014400",
+    "shares": "81844928000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "6782000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "20028989638292897792",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "565006447361638623227",
+    "cap": "492944950000000000000000",
+    "depth": "197463785915976211748651008",
+    "halfSpreadPips": "9453",
+    "inventoryAfter": "-403618810331663824584704",
+    "inventoryBefore": "-396836810331663824584704"
+   },
+   "note": "random 175",
+   "reference": {
+    "priceX96": "938210614734964164194419605504",
+    "uncertaintyPips": "4453"
+   },
+   "vault": {
+    "n0": "9462062189668336127705088",
+    "n1": "10255735810331663824584704",
+    "shares": "9858899000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "4349517109388326619790206",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "666883299601888837632",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "4819635020133816813899332",
+    "cap": "19479728700000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "5396",
+    "inventoryAfter": "17455996756795640553033284",
+    "inventoryBefore": "12636361736661823739133952"
+   },
+   "note": "random 176",
+   "reference": {
+    "priceX96": "88332356275458695072843825152",
+    "uncertaintyPips": "4396"
+   },
+   "vault": {
+    "n0": "77568790736661821555474432",
+    "n1": "52296067263338176260866048",
+    "shares": "64932429000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "510950",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "666883299601888837632",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "6420360",
+    "cap": "4328900700000000000000000",
+    "depth": "9622905274883087701824503808",
+    "halfSpreadPips": "4399",
+    "inventoryAfter": "-1904647819262721880885368",
+    "inventoryBefore": "-1904647819262721887305728"
+   },
+   "note": "random 177",
+   "reference": {
+    "priceX96": "999528808668897538931599343616",
+    "uncertaintyPips": "3399"
+   },
+   "vault": {
+    "n0": "12525021180737279708102656",
+    "n1": "16334316819262721887305728",
+    "shares": "14429669000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "219179",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "333441649800944418816",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 178",
+   "reference": {
+    "priceX96": "1415686956711549631238189875200",
+    "uncertaintyPips": "3082"
+   },
+   "vault": {
+    "n0": "25335178000385961063612416",
+    "n1": "12027785999614037194702848",
+    "shares": "18681482000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "3971000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "316002578554403042958",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "335844697548792179777",
+    "cap": "3797346000000000000000000",
+    "depth": "3999903758877493925214631560",
+    "halfSpreadPips": "6956",
+    "inventoryAfter": "-105709388741679897116672",
+    "inventoryBefore": "-101738388741679897116672"
+   },
+   "note": "random 179",
+   "reference": {
+    "priceX96": "930222720928406420087843586048",
+    "uncertaintyPips": "4956"
+   },
+   "vault": {
+    "n0": "12556081611258321682038784",
+    "n1": "12759558388741679897116672",
+    "shares": "12657820000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "949297",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "1000074994376089665536",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 180",
+   "reference": {
+    "priceX96": "87454995790696359655458734080",
+    "uncertaintyPips": "2342"
+   },
+   "vault": {
+    "n0": "4225718416815361764622336",
+    "n1": "2260777583184638042439680",
+    "shares": "3243248000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "4869000000000000000000",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "20435173534482567168",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 181",
+   "reference": {
+    "priceX96": "1538068865007703399887771009024",
+    "uncertaintyPips": "2848"
+   },
+   "vault": {
+    "n0": "138502553373616198891077632",
+    "n1": "60849782626383801272500224",
+    "shares": "99676168000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "192370",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "1500375018748894101190",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "15680",
+    "cap": "5298816450000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "4186",
+    "inventoryAfter": "7908772902627636098437262",
+    "inventoryBefore": "7908772902627636098629632"
+   },
+   "note": "random 182",
+   "reference": {
+    "priceX96": "968144661984356876825365839872",
+    "uncertaintyPips": "3886"
+   },
+   "vault": {
+    "n0": "43234215902627633475616768",
+    "n1": "27416670097372363901370368",
+    "shares": "35325443000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "4895000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "52667096425733832301",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "33685751114398748978352",
+    "cap": "4080797850000000000000000",
+    "depth": "4298475477197546150523627057",
+    "halfSpreadPips": "5331",
+    "inventoryAfter": "996874396726388551134384",
+    "inventoryBefore": "963188645611989802156032"
+   },
+   "note": "random 183",
+   "reference": {
+    "priceX96": "548378291687414070260963213312",
+    "uncertaintyPips": "3331"
+   },
+   "vault": {
+    "n0": "82579145645612002546024448",
+    "n1": "80652768354388010197843968",
+    "shares": "81615957000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "7399826597544678898601995",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300074981259369775104",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "4755873759732984819826984",
+    "cap": "8257747800000000000000000",
+    "depth": "16519623442197346598343671808",
+    "halfSpreadPips": "5805",
+    "inventoryAfter": "12407756643168800386772981",
+    "inventoryBefore": "19807583240713479285374976"
+   },
+   "note": "random 184",
+   "reference": {
+    "priceX96": "122680822119994562049487142912",
+    "uncertaintyPips": "4805"
+   },
+   "vault": {
+    "n0": "74859235240713489903255552",
+    "n1": "35244068759286520714625024",
+    "shares": "55051652000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "1105000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "50029990011233523556",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 185",
+   "reference": {
+    "priceX96": "449862731758450114860312166400",
+    "uncertaintyPips": "2326"
+   },
+   "vault": {
+    "n0": "7015792803865099117789184",
+    "n1": "13102403196134900440760320",
+    "shares": "10059098000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "3313000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300330330330004932022",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "39300449687202061981452",
+    "cap": "148063200000000000000000",
+    "depth": "148226232552391954169865968",
+    "halfSpreadPips": "6968",
+    "inventoryAfter": "-20369544945832755620084",
+    "inventoryBefore": "-59669994633034817601536"
+   },
+   "note": "random 186",
+   "reference": {
+    "priceX96": "945881791078683359965647732736",
+    "uncertaintyPips": "4968"
+   },
+   "vault": {
+    "n0": "433874005366965228535808",
+    "n1": "553213994633034817601536",
+    "shares": "493544000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "2271194528478105012037449",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "60086968914878701568",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 187",
+   "reference": {
+    "priceX96": "187915438098922319672940429312",
+    "uncertaintyPips": "1339"
+   },
+   "vault": {
+    "n0": "14945708164145929661710336",
+    "n1": "26186223835854074147766272",
+    "shares": "20565966000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "5290195357290719021480351",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "50055055055000816542",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 188",
+   "reference": {
+    "priceX96": "1279235193230113726872328077312",
+    "uncertaintyPips": "579"
+   },
+   "vault": {
+    "n0": "15039167622693425055268864",
+    "n1": "28034856377306572417662976",
+    "shares": "21537012000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "450992",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "2000149988752179331072",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 189",
+   "reference": {
+    "priceX96": "1376569194438300040381081845760",
+    "uncertaintyPips": "1855"
+   },
+   "vault": {
+    "n0": "22709040345134670339375104",
+    "n1": "47712449654865327370010624",
+    "shares": "35210745000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "7099000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300179940067401157719",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "0",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "5548415073172481538348",
+    "cap": "10535131500000000000000000",
+    "depth": "10541450474240633532739683495",
+    "halfSpreadPips": "6830",
+    "inventoryAfter": "9153334619238113272659968",
+    "inventoryBefore": "9160433619238113272659968"
+   },
+   "note": "random 190",
+   "reference": {
+    "priceX96": "100852400952817033996153126912",
+    "uncertaintyPips": "4830"
+   },
+   "vault": {
+    "n0": "44277538619238114006138880",
+    "n1": "25956671380761886727340032",
+    "shares": "35117105000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "1996000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "158001289277201521479",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 191",
+   "reference": {
+    "priceX96": "1385193416804281063291159052288",
+    "uncertaintyPips": "3484"
+   },
+   "vault": {
+    "n0": "2963805836017117935173632",
+    "n1": "1289318163982882122498048",
+    "shares": "2126562000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "1483923431197505241414191",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "2007041642784541479614",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 192",
+   "reference": {
+    "priceX96": "30239290789497160857315966976",
+    "uncertaintyPips": "539"
+   },
+   "vault": {
+    "n0": "9363817666127563876990976",
+    "n1": "5158608333872436984414208",
+    "shares": "7261213000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "134631823739422870222275",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "316002578554403042958",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "8684290404810552545426",
+    "cap": "571389000000000000000000",
+    "depth": "601867991192072667709095540",
+    "halfSpreadPips": "5626",
+    "inventoryAfter": "251892069829966969293373",
+    "inventoryBefore": "386523893569389839515648"
+   },
+   "note": "random 193",
+   "reference": {
+    "priceX96": "1222653876643408592598296690688",
+    "uncertaintyPips": "3626"
+   },
+   "vault": {
+    "n0": "2291153893569389366607872",
+    "n1": "1518106106430610160484352",
+    "shares": "1904630000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "12949918514769612259216691",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "1500375018748894101190",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 194",
+   "reference": {
+    "priceX96": "296337461942266766118023593984",
+    "uncertaintyPips": "2012"
+   },
+   "vault": {
+    "n0": "65491373140549614631387136",
+    "n1": "75640358859450380086935552",
+    "shares": "70565866000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "5000000000000000000",
+   "config": {
+    "base_spread": "2000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "50055055055000816542",
+    "max_deviation": "50000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 195",
+   "reference": {
+    "priceX96": "106305832057059706330322829312",
+    "uncertaintyPips": "2826"
+   },
+   "vault": {
+    "n0": "41423559715223070448812032",
+    "n1": "53198402284776924486041600",
+    "shares": "47310981000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "9977000000000000000000",
+   "config": {
+    "base_spread": "1000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "300405619436832764330",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 196",
+   "reference": {
+    "priceX96": "571076909345793163390173052928",
+    "uncertaintyPips": "4466"
+   },
+   "vault": {
+    "n0": "22790184412782752033669120",
+    "n1": "37780707587217245069115392",
+    "shares": "30285446000000000000000000"
+   },
+   "zeroForOne": false
+  },
+  {
+   "amountIn": "593430",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "3000750037497788202379",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "revert": "InventoryLimit"
+   },
+   "note": "random 197",
+   "reference": {
+    "priceX96": "274276172314716025410581168128",
+    "uncertaintyPips": "273"
+   },
+   "vault": {
+    "n0": "81258758291716515469197312",
+    "n1": "47117043708283475879526400",
+    "shares": "64187901000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "777179",
+   "config": {
+    "base_spread": "5000",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "60086968914878701568",
+    "max_deviation": "150000",
+    "max_spread": "50000",
+    "min_edge": "1",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "1809728",
+    "cap": "5297721750000000000000000",
+    "depth": "2122160280746178639390351360",
+    "halfSpreadPips": "8183",
+    "inventoryAfter": "1068844174080697023044928",
+    "inventoryBefore": "1068844174080697021235200"
+   },
+   "note": "random 198",
+   "reference": {
+    "priceX96": "186187131411200941780841267200",
+    "uncertaintyPips": "3183"
+   },
+   "vault": {
+    "n0": "36386989174080698182533120",
+    "n1": "34249300825919302978764800",
+    "shares": "35318145000000000000000000"
+   },
+   "zeroForOne": true
+  },
+  {
+   "amountIn": "186414",
+   "config": {
+    "base_spread": "300",
+    "depth_max": "39614081257132168796771975167",
+    "depth_per_share": "3000750037497788202379",
+    "max_deviation": "300000",
+    "max_spread": "50000",
+    "min_edge": "100",
+    "target_per_share": "1000000000000000000"
+   },
+   "expect": {
+    "amountOut": "578502",
+    "cap": "12625669500000000000000000",
+    "depth": "39614081257132168796771975167",
+    "halfSpreadPips": "1614",
+    "inventoryAfter": "-11926139381198014814301242",
+    "inventoryBefore": "-11926139381198014814879744"
+   },
+   "note": "random 199",
+   "reference": {
+    "priceX96": "246120933621637771875070246912",
+    "uncertaintyPips": "1314"
+   },
+   "vault": {
+    "n0": "30159425618801978580664320",
+    "n1": "54011704381198014814879744",
+    "shares": "42085565000000000000000000"
+   },
+   "zeroForOne": true
+  }
+ ],
+ "references": [
+  {
+   "expect": {
+    "priceX96": "79228162514264337593543950336",
+    "uncertaintyPips": "5589"
+   },
+   "history": [
+    {
+     "priceX96": "79069706189235808918356862435",
+     "updatedAt": "880"
+    },
+    {
+     "priceX96": "79307390676778601931137494286",
+     "updatedAt": "940"
+    },
+    {
+     "priceX96": "79228162514264337593543950336",
+     "updatedAt": "1000"
+    }
+   ],
+   "note": "fresh, 0.3% divergence, vol",
+   "now": "1600",
+   "policy": {
+    "age_widen": "500",
+    "max_age": "3600",
+    "max_divergence": "10000",
+    "missing_penalty": "1000",
+    "require_secondary": false,
+    "secondary_max_age": "86400",
+    "vol_horizon": "300",
+    "vol_mult": "50"
+   },
+   "primary": {
+    "priceX96": "79228162514264337593543950336",
+    "updatedAt": "1000"
+   },
+   "secondary": {
+    "priceX96": "79465847001807130606324582187",
+    "updatedAt": "900"
+   }
+  },
+  {
+   "expect": {
+    "priceX96": "79228162514264337593543950336",
+    "uncertaintyPips": "1084"
+   },
+   "history": [],
+   "note": "secondary missing: penalty, no history",
+   "now": "1600",
+   "policy": {
+    "age_widen": "500",
+    "max_age": "3600",
+    "max_divergence": "10000",
+    "missing_penalty": "1000",
+    "require_secondary": false,
+    "secondary_max_age": "86400",
+    "vol_horizon": "300",
+    "vol_mult": "50"
+   },
+   "primary": {
+    "priceX96": "79228162514264337593543950336",
+    "updatedAt": "1000"
+   },
+   "secondary": null
+  },
+  {
+   "expect": {
+    "revert": "StaleReference"
+   },
+   "history": [],
+   "note": "stale primary",
+   "now": "4601",
+   "policy": {
+    "age_widen": "500",
+    "max_age": "3600",
+    "max_divergence": "10000",
+    "missing_penalty": "1000",
+    "require_secondary": false,
+    "secondary_max_age": "86400",
+    "vol_horizon": "300",
+    "vol_mult": "50"
+   },
+   "primary": {
+    "priceX96": "79228162514264337593543950336",
+    "updatedAt": "1000"
+   },
+   "secondary": {
+    "priceX96": "79228162514264337593543950336",
+    "updatedAt": "1000"
+   }
+  },
+  {
+   "expect": {
+    "revert": "ReferenceUnavailable"
+   },
+   "history": [],
+   "note": "primary unavailable",
+   "now": "1600",
+   "policy": {
+    "age_widen": "500",
+    "max_age": "3600",
+    "max_divergence": "10000",
+    "missing_penalty": "1000",
+    "require_secondary": false,
+    "secondary_max_age": "86400",
+    "vol_horizon": "300",
+    "vol_mult": "50"
+   },
+   "primary": {
+    "priceX96": "0",
+    "updatedAt": "0"
+   },
+   "secondary": {
+    "priceX96": "79228162514264337593543950336",
+    "updatedAt": "1000"
+   }
+  },
+  {
+   "expect": {
+    "revert": "ReferenceDivergence"
+   },
+   "history": [],
+   "note": "divergence above limit",
+   "now": "1600",
+   "policy": {
+    "age_widen": "500",
+    "max_age": "3600",
+    "max_divergence": "10000",
+    "missing_penalty": "1000",
+    "require_secondary": false,
+    "secondary_max_age": "86400",
+    "vol_horizon": "300",
+    "vol_mult": "50"
+   },
+   "primary": {
+    "priceX96": "79228162514264337593543950336",
+    "updatedAt": "1000"
+   },
+   "secondary": {
+    "priceX96": "80812725764549624345414829342",
+    "updatedAt": "900"
+   }
+  },
+  {
+   "expect": {
+    "revert": "ReferenceUnavailable"
+   },
+   "history": [],
+   "note": "primary timestamp in the future",
+   "now": "1600",
+   "policy": {
+    "age_widen": "500",
+    "max_age": "3600",
+    "max_divergence": "10000",
+    "missing_penalty": "1000",
+    "require_secondary": false,
+    "secondary_max_age": "86400",
+    "vol_horizon": "300",
+    "vol_mult": "50"
+   },
+   "primary": {
+    "priceX96": "79228162514264337593543950336",
+    "updatedAt": "2000"
+   },
+   "secondary": {
+    "priceX96": "79228162514264337593543950336",
+    "updatedAt": "1000"
+   }
+  }
+ ],
+ "source": "simulations/mm/model.py (SYNTHETIC inputs; not market data)",
+ "units": {
+  "amounts": "raw token units",
+  "perShare": "WAD (1e18)",
+  "pips": "1,000,000 = 100%",
+  "priceX96": "raw currency1 per raw currency0, Q64.96"
+ }
+}
