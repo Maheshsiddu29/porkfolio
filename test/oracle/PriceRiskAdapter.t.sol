@@ -158,5 +158,14 @@ contract PriceRiskAdapterTest is Test {
         new PriceRiskAdapter(cl, cl, WETH, USDC, 6, 18, IAggregatorV3(address(0)), 0, 2);
         vm.expectRevert(PriceRiskAdapter.InvalidConfig.selector);
         new PriceRiskAdapter(cl, cl, address(0), WETH, 6, 18, IAggregatorV3(address(0)), 0, 2);
+        // Two adapters that differ only in the second source's staleness limit have different versions.
+        PriceRiskAdapter.Source memory rs = PriceRiskAdapter.Source(rsUsdc, rsEth, 5100, 5100, 12_600, 23_400);
+        PriceRiskAdapter.Source memory rs2 = PriceRiskAdapter.Source(rsUsdc, rsEth, 5100, 5100, 12_600, 23_401);
+        assertTrue(
+            new PriceRiskAdapter(cl, rs, USDC, WETH, 6, 18, IAggregatorV3(address(0)), 0, 2).configVersion()
+                != new PriceRiskAdapter(cl, rs2, USDC, WETH, 6, 18, IAggregatorV3(address(0)), 0, 2).configVersion()
+        );
+        vm.expectRevert(PriceRiskAdapter.InvalidConfig.selector); // a pair of one token is not a pair
+        new PriceRiskAdapter(cl, cl, USDC, USDC, 6, 6, IAggregatorV3(address(0)), 0, 2);
     }
 }

@@ -74,7 +74,11 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 | P-5 | Owner decision on Hook B reversals under D14 floors (refused until the position decays) and on decay windows | Not started | `PHASE1B3_REPORT.md` §8 |
 | P-6 | Loosening delay for hook pricing parameters (`hookOwner` is trusted; no timelock) | Not started | `PHASE1B3_PLAN.md` D-P3 (deferred) |
 | P-3 | Vault floors and the directional consistency check (D14) | Done | `PricePolicy.t.sol`, `invariant_directionalFloorsConsistent` |
-| P-4 | Reference-price update procedure and staleness monitoring (off-chain) | Not started | Floors and `P` are static, set by governance |
+| P-4 | Reference-price update procedure and staleness monitoring (off-chain) | Designed, not implemented | Replaced on-chain by the market-risk adapter (`ORACLE_RISK_BOUNDARY_SPEC.md`); monitoring of feed ages and the sequencer still needed off-chain |
+| P-7 | Vault-enforced oracle risk boundary (dynamic floor, uncertainty breaker, price-free inventory floor) | Proposed, not applied | `PHASE1B4_2_REPORT.md`; `docs/proposals/oracle-risk-boundary.patch`; equations `src/risk/VaultRiskBoundary.sol` (vectors and fuzz); needs R-1, R-2 |
+| P-8 | Market-risk adapter for the launch pair, read-only, verified on a Unichain fork | Prototype done (local) | `src/oracle/PriceRiskAdapter.sol`, `test/oracle/`, `test/fork/UnichainOracles.t.sol`; `ORACLE_VERIFICATION_UNICHAIN.md` |
+| P-9 | Capital-at-risk parameter `kappa` and hooks' caps aligned (≤ `kappa`) | Not started | Recommended 5% (`CORRELATED_ORACLE_FAILURES.md` §4); decision R-4 |
+| P-10 | Fresh signed price source (credentialed on Unichain) | Not started | `FRESH_PRICE_EVALUATION.md`; decision R-5 |
 
 ## 7. Withdrawal and insolvency
 

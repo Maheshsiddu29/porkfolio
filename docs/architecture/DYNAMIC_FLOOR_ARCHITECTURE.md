@@ -1,6 +1,6 @@
 # Porkfolio — Dynamic Floor Architecture (Phase 1B-4.1)
 
-**Status: DECISION PROPOSED; vault change NOT IMPLEMENTED.** The selected architecture changes the vault's trust
+**Status: SUPERSEDED by `ORACLE_RISK_BOUNDARY_SPEC.md` (Phase 1B-4.2).** The owner rejected the ±25% static outer band proposed below; the comparison of approaches A–C in §2 still stands, and `docs/proposals/vault-dynamic-floor.patch` is kept as evidence only. Original status: **DECISION PROPOSED; vault change NOT IMPLEMENTED.** The selected architecture changes the vault's trust
 boundary (a new external price input), its storage layout (four appended slots) and one financial invariant (the D14
 floor rule while a dynamic floor is active). Per the operating rules it is presented as a complete proposal and
 stopped before any change to `src/SharedCommitmentVault.sol`. The exact change is

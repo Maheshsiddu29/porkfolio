@@ -14,6 +14,9 @@ Python models that sit beside the Solidity code. Nothing here is historical mark
 | `mm/vectors.py` | Writes `mm/vectors/inventory_quote_v1.json`, integer conformance vectors for any implementation of the quote |
 | `mm/test_core.py` | Shared economic core: Hook A and Hook B strategies on one reserve, bracket reference (Phase 1B-4.1) |
 | `mm/vectors_core.py`, `mm/vectors_csv.py` | Shared-core conformance vectors (JSON) and their CSV views read by `test/pricing/` |
+| `mm/test_risk.py` | Vault risk boundary: an adversary owning the reference never extracts more than the inventory-floor bound (Phase 1B-4.2) |
+| `mm/vectors_risk.py` | Writes `mm/vectors/vault_risk_v1.json` and `.csv`, conformance vectors for `src/risk/VaultRiskBoundary.sol` |
+| `mm/attacks.py` | Analytic loss bounds for correlated oracle failures, with their assumptions (writes nothing; output kept in `mm/results/attack_bounds.md`) |
 | `mm/simulate.py` | Matched synthetic simulation of the candidates on a model of the shared vault; calibration grids; writes `mm/results/` |
 
 Standard library only (Python 3.11). `simulate.py` uses `concurrent.futures` processes; results do not depend on the
@@ -31,6 +34,9 @@ python3 simulations/mm/simulate.py --calibrate > simulations/mm/results/calibrat
 python3 simulations/mm/simulate.py > simulations/mm/results/heldout.md                   # ~1 min on 10 cores
 python3 simulations/mm/vectors_core.py && python3 simulations/mm/vectors_csv.py
 python3 simulations/mm/simulate.py --phase141 > simulations/mm/results/phase141.md         # ~75 s on 10 cores
+python3 simulations/mm/vectors_risk.py
+python3 simulations/mm/attacks.py > simulations/mm/results/attack_bounds.md
+python3 simulations/mm/simulate.py --phase142 > simulations/mm/results/phase142.md         # ~26 s on 10 cores
 ```
 
 Every random choice uses a fixed seed, so each command prints the same result on every run.
