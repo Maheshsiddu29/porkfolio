@@ -14,4 +14,14 @@ Counterexamples to stronger claims (kappa 5%):
   static mode without the inventory floor: 0.5000 extractable
   queued LP during a delayed loosening: queued 1000000000 shares; finalized at 0 asset0 + 1000000000 asset1 (entry about 1000000000 of each)
 
-(2.1 s)
+Per kappa (SYNTHETIC; p = (1, 1) except the random-search column, which takes the worst of 6 price vectors):
+
+| kappa | bound at target (of value) | first one-sided drain | 20 drain-and-refill cycles (cumulative) | worst shortfall / entry value, random search |
+|---|---|---|---|---|
+| 1% | 0.010 | 0.0050 | 0.0100 | 0.0239 |
+| 2% | 0.020 | 0.0100 | 0.0200 | 0.0551 |
+| 5% | 0.050 | 0.0250 | 0.0500 | 0.1118 |
+| 10% | 0.100 | 0.0500 | 0.1000 | 0.2099 |
+| 15% | 0.150 | 0.0750 | 0.1500 | 0.4098 |
+
+(3.3 s)

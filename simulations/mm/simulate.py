@@ -1253,6 +1253,63 @@ def phase142(workers=None):
                                for (r, c), x in table.items()}}, f, indent=1, sort_keys=True)
 
 
+# ------------------------------------------------------------------------------------------------------------------
+# Phase 1B-4.3: kappa sensitivity (the vault's inventory tolerance and the hooks' cap, kept equal)
+# ------------------------------------------------------------------------------------------------------------------
+
+KAPPAS = (10_000, 20_000, 50_000, 100_000, 150_000)
+
+
+def _cands_143():
+    """For each kappa: push-only (permissionless, the safe operating mode) and push + a credentialed fresh source.
+    The hooks' deviation cap equals kappa (the compatibility rule: hook cap <= vault tolerance)."""
+    orb = dict(oracle=True, floors="orb")
+    out = []
+    for k in KAPPAS:
+        out.append(Candidate(f"P{k // 10_000:02d} push-only, kappa {k / 1e4:g}%", "C", ref_mode="bracket",
+                             c=c_config(1_000, k, max_spread=40_000, band=True), kappa=k, **orb))
+        out.append(Candidate(f"F{k // 10_000:02d} push + fresh (95%), kappa {k / 1e4:g}%", "C", ref_mode="bracket_pull",
+                             c=c_config(2_000, k, max_spread=40_000, band=True), fresh_avail=0.95, kappa=k, **orb))
+    return out
+
+
+def phase143(workers=None):
+    print("Phase 1B-4.3 kappa sensitivity. SYNTHETIC worlds; held-out seeds", HELD_OUT_SEEDS)
+    cands = _cands_143()
+    table = run_grid(REGIMES_141, HELD_OUT_SEEDS, cands, workers)
+    ov = overall(table, REGIMES_141, cands, "Held-out, kappa sweep")
+    att = run_grid(ATTACKS, HELD_OUT_SEEDS, cands, workers)
+    print("\n### Normal operation (held-out, 9 regimes): availability, utilisation, exposure, withdrawals\n")
+    print("| candidate | fill% median | turnover/day median | max |dev|% (asset1) | max conc% | "
+          "LP exits paid instantly % | recovery >10%->5% median s | episodes |")
+    print("|---|---|---|---|---|---|---|---|")
+    rows = {}
+    for c in cands:
+        per = [summarise(table[(r.name, c.name)]) for r in REGIMES_141]
+        allr = [t for r in REGIMES_141 for x in table[(r.name, c.name)] for t in x["recoveries"]]
+        wd = [p["wd instant%"] for p in per if p["wd instant%"] is not None]
+        row = {"fill_med": statistics.median(p["fill%"] for p in per),
+               "turnover_med": statistics.median(p["turnover/day"] for p in per),
+               "max_dev": max(p["max |dev|%"] for p in per), "max_conc": max(p["max conc%"] for p in per),
+               "wd_instant_min": min(wd) if wd else None,
+               "recovery_med_s": statistics.median(allr) if allr else None, "episodes": len(allr)}
+        rows[c.name] = row
+        print(f"| {c.name} | {row['fill_med']:.2f} | {row['turnover_med']:.3f} | {row['max_dev']:.1f} | "
+              f"{row['max_conc']:.1f} | {row['wd_instant_min'] if row['wd_instant_min'] is None else round(row['wd_instant_min'], 1)} | "
+              f"{row['recovery_med_s']} | {row['episodes']} |")
+    print("\n### Oracle compromise (3-day attack worlds, 4 seeds): LP vs HODL bps, worst seed\n")
+    print("| candidate | " + " | ".join(r.name.split(" ")[0] for r in ATTACKS) + " |")
+    print("|---" * (len(ATTACKS) + 1) + "|")
+    arows = {}
+    for c in cands:
+        vals = [summarise(att[(r.name, c.name)])["LP vs HODL bps (worst)"] for r in ATTACKS]
+        arows[c.name] = dict(zip((r.name.split(" ")[0] for r in ATTACKS), vals))
+        print(f"| {c.name} | " + " | ".join(f"{v:.1f}" for v in vals) + " |")
+    os.makedirs(os.path.join(os.path.dirname(__file__), "results"), exist_ok=True)
+    with open(os.path.join(os.path.dirname(__file__), "results", "phase143_kappa.json"), "w") as f:
+        json.dump({"overall": ov, "normal": rows, "attacks_worst_bps": arows}, f, indent=1, sort_keys=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--calibrate", action="store_true")
@@ -1260,7 +1317,11 @@ def main():
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--phase141", action="store_true", help="Phase 1B-4.1 experiment (verified feeds)")
     ap.add_argument("--phase142", action="store_true", help="Phase 1B-4.2 experiment (oracle risk boundary)")
+    ap.add_argument("--phase143", action="store_true", help="Phase 1B-4.3 kappa sensitivity")
     a = ap.parse_args()
+    if a.phase143:
+        phase143(a.workers)
+        return
     if a.phase142:
         phase142(a.workers)
         return

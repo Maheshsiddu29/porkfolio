@@ -494,6 +494,44 @@ def ce_queued_lp_cannot_escape(kappa=50_000) -> str:
     return f"queued {queued} shares; finalized at {r.c0} asset0 + {r.c1} asset1 (entry about {queued} of each)"
 
 
+def refill_cycles(kappa: int, cycles: int = 20) -> tuple[float, float]:
+    """Drain asset0 at a price of zero, let honest flow refill asset0 at the fair price (the vault pays asset1), and
+    drain again, `cycles` times. Returns (cumulative extraction, first drain), both as fractions of the starting value at
+    p = (1, 1). Refills are paid out of asset1, so they stop once asset1 reaches its own floor: the cumulative total
+    cannot pass the two floors together."""
+    v = fresh(kappa)
+    start = v.N(0) + v.N(1)
+    first = None
+    taken = 0
+    for _ in range(cycles):
+        x = v.max_out(0)
+        if x:
+            v.exchange(0, x, 0)
+            taken += x
+        if first is None:
+            first = taken / start
+        y = min(v.max_out(1), v.target[0] * v.S // WAD - v.N(0))  # honest refill of asset0 back towards target
+        if y > 0:
+            v.exchange(1, y, y)
+    return taken / start, first
+
+
+def kappa_table():
+    """Per kappa: the bound at the target composition, repeated refill-and-drain, and the worst shortfall the random
+    search found (which exceeds kappa when fees or skew lift holdings above target, correction C4)."""
+    print("| kappa | bound at target (of value) | first one-sided drain | 20 drain-and-refill cycles (cumulative) | "
+          "worst shortfall / entry value, random search |")
+    print("|---|---|---|---|---|")
+    for k in (10_000, 20_000, 50_000, 100_000, 150_000):
+        cum, first = refill_cycles(k)
+        worst = 0.0
+        for seed in range(60):
+            rng_v = random_run(seed, steps=300, kappa=k)
+            _, frac, _ = rng_v.t2_report(PRICES)
+            worst = max(worst, frac)
+        print(f"| {k / 1e4:g}% | {k / 1e6:.3f} | {first:.4f} | {cum:.4f} | {worst:.4f} |")
+
+
 def main():
     import time
 
@@ -526,6 +564,8 @@ def main():
     print(f"  owner loosens tau immediately: {ce_loosen_bounds_immediately():.4f} of the reserve extractable")
     print(f"  static mode without the inventory floor: {ce_static_mode_without_floor():.4f} extractable")
     print(f"  queued LP during a delayed loosening: {ce_queued_lp_cannot_escape()}")
+    print("\nPer kappa (SYNTHETIC; p = (1, 1) except the random-search column, which takes the worst of 6 price vectors):\n")
+    kappa_table()
     print(f"\n({time.time() - t:.1f} s)")
 
 
