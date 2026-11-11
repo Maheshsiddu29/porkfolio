@@ -16,6 +16,7 @@ Python models that sit beside the Solidity code. Nothing here is historical mark
 | `mm/vectors_core.py`, `mm/vectors_csv.py` | Shared-core conformance vectors (JSON) and their CSV views read by `test/pricing/` |
 | `mm/test_risk.py` | Vault risk boundary: an adversary owning the reference never extracts more than the inventory-floor bound (Phase 1B-4.2) |
 | `mm/vectors_risk.py` | Writes `mm/vectors/vault_risk_v1.json` and `.csv`, conformance vectors for `src/risk/VaultRiskBoundary.sol` |
+| `mm/floor_guarantee.py` | Stateful adversarial model of the inventory floor in exact integers (Phase 1B-4.3): checks T1/T2, reproduces the counterexamples to stronger claims, and tabulates per-kappa bounds and refill cycles; `test_floor_guarantee.py` pins the results |
 | `mm/attacks.py` | Analytic loss bounds for correlated oracle failures, with their assumptions (writes nothing; output kept in `mm/results/attack_bounds.md`) |
 | `mm/simulate.py` | Matched synthetic simulation of the candidates on a model of the shared vault; calibration grids; writes `mm/results/` |
 
@@ -37,6 +38,8 @@ python3 simulations/mm/simulate.py --phase141 > simulations/mm/results/phase141.
 python3 simulations/mm/vectors_risk.py
 python3 simulations/mm/attacks.py > simulations/mm/results/attack_bounds.md
 python3 simulations/mm/simulate.py --phase142 > simulations/mm/results/phase142.md         # ~26 s on 10 cores
+python3 simulations/mm/floor_guarantee.py > simulations/mm/results/floor_guarantee.md          # ~4 s
+python3 simulations/mm/simulate.py --phase143 > simulations/mm/results/phase143_kappa.md   # ~45 s on 10 cores
 ```
 
 Every random choice uses a fixed seed, so each command prints the same result on every run.

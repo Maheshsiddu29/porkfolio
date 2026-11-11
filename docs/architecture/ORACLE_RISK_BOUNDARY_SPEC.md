@@ -1,11 +1,29 @@
 # Porkfolio — Oracle Risk Boundary Specification (Phase 1B-4.2)
 
-**Status: PROPOSED for review; production vault NOT changed.** This replaces the Phase 1B-4.1 vault proposal, whose
-±25% static outer band was rejected. There is no static price band of any width in this design. Implemented in
-isolation: `src/risk/VaultRiskBoundary.sol` (equations), `src/interfaces/IMarketRiskAdapter.sol`, and
-`src/oracle/PriceRiskAdapter.sol` (read-only adapter). The vault integration exists only as a measured prototype in a
-scratch copy: `docs/proposals/oracle-risk-boundary.patch`, not applied. Labels: PROVEN, TESTED, MEASURED, ESTIMATE,
-ASSUMPTION.
+**Status: IMPLEMENTED on the local branch `phase-1b-4-3-oracle-integration` (Phase 1B-4.3), with corrections; not
+deployed, not released.** This replaces the Phase 1B-4.1 vault proposal, whose ±25% static outer band was rejected.
+There is no static price band of any width in this design.
+
+The stateful search in Phase 1B-4.3 (`INVENTORY_FLOOR_GUARANTEE.md`) changed five things relative to the text below,
+and the code follows the corrected version:
+1. The inventory floor applies in **every** mode once `tau` is configured, not only in adapter mode.
+2. Stored floors are **not** ignored in adapter mode. The fill floor is max(stored, curator, dynamic), so a
+   guardian-raised floor survives installing an adapter. A stored floor can be cleared only in adapter mode.
+3. Loosening `tau` or `kappa` is not immediate. The vault's owner is `VaultGovernor`, which delays it 32 days, longer
+   than `MAX_HORIZON`.
+4. The vault validates the adapter's decimals against the tokens and rejects zero or expired readings.
+5. The bound is `sum (h_a − l_a)^+ p_a` per share against the LP's entry basket, **not** "`kappa` of vault value"
+   (§3 below overstates it).
+
+Code:
+- `src/SharedCommitmentVault.sol`: `_floorForFill`, `_reading`, `setRiskAdapter`, `setRiskBounds`,
+  `setInventoryBounds`;
+- `src/governance/VaultGovernor.sol`;
+- `src/risk/VaultRiskBoundary.sol`;
+- `src/oracle/PriceRiskAdapter.sol`;
+- the hooks' shared-core mode, in `BaseCompatibleHook`.
+
+Labels: PROVEN, TESTED, MEASURED, ESTIMATE, ASSUMPTION.
 
 ## 1. What the vault enforces, independently of every hook
 

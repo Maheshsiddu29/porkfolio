@@ -72,13 +72,15 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 | P-1 | Per-swap behaviour characterised (before Phase 1B-3) | Done | `TRADE_SPLITTING.md` §1–6 (numbers kept); the tests now assert the cumulative behaviour |
 | P-2 | Cumulative pricing implemented with split-invariance fuzz, aggregate cap, round trip, decay and stale-price tests | Done (local) | `PHASE1B3_REPORT.md`; `CumulativePricing.t.sol` (unit and integration), `PricingAdversarial.t.sol`, `TradeSplitting.t.sol`, INV-P2/INV-P4, Python model `simulations/pricing/` |
 | P-5 | Owner decision on Hook B reversals under D14 floors (refused until the position decays) and on decay windows | Not started | `PHASE1B3_REPORT.md` §8 |
-| P-6 | Loosening delay for hook pricing parameters (`hookOwner` is trusted; no timelock) | Not started | `PHASE1B3_PLAN.md` D-P3 (deferred) |
+| P-6 | Loosening delay for hook pricing parameters (`hookOwner` is trusted; no timelock) | Not started | `PHASE1B3_PLAN.md` D-P3 (deferred). Hook parameters cannot widen the vault's boundary (the vault enforces it on every fill), but they set the economics inside it; a hook-owner timelock is still open. |
 | P-3 | Vault floors and the directional consistency check (D14) | Done | `PricePolicy.t.sol`, `invariant_directionalFloorsConsistent` |
 | P-4 | Reference-price update procedure and staleness monitoring (off-chain) | Designed, not implemented | Replaced on-chain by the market-risk adapter (`ORACLE_RISK_BOUNDARY_SPEC.md`); monitoring of feed ages and the sequencer still needed off-chain |
-| P-7 | Vault-enforced oracle risk boundary (dynamic floor, uncertainty breaker, price-free inventory floor) | Proposed, not applied | `PHASE1B4_2_REPORT.md`; `docs/proposals/oracle-risk-boundary.patch`; equations `src/risk/VaultRiskBoundary.sol` (vectors and fuzz); needs R-1, R-2 |
+| P-7 | Vault-enforced oracle risk boundary (dynamic floor, uncertainty breaker, price-free inventory floor) | Done (local, not released) | `PHASE1B4_3_REPORT.md`; `INVENTORY_FLOOR_GUARANTEE.md`; `test/security/OracleRiskBoundary.t.sol`, `test/invariant/OracleRiskInvariants.t.sol`; vault at 200 runs |
 | P-8 | Market-risk adapter for the launch pair, read-only, verified on a Unichain fork | Prototype done (local) | `src/oracle/PriceRiskAdapter.sol`, `test/oracle/`, `test/fork/UnichainOracles.t.sol`; `ORACLE_VERIFICATION_UNICHAIN.md` |
-| P-9 | Capital-at-risk parameter `kappa` and hooks' caps aligned (≤ `kappa`) | Not started | Recommended 5% (`CORRELATED_ORACLE_FAILURES.md` §4); decision R-4 |
-| P-10 | Fresh signed price source (credentialed on Unichain) | Not started | `FRESH_PRICE_EVALUATION.md`; decision R-5 |
+| P-9 | Capital-at-risk parameter `kappa` and hooks' caps aligned (≤ `kappa`) | Alignment enforced on-chain (hooks clamp to the vault's `kappa`); value not chosen | `KAPPA_SENSITIVITY.md`: 1–2% proposed for a first mainnet launch; decision R-4 |
+| P-10 | Fresh signed price source (credentialed on Unichain) | Evaluated, not adopted | `FRESH_PRICE_EVALUATION.md` §6: a relayer can push RedStone packages permissionlessly; needs credentials; decision R-5 |
+| P-11 | Timelock owner for every risk-increasing change | Done (local) | `src/governance/VaultGovernor.sol`; `test/governance/VaultGovernor.t.sol`; a deployment must verify `vault.owner() == governor` |
+| P-12 | Hooks priced from the vault's adapter and inventory (shared core) | Done (local) | `BaseCompatibleHook` shared-core mode; `test/integration/SharedCoreHooks.t.sol`; fork gas `test/fork/UnichainIntegratedSwap.t.sol` |
 
 ## 7. Withdrawal and insolvency
 
