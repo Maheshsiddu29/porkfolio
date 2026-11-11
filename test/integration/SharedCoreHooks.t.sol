@@ -124,6 +124,16 @@ contract SharedCoreHooksTest is VaultTestBase {
         assertEq(hookA.quote(keyA, false, amountIn), a, "Hook A");
     }
 
+    /// @notice Hook A's activity fee keeps its state in shared-core mode: a swap raises the direction's flow level,
+    ///         so the same trade right after pays a higher fee and receives less.
+    function test_hookA_activityLevelPersistsInCoreMode() public {
+        assertEq(hookA.flowLevel(keyA, true), 0);
+        uint256 q0 = hookA.feeFor(keyA, true, 1000 ether);
+        _swapOut(keyA, true, 1000 ether);
+        assertEq(hookA.flowLevel(keyA, true), 1000 ether, "level stored");
+        assertGt(hookA.feeFor(keyA, true, 1000 ether), q0, "next trade pays more");
+    }
+
     /// @notice Hooks have no adapter of their own: their quotes follow whatever adapter the vault holds, including
     ///         after the vault's owner replaces it.
     function test_quotesFollowTheVaultsAdapter() public {

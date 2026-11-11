@@ -285,6 +285,24 @@ contract OracleRiskBoundaryTest is VaultTestBase {
         vault.setRiskAdapter(IMarketRiskAdapter(address(0)));
     }
 
+    /// @notice An adapter for another pair is refused whichever side differs, and in adapter mode with no stored floor
+    ///         a curator floor of zero is still refused (the stored floor counts as 1, never 0).
+    function test_setRiskAdapter_rejectsOtherAsset1_andZeroCuratorFloor() public {
+        MockRiskAdapter otherAsset1 = new MockRiskAdapter(address(token0), address(0xBEEF), 18, 18, bytes32(0));
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(ISharedCommitmentVault.InvalidRiskAdapter.selector, address(otherAsset1))
+        );
+        vault.setRiskAdapter(otherAsset1);
+
+        _installNoStaticFloors();
+        ISharedCommitmentVault.AllocationRequest memory r = _request(keyM, c0, 1 ether);
+        r.minInPerOutX96 = 0;
+        vm.prank(curator);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.FloorBelowVaultMinimum.selector, 0, 1));
+        auth.activateDirect(r);
+    }
+
     // ------------------------------------------------------------------
     // Guardian protections across transitions (Task 2)
     // ------------------------------------------------------------------

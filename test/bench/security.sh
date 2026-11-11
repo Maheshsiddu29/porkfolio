@@ -27,7 +27,7 @@ forge build --force >/dev/null 2>&1 || { forge build; exit 1; }
 # size <artifact json> <bytecode|deployedBytecode>: bytes of the object (hex digits / 2, without "0x").
 size() { echo $(( ($(jq -r ".$2.object" "$1" | wc -c) - 3) / 2 )); }
 gate=0
-for c in SharedCommitmentVault HookA_DynamicFee HookB_BoundedImpact VaultLens CuratorAuthorization; do
+for c in SharedCommitmentVault HookA_DynamicFee HookB_BoundedImpact VaultLens CuratorAuthorization VaultGovernor; do
   f="out/$c.sol/$c.json"
   [ -f "$f" ] || { echo "size gate: missing production artifact $f"; gate=1; continue; }
   runtime="$(size "$f" deployedBytecode)"
