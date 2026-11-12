@@ -53,7 +53,7 @@ else at 44,444,444); only the fuzzing effort differs. Seeds are fixed (`0x5eed`)
 | Suite | Command | Fuzz | Invariants | Also | Wall time (this machine) |
 |---|---|---|---|---|---|
 | Fast (development) | `forge test` | 1,000 runs | 64 runs × 64 = 4,096 calls each | — | 17.6 s after a build |
-| CI | `test/bench/security.sh` (`FOUNDRY_PROFILE=ci`; what `.github/workflows/security.yml` runs) | 10,000 | 128 × 128 = 16,384 | forced rebuild, size gate, production-build checks | 6 min 39 s |
+| CI | `test/bench/security.sh` (`FOUNDRY_PROFILE=ci`), then `python3 test/invariant/coverage.py`: what `.github/workflows/security.yml` runs | 10,000 | 128 × 128 = 16,384 | forced rebuild, size gate, production-build checks, coverage gate (§4.4) | 6 min 49 s + 1 min 29 s |
 | Deep (adversarial / release) | `test/deep.sh` (`FOUNDRY_PROFILE=deep`) | 10,000 | 1,000 × 256 = 256,000 | seeds `0x1 0x2 0x3` at 256 × 128, coverage gate (§4.4), Python, fork tests if `UNICHAIN_RPC_URL` is set, Slither if installed | §5 |
 
 The deep profile meets the length release checklist item I-5 asks for before Gate 2 (≥ 1,000 runs × 256), which no
@@ -118,11 +118,11 @@ by unit tests (`test_invalidReadings_refused`, `test_lpPaths_independentOfAdapte
 **F4. `fail_on_revert = false` in the default profile.** A handler call that reverts is dropped silently, which hides
 a broken handler. The deep runs in every report used `true`; the default did not.
 
-**F5. Reporting, not a defect.** `INVENTORY_PROTECTION.md` §2 says every observed "shortfall / room" ratio was below
+**F5. Reporting, not a defect.** `INVENTORY_PROTECTION.md` §2 said every observed "shortfall / room" ratio was below
 10,000 bps. Over 100 runs it exceeded 10,000 bps in **36** (median 6,760; maximum 1,523,526). Q2 held in all of them:
-the check allows the shortfall to exceed the room by up to two raw units (one is the documented allowance, one covers
-the test's own pro-rata rounding), and when an LP's room is a fraction of a raw unit the ratio is meaningless. The
-earlier statement was based on one sampled run per invariant.
+the check allows the shortfall to exceed the room by up to two raw units, and when an LP's room is a fraction of a raw
+unit the ratio is meaningless. The earlier statement was based on one sampled run per invariant. Why two units, and
+not one, is measured in §12.2; the corrected text is in `INVENTORY_PROTECTION.md` (`3a2bdb1`).
 
 **Covered as asked, found adequate:**
 - both production hooks and multiple curators: `VaultInvariantsTest` (Hook A, Hook B, a 1:1 test hook; three
@@ -166,33 +166,47 @@ earlier statement was based on one sampled run per invariant.
 
 ### 4.4 The coverage gate
 
-`python3 test/invariant/coverage.py` (64 seeds, depth 128, 91 s) runs a single-run campaign per seed for each of the
-three suites, reads the `COV` lines, and fails if an operation never succeeded in more runs than its gate allows. Each
-gate is at least 4.2 binomial standard deviations above the fraction observed when it was set. The seed list is fixed,
-but two runs of the same vault handler gave close, not identical, counts (191 and 188 successful swaps over 64 runs);
-the gates keep that margin. It is part of `test/deep.sh`, not CI.
+`python3 test/invariant/coverage.py` (64 seeds, depth 128, about 90 s) runs a single-run campaign per seed for each of
+the three suites, reads the `COV` lines, and fails if an operation never succeeded in more runs than its gate allows,
+or if a counter that must stay zero (`looseningsFailedOther`) is not. Since the closeout (§12) it runs in CI after
+`security.sh`, and in `test/deep.sh`.
 
-Result at `0d76434`, from `test/deep.sh` (fraction of runs with zero / gate):
+**Reproducibility.** The first version was not: two complete runs differed slightly (190 vs 188 vault swaps). §12.4
+traces this to Foundry's storage-derived fuzz dictionary. The script now pins `FOUNDRY_PROFILE=default` and
+`include_storage = false` for its own runs, and three complete runs at the final commit gave identical measurements.
+Each gate is at least four binomial standard deviations above the worst fraction observed over seed bases 13, 101, 4001
+and 65537.
+
+**What it counts.** Every gated counter is a success (a fill, a swap, a deposit, a queued, finalized or claimed
+withdrawal, an executed loosening, a checked payout or slice), or a refusal with its expected revert reason
+(`refusedAtFloor`: `InventoryFloorBreached`; `looseningsBlocked`: `PendingWithdrawals`). The exception is
+`refusedUnderFault`, which counts any refusal while the adapter is faulted: there the property is
+`invariant_noFillUnderAdapterFault`, and the counter only shows the fault path is reached. No gate counts attempts.
+
+Result at `9149abc`, default seeds (fraction of runs with zero / gate):
 
 | vault | | oracle | | inventory | |
 |---|---|---|---|---|---|
-| swapsOk | 0.17 / 0.40 | fills | 0.05 / 0.20 | fillsA | 0.11 / 0.25 |
-| pricingSwapsOk | 0.30 / 0.60 | refusedAtFloor | 0.00 / 0.10 | fillsB | 0.05 / 0.20 |
-| allocationsOk | 0.00 / 0.15 | | | fillsMal | 0.00 / 0.20 |
-| depositsOk | 0.02 / 0.15 | | | refusedAtFloor | 0.06 / 0.20 |
+| swapsOk | 0.19 / 0.40 | fills | 0.03 / 0.20 | fillsA | 0.09 / 0.30 |
+| pricingSwapsOk | 0.33 / 0.65 | refusedAtFloor | 0.00 / 0.10 | fillsB | 0.03 / 0.30 |
+| allocationsOk | 0.02 / 0.20 | | | fillsMal | 0.00 / 0.20 |
+| depositsOk | 0.02 / 0.15 | | | refusedAtFloor | 0.05 / 0.25 |
 | instantOk | 0.06 / 0.25 | | | loosenings | 0.00 / 0.10 |
-| queuedOk | 0.23 / 0.45 | | | looseningsBlocked | 0.06 / 0.25 |
-| finalizedOk | 0.41 / 0.70 | | | payoutsChecked | 0.00 / 0.15 |
-| claimsOk | 0.59 / 0.85 | | | slicesChecked | 0.17 / 0.40 |
-| releasesOk | 0.06 / 0.25 | | | refusedUnderFault | 0.11 / 0.35 |
+| queuedOk | 0.19 / 0.50 | | | looseningsBlocked | 0.05 / 0.35 |
+| finalizedOk | 0.42 / 0.80 | | | payoutsChecked | 0.02 / 0.20 |
+| claimsOk | 0.45 / 0.85 | | | slicesChecked | 0.17 / 0.40 |
+| releasesOk | 0.08 / 0.35 | | | refusedUnderFault | 0.11 / 0.40 |
 
-Totals over the 64 runs (vault): 188 successful swaps, 83 pricing swaps, 208 allocations, 195 queued withdrawals,
-77 finalizations, 41 claims. Signed activations: 14, reported but not gated.
+`looseningsFailedOther`: 0 in every run (must be 0). Totals over the 64 runs (vault): 177 successful swaps, 83 pricing
+swaps, 202 allocations, 177 queued withdrawals, 74 finalizations, 45 claims; signed activations 13 (reported, not gated).
+
+**Would it have caught F1?** Against the 100-run measurement of the pre-G01 vault campaign (§4.2), yes, on three gates:
+`queuedOk` 0.75 > 0.50, `finalizedOk` 0.91 > 0.80, `claimsOk` 0.91 > 0.85. Not on swaps alone (0.32 < 0.40).
 
 Per-run assertions were considered and rejected for the vault campaign: a legitimate adversarial run can block every
 swap, which is how F2 arose.
 
-## 5. Validation at the final commit
+## 5. Validation at the end of the main G01 work (`0d76434`)
 
 All at `0d76434` unless stated. `src/` is byte-for-byte unchanged since `540e99d` (`git diff 540e99d HEAD -- src
 script lib foundry.lock remappings.txt` is empty), so ABI, storage layout and bytecode are unchanged by construction;
@@ -377,14 +391,14 @@ Nothing in this document authorizes any deployment.
 | PoolManager address and bytecode confirmed against Uniswap's published deployment (D-4); opcode support on Unichain (D-3) | `MAINNET_READINESS.md` |
 | Deployed bytecode compared with an independently reproduced build (X-2) | `MAINNET_READINESS.md` |
 | Issuance-time bound for signed instructions (S-6) | `MAINNET_READINESS.md` |
-| `MAINNET_READINESS.md` D-2 still says the vault is built at 2,000 optimizer runs; it is 200. Document correction pending (not changed in G01) | `foundry.toml` |
 
 ## 10. Not run, and limits of this baseline
 
 - **No formal verification, no independent audit, no Certora or Halmos run.** §7.1's proofs are hand proofs.
 - **Mutation testing is hand-picked** (17 mutants) and covers the vault, the risk library and the governor, not the
   hooks, module, lens or adapter in this phase.
-- **The coverage gate is not in CI** (91 s; part of `test/deep.sh`). CI gets the 128 × 128 campaigns.
+- **The coverage gate measures with `include_storage = false`** (§4.4). The CI and deep campaigns fuzz with Foundry's
+  default, which also samples storage values; the gate measures a close variant of them, not the exact runs.
 - **Vault campaign blind spots** (§4.3): random signed activations rarely succeed; INV-T1 rests on scripted and unit
   tests; zero-asset states in 2% of runs; static mode only.
 - **The LP-path differential** compares a healthy adapter with a *reverting* one. Gas-burning adapters were not run in
@@ -406,13 +420,103 @@ Nothing in this document authorizes any deployment.
 - The starting state matched the 1B-4.4 report (§1). The invariant-depth discrepancy was a misreading of the same
   256 × 128 configuration; no regression (§2).
 - The campaigns were audited. Three weaknesses were found and corrected in test code (F1, F2, F3), one in
-  configuration (F4). One statement in `INVENTORY_PROTECTION.md` is contradicted by the measurements (F5); that file
-  was not edited in G01. Residual blind spots are listed (§4.3, §10).
+  configuration (F4). One statement in `INVENTORY_PROTECTION.md` was contradicted by the measurements (F5); it was
+  corrected at closeout (§12). Residual blind spots are listed (§4.3, §10).
 - Every documented financial guarantee is preserved: `src/` is unchanged, every test passes in the fast, CI and deep
   suites, and every guarantee in §7.2 except PoolManager settlement (upstream code, not mutated) is backed by at least one
   killed mutant.
 - Three test profiles exist and were run (§3, §5).
 - This is a local baseline. It authorizes no deployment (§9).
 
-**Next per the roadmap:** G02. The master roadmap and tracker are not in the repository, so G02's scope could not be
+**Closeout (§12): ready for owner integration.** Next per the roadmap: G02. The master roadmap and tracker are not in the repository, so G02's scope could not be
 read from them; it is understood from the brief to be the start of time-bounded commitments in the vault. Not started.
+
+## 12. Closeout (owner checklist before integration)
+
+Five commits after `c132643`: `3a2bdb1`, `ffc814c`, `3e32c21`, `9149abc` and this document's update. No
+`src/` change: `git diff 540e99d HEAD -- src` is still empty and the init-code hashes in §6 were reproduced exactly.
+
+### 12.1 `AGENTS.md` (untracked, not touched)
+
+- Created 2026-11-12 01:22 local time, during the `test/deep.sh` run of §5; 6,073 bytes. No command run in this work
+  writes a file of that name; they write only `out/`, `cache/`, a scratch directory outside the repository and the
+  committed files.
+- Content: the project's `CLAUDE.md` with two words changed: the title reads "Project-wide instructions for Codex",
+  and one rule says "Mention Codex" instead of "Mention Claude". Everything else is identical (`diff` against
+  `CLAUDE.md`).
+- Likely origin: a copy of `CLAUDE.md` made for OpenAI Codex, which reads `AGENTS.md`, by the owner or by a Codex tool
+  outside this session. It carries a macOS `com.apple.provenance` attribute, which macOS adds to files written by
+  certain applications; `CLAUDE.md` does not have it. Left untracked, unmodified and uncommitted; the owner decides.
+
+### 12.2 `INVENTORY_PROTECTION.md` ratio claim (`3a2bdb1`)
+
+The incorrect "all below 10,000 bps" statement is replaced with the 100-run measurement (§4.2 F5) and an explanation of
+the tolerance. Measurement with the campaign's tolerance changed in a scratch copy (256 runs × depth 256, seeds `0x5eed`,
+`0x1`, `0x2`, `0x3`, inventory campaign):
+
+| Tolerance per asset | `invariant_Q2_entryBasketShortfall` (instant payouts) | `invariant_Q2_queuedRequestsKeepTheirProtection` |
+|---|---|---|
+| 2 raw units (committed) | pass | pass |
+| 1 raw unit | pass on all 4 seeds | **fail on all 4 seeds** |
+| 0 | fail | fail |
+
+Each vault payout rounds down by less than one raw unit per asset: that is Q2's allowance, and the §4.4 counterexample
+of `INVENTORY_PROTECTION.md` (`floor(2.85) = 2`, `test_rounding_exactT2FailsBySubUnit`) is unchanged. The second unit
+comes from how the campaign checks queued requests: `_checkSlices` tracks the requests pending when a handler call
+starts. In the late-LP branch of `governedLoosen` a request is queued and first finalized inside one call, before it is
+tracked, so its next finalization is checked together with the first: two vault payouts in one comparison. The
+shrunk counterexample at one unit (seed `0x1`) ends with two `governedLoosen(…, true)` calls and a `processQueue`. The
+test comment that attributed the unit to "the floor in b's pro-rata split" (that floor rounds in the LP's favour) was
+corrected in the same commit.
+
+### 12.3 200-run vault build (`ffc814c`)
+
+`MAINNET_READINESS.md` D-2 now states 200 runs, why (2,000 is over EIP-170 with the risk boundary, since 1B-4.3), and
+the two places that enforce it: `ProductionArtifacts.VAULT_RUNS = 200` (artifact checks in tests and
+`VerifyDeployment`) and `script/README.md`'s pre-broadcast check. `README.md` (Phase 1B-2 step 1 section) and
+`MODULAR_RISK_ENGINE.md` D19 now say when the setting changed. `foundry.toml`, `test/bench/run.sh`, `security.sh` and
+the deploy scripts already used 200 (`run.sh` at `9149abc`: vault artifact `runs=200 … ok`). Phase reports were left
+as history.
+
+### 12.4 Coverage gate in CI (`3e32c21`, `9149abc`)
+
+- **Non-determinism found and removed.** Two complete runs of the earlier gate differed by a few counts. Repeating a
+  differing seed with the call sequence dumped (a scratch edit forcing `afterInvariant` to fail, failure persistence
+  redirected so no run replayed another) showed the same selectors with a few different argument values, for example
+  `36893488147419103233` (2^65 + 1) in one run and another value in the next: values Foundry 1.7.1 collects from
+  contract storage are sampled in an order that varies between identical runs. Our handlers and the vault have no
+  randomness of their own. With `include_storage = false` four previously unstable seeds were identical over five
+  repeats each; `dictionary_weight = 0` also fixes it but removes the whole dictionary, so it was not chosen.
+- **Reproducibility at the final commit:** three complete runs (one with `FOUNDRY_PROFILE=ci` in the caller's
+  environment) gave identical measurements.
+- **False failures:** seed bases 13, 101, 4001, 65537 (256 single-run campaigns per suite): every gate passed on
+  every base. Gates were then set to at least four standard deviations above the worst base (seven widened).
+- **Meaningful operations:** §4.4. The two refusal counters now require their revert reason (`3e32c21`); over 64 runs
+  the oracle `refusedAtFloor` fell from 505 to 502, i.e. three refusals had another reason and are no longer counted.
+  `looseningsFailedOther` is 0 in every run and is enforced.
+- **CI:** `.github/workflows/security.yml` runs `python3 test/invariant/coverage.py` after `security.sh`, reusing its
+  build (a profile switch does not recompile: `No files changed, compilation skipped`). The fast profile is unchanged.
+  CI has still never executed on GitHub (D-7); the steps were run locally, below.
+
+### 12.5 Final validation at `9149abc`
+
+Run in sequence from a clean tree (only `AGENTS.md` untracked):
+
+| Command | Result |
+|---|---|
+| `forge fmt --check` | clean |
+| `bash test/bench/run.sh` (forced rebuild) | exit 0, 5 min 29 s; every production artifact at its expected runs; init-code hashes identical to §6 |
+| `bash test/bench/security.sh` (ci; forced rebuild = final clean compilation) | exit 0, 6 min 49 s; size gate passed (vault 22,440 B, margin 2,136); complete suite **584 passed, 0 failed, 8 skipped** (fork, no RPC) |
+| `python3 test/invariant/coverage.py` | exit 0, 1 min 29 s; every gate passed; measurements identical to two earlier runs |
+| `bash test/deep.sh` | exit 0, 28 min. Complete suite 584 passed, 0 failed, 8 skipped; all **48 campaigns `runs: 1000, calls: 256000, reverts: 0`**; seeds `0x1`, `0x2`, `0x3`: 44/44 each; coverage gate passed; Python 46 + 22 OK; Slither 59 results (unchanged); fork step skipped (no RPC in its environment) |
+| `UNICHAIN_RPC_URL=https://mainnet.unichain.org UNICHAIN_FORK_BLOCK=63689000 forge test --match-path "test/fork/*" --isolate -vv` | 8/8 passed; swap gas identical to §6 |
+| Targeted, during the closeout | `forge test --match-contract "InventoryProtection\|OracleRisk"`: 40 passed |
+
+Scratch artifacts of the experiments (three persisted failure files in `cache/invariant/failures`) were deleted before
+this validation; the forced rebuilds also clear `cache/`.
+
+### 12.6 Readiness
+
+**G01 is ready for owner integration**, subject to the owner's review of the ten local G01 commits
+(`60a309f` … this one) and a decision on `AGENTS.md`. Nothing was pushed, merged or deployed. G02 has not started.
+
