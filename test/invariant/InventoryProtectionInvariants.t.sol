@@ -24,6 +24,7 @@ import {BaseCompatibleHook} from "../../src/hooks/BaseCompatibleHook.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
 import {MockRiskAdapter} from "../utils/MockRiskAdapter.sol";
+import {VaultRiskBoundary} from "../../src/risk/VaultRiskBoundary.sol";
 
 /// @notice Everything the system lets happen to one shared reserve, driven at random: honest and adversarial trades
 ///         through both production hooks and a malicious consumer, two curators, deposits, instant and queued
@@ -99,9 +100,11 @@ contract InventoryProtectionHandler is Test {
     uint256 public fillsA;
     uint256 public fillsB;
     uint256 public fillsMal;
-    uint256 public refusedAtFloor;
+    uint256 public refusedAtFloor; // drains over the room refused with the vault's InventoryFloorBreached
+    bytes internal lastSwapError; // revert data of the last failed `_swap`
     uint256 public loosenings;
-    uint256 public looseningsBlocked;
+    uint256 public looseningsBlocked; // refused by VaultGovernor.PendingWithdrawals
+    uint256 public looseningsFailedOther; // refused for any other reason (expected 0)
     uint256 public adapterSwaps;
     uint256 public depegs;
     uint256 public payoutsChecked;
@@ -396,7 +399,23 @@ contract InventoryProtectionHandler is Test {
         ) {
             ok = true;
             out = uint256(int256(zeroForOne ? d.amount1() : d.amount0()));
-        } catch {}
+        } catch (bytes memory err) {
+            lastSwapError = err;
+        }
+    }
+
+    /// @dev True if `err` contains `selector` anywhere. The PoolManager wraps a hook's revert (ERC-7751
+    ///      `WrappedError`), so the vault's error sits inside the returned data rather than at its start.
+    function _contains(bytes memory err, bytes4 selector) internal pure returns (bool) {
+        for (uint256 i; i + 4 <= err.length; ++i) {
+            if (
+                bytes4(err[i]) | (bytes4(err[i + 1]) >> 8) | (bytes4(err[i + 2]) >> 16) | (bytes4(err[i + 3]) >> 24)
+                    == selector
+            ) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// @notice A trade through Hook A or Hook B at whatever the adapter currently says, from either curator's
@@ -456,7 +475,7 @@ contract InventoryProtectionHandler is Test {
             if (faulted) ++filledUnderFault;
         } else if (faulted) {
             ++refusedUnderFault;
-        } else if (out > room) {
+        } else if (out > room && _contains(lastSwapError, VaultRiskBoundary.InventoryFloorBreached.selector)) {
             ++refusedAtFloor;
         }
         _cancel(curatorIdx, id);
@@ -632,10 +651,12 @@ contract InventoryProtectionHandler is Test {
                     }
                 }
             }
-        } catch {
+        } catch (bytes memory err) {
             vm.prank(govAdmin);
             gov.cancel(address(vault), data);
-            ++looseningsBlocked;
+            // Counted only when the governor's queue check refused it; any other refusal is a handler problem.
+            if (bytes4(err) == VaultGovernor.PendingWithdrawals.selector) ++looseningsBlocked;
+            else ++looseningsFailedOther;
         }
     }
 
@@ -866,6 +887,7 @@ contract InventoryProtectionInvariantsTest is VaultTestBase {
         console2.log("COV refusedAtFloor", handler.refusedAtFloor());
         console2.log("COV loosenings", handler.loosenings());
         console2.log("COV looseningsBlocked", handler.looseningsBlocked());
+        console2.log("COV looseningsFailedOther", handler.looseningsFailedOther());
         console2.log("COV payoutsChecked", handler.payoutsChecked());
         console2.log("COV slicesChecked", handler.slicesChecked());
         console2.log("COV refusedUnderFault", handler.refusedUnderFault());

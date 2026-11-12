@@ -52,7 +52,8 @@ contract OracleRiskHandler is Test {
     uint256 public violations;
     uint256 public drained;
     uint256 public fills;
-    uint256 public refusedAtFloor;
+    uint256 public refusedAtFloor; // drains over the room refused with the vault's InventoryFloorBreached
+    bytes internal lastSwapError; // revert data of the last failed `_swap`
 
     constructor(
         SharedCommitmentVault vault_,
@@ -142,7 +143,7 @@ contract OracleRiskHandler is Test {
         if (ok) {
             ++fills;
             drained += out;
-        } else if (out > room) {
+        } else if (out > room && _contains(lastSwapError, VaultRiskBoundary.InventoryFloorBreached.selector)) {
             ++refusedAtFloor;
         }
     }
@@ -198,7 +199,23 @@ contract OracleRiskHandler is Test {
             ""
         ) {
             ok = true;
-        } catch {}
+        } catch (bytes memory err) {
+            lastSwapError = err;
+        }
+    }
+
+    /// @dev True if `err` contains `selector` anywhere. The PoolManager wraps a hook's revert (ERC-7751
+    ///      `WrappedError`), so the vault's error sits inside the returned data rather than at its start.
+    function _contains(bytes memory err, bytes4 selector) internal pure returns (bool) {
+        for (uint256 i; i + 4 <= err.length; ++i) {
+            if (
+                bytes4(err[i]) | (bytes4(err[i + 1]) >> 8) | (bytes4(err[i + 2]) >> 16) | (bytes4(err[i + 3]) >> 24)
+                    == selector
+            ) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ---------------------------------------------------------------- LPs
