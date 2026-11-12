@@ -102,6 +102,12 @@ contract SharedCoreHooksTest is VaultTestBase {
     ///         static mode only the zero adapter, so a hook never prices static pools from stale core inputs.
     function test_coreInputs_matchGetters() public {
         _depositShares(makeAddr("x"), 1e21);
+        // An asymmetric state, so an index or asset swap inside `coreInputs` cannot pass: different targets and
+        // tolerances per asset, and N0 != N1 after a fill.
+        vm.prank(guardian);
+        vault.setInventoryBounds(tau + 1, tau + 2, KAPPA - 1, KAPPA - 2);
+        _swapOut(keyB, true, 500 ether);
+        assertTrue(vault.backing(c0) != vault.backing(c1));
         (IMarketRiskAdapter a, uint256 e, uint256 k1, uint256 t1, uint256 n1, uint256 s) = vault.coreInputs();
         assertEq(address(a), address(vault.riskAdapter()));
         assertEq(e, vault.riskEdgePips());
@@ -214,6 +220,56 @@ contract SharedCoreHooksTest is VaultTestBase {
                 assertEq(abi.decode(retH, (uint256)), q.amountOut, "Hook B");
             }
         }
+    }
+
+    /// @notice When the vault's edge exceeds a hook's own minimum edge, the hook prices with the vault edge + 1 pip, not
+    ///         the vault edge itself. The extra pip pins the curve's end strictly outside the vault's floor, so rounding
+    ///         can never put a quote one raw unit inside it. The difference shows at the inventory cap: an order that
+    ///         would fit a curve built on the vault edge alone is refused by the hook.
+    function test_hookEdge_isVaultEdgePlusOne() public {
+        vm.prank(guardian);
+        vault.setRiskBounds(300, 5000); // above the hooks' own 200 pips
+        PricingHarness h = new PricingHarness();
+        InventoryPricing.Config memory cfg = InventoryPricing.Config({
+            targetPerShare: tau,
+            depthPerShare: 10e18,
+            depthMax: 2 ** 95 - 1,
+            baseSpread: 3000,
+            minEdge: 301,
+            maxSpread: 40_000,
+            maxDeviation: KAPPA,
+            bandEdge: true
+        });
+        InventoryPricing.Config memory atEdge = InventoryPricing.Config({ // a separate struct: memory assignment aliases
+            targetPerShare: tau,
+            depthPerShare: 10e18,
+            depthMax: 2 ** 95 - 1,
+            baseSpread: 3000,
+            minEdge: 300,
+            maxSpread: 40_000,
+            maxDeviation: KAPPA,
+            bandEdge: true
+        });
+        IMarketRiskAdapter.Reading memory r = adapter.currentReference();
+        uint256 n1 = vault.backing(c1) - vault.claimableAssets(c1);
+        uint256 s = vault.totalShares();
+        // Largest Hook A order (no per-trade bound) the curve built on the vault edge alone would fill (binary search).
+        StrategyPricing.ActivityFee memory fee = StrategyPricing.ActivityFee(A_BASE_FEE, A_MAX_FEE, A_SCALE, A_SCALE);
+        uint256 lo = 1 ether;
+        uint256 hi = 100_000 ether;
+        while (hi - lo > 1) {
+            uint256 mid = (lo + hi) / 2;
+            try h.hookA(atEdge, n1, s, r.priceX96, r.uncertaintyPips, fee, 0, true, mid) {
+                lo = mid;
+            } catch {
+                hi = mid;
+            }
+        }
+        (bool okPlusOne,) = address(h)
+            .staticcall(abi.encodeCall(h.hookA, (cfg, n1, s, r.priceX96, r.uncertaintyPips, fee, 0, true, lo)));
+        assertFalse(okPlusOne, "the order sits between the two caps");
+        vm.expectPartialRevert(InventoryPricing.InventoryLimit.selector);
+        hookA.quote(keyA, true, lo);
     }
 
     /// @notice Hook A's activity fee keeps its state in shared-core mode: a swap raises the direction's flow level,

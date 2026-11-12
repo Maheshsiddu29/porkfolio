@@ -216,6 +216,20 @@ contract PriceRiskAdapterTest is Test {
         assertLt(r.uncertaintyPips, pushOnly / 2, "narrow again after recovery");
     }
 
+    /// @notice The tier boundary is inclusive: a leg exactly `freshMaxAge` old is still fresh; one second later it is
+    ///         read with the push threshold.
+    function test_freshTier_boundaryIsInclusive() public {
+        PriceRiskAdapter fresh = _deployFresh(2);
+        rsUsdc.set(99_982_887, T);
+        rsEth.set(205_030_881_965, T);
+        vm.warp(T + 120);
+        uint256 atLimit = fresh.currentReference().uncertaintyPips;
+        vm.warp(T + 121);
+        uint256 past = fresh.currentReference().uncertaintyPips;
+        assertLt(atLimit, past, "fresh at exactly freshMaxAge");
+        assertEq(past, adapter.currentReference().uncertaintyPips);
+    }
+
     /// @notice Each leg picks its own tier: a fresh USDC leg with a stale-but-live ETH leg is bracketed at 15 bps on one
     ///         side and the push threshold on the other.
     function test_freshTier_perLeg() public {
