@@ -74,3 +74,10 @@ interface IBenchHookB {
 interface IBenchVaultBound {
     function vault() external view returns (address);
 }
+
+/// @notice The `VaultGovernor` functions the benchmark calls.
+interface IBenchGovernor {
+    function queue(address target, bytes calldata data) external returns (bytes32 id, uint256 when);
+    function execute(address target, bytes calldata data) external returns (bytes memory result);
+    function acceptVaultOwnership() external;
+}

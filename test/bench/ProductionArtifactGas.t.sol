@@ -18,7 +18,7 @@ import {PoolModifyLiquidityTest} from "@uniswap/v4-core/src/test/PoolModifyLiqui
 
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
-import {IBenchVault, IBenchHookA, IBenchHookB} from "./IBench.sol";
+import {IBenchVault, IBenchHookA, IBenchHookB, IBenchGovernor} from "./IBench.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
 import {Mock1271Wallet} from "../utils/Mock1271Wallet.sol";
 
@@ -540,6 +540,52 @@ contract ProductionArtifactGasTest is Test {
     /// @dev External so that a refused swap can be measured with try/catch.
     function swapExternal(PoolKey memory key, bool zeroForOne, int256 amountSpecified, bytes memory hookData) external {
         _swap(key, zeroForOne, amountSpecified, hookData);
+    }
+
+    // ------------------------------------------------------------------
+    // Governor
+    // ------------------------------------------------------------------
+
+    /// @notice The production governor artifact (default profile, by path: test files that import the vault also
+    ///         produce a 200-run copy) owning the vault: `queue` and `execute` of an ordinary change (DELAY), of an
+    ///         inventory-floor change (LONG_DELAY, which also reads the vault's pending shares) and of a nomination
+    ///         retraction. Each change is executed at its own eta.
+    function test_bench_governor() public {
+        address govAdmin = makeAddr("govAdmin");
+        IBenchGovernor gov = IBenchGovernor(
+            deployCode(
+                "out/VaultGovernor.sol/VaultGovernor.json",
+                abi.encode(address(vault), govAdmin, 3 days, 32 days, 7 days)
+            )
+        );
+        vm.prank(owner);
+        (bool ok,) = address(vault).call(abi.encodeWithSignature("transferOwnership(address)", address(gov)));
+        require(ok, "transferOwnership");
+        vm.prank(govAdmin);
+        gov.acceptVaultOwnership();
+
+        bytes[3] memory calls = [
+            abi.encodeWithSignature("setPaused(bool)", true),
+            abi.encodeWithSignature(
+                "setInventoryBounds(uint256,uint256,uint24,uint24)", 1e18, 1e18, uint24(50_000), uint24(50_000)
+            ),
+            abi.encodeWithSignature("transferOwnership(address)", address(0))
+        ];
+        string[3] memory labels = ["setPaused", "setInventoryBounds", "transferOwnership(0)"];
+        uint256[3] memory eta;
+        for (uint256 i; i < 3; ++i) {
+            vm.prank(govAdmin);
+            uint256 g = gasleft();
+            (, eta[i]) = gov.queue(address(vault), calls[i]);
+            console2.log(string.concat("BENCH governor queue ", labels[i], ":"), g - gasleft());
+        }
+        for (uint256 i; i < 3; ++i) {
+            vm.warp(eta[i]);
+            vm.prank(govAdmin);
+            uint256 g = gasleft();
+            gov.execute(address(vault), calls[i]);
+            console2.log(string.concat("BENCH governor execute ", labels[i], ":"), g - gasleft());
+        }
     }
 
     /// @notice Reference with no vault code at all: same router and amount on a hookless concentrated-liquidity

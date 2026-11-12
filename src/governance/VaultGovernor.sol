@@ -36,11 +36,15 @@ interface IGovernedVault {
 /// vault accounting either.
 ///
 /// Delays (set at construction; read them on-chain, they are part of the reviewed configuration).
-///   LONG_DELAY  Vault `setInventoryBounds` and `transferOwnership`. The inventory floor is the only protection that
-///               holds under a wrong price (it bounds what each share can lose against its entry basket), and a new
-///               owner need not be a timelock at all, so both get the longest notice.
+///   LONG_DELAY  Vault `setInventoryBounds`, and `transferOwnership` to a non-zero nominee. The inventory floor is the
+///               only protection that holds under a wrong price (it bounds what each share can lose against its entry
+///               basket), and a new owner need not be a timelock at all, so both get the longest notice. The class
+///               follows the selector, not the direction of the change: a call that tightens when queued can loosen by
+///               the time it executes if the guardian tightened further in between.
 ///   DELAY       Every other vault call and every hook call, including changes that tighten. Immediate tightening is the
-///               guardian's job.
+///               guardian's job. `transferOwnership(address(0))` is here too: it only withdraws a pending nomination,
+///               which no LP needs notice of, and holding it to LONG_DELAY and the queue check would leave a nominee
+///               the admin wants to retract free to accept for as long as LPs are queued.
 ///   GRACE       How long a matured change stays executable. Afterwards it must be queued again.
 ///
 /// Queued LPs keep their floor. An LP whose redemption is queued still holds shares, so a looser floor would apply to
@@ -50,6 +54,14 @@ interface IGovernedVault {
 /// applies is finalized under the old floor first. Finalized amounts are fixed and no later floor change reaches them.
 /// The admin calls the vault's permissionless `processQueue` in the same transaction to finalize what is deliverable;
 /// what is not deliverable makes the change wait (and possibly expire after GRACE), which only delays a loosening.
+/// A request is undeliverable only while commitments older than it hold the inventory it needs, so a curator that
+/// keeps re-committing while an LP keeps queuing can hold a LONG_DELAY change for as long as new commitments are
+/// allowed. Stopping new commitments (guardian: buffer floor, vault exposure cap, pause, deregistration) lets every
+/// older commitment expire within the vault's MAX_HORIZON, after which the queue can always be emptied.
+///
+/// The check binds when a nomination executes, not when the nominee accepts. After `transferOwnership(nominee)` has
+/// executed, the nominee may accept at any time; if it is not a timelock, LPs who queue after the nomination are not
+/// protected from it. Nominate only a reviewed governor, and have it accept in the same transaction.
 ///
 /// The trust boundary is a deployment property: it holds only while `vault.owner() == address(this)` and each hook's
 /// `hookOwner() == address(this)`. Anyone can check both on-chain. Ownership of the vault can leave this contract only
@@ -150,7 +162,8 @@ contract VaultGovernor {
     ///      neither the vault nor one of its hooks owned by this governor.
     /// @param target Governed contract.
     /// @param data Calldata.
-    /// @return Seconds: LONG_DELAY for the vault's `setInventoryBounds` and `transferOwnership`, DELAY otherwise.
+    /// @return Seconds: LONG_DELAY for the vault's `setInventoryBounds` and for its `transferOwnership` to a non-zero
+    ///         nominee, DELAY otherwise.
     function delayFor(address target, bytes calldata data) public view returns (uint256) {
         if (data.length < 4) revert InvalidCall();
         if (target != vault) {
@@ -238,9 +251,15 @@ contract VaultGovernor {
 
     /// @dev True for the vault calls that take LONG_DELAY. `data` is at least 4 bytes (checked by every caller's path:
     ///      `delayFor` at queue time, and only queued calldata reaches `execute`).
+    ///      `transferOwnership` is short only when its argument word is present and zero. The vault's ABI decoder
+    ///      rejects an address word with non-zero upper bits and calldata without a full word, so the zero word is
+    ///      exactly the case in which the vault stores `pendingOwner = address(0)`; bytes after that word are ignored by
+    ///      the vault and do not change the effect. Anything shorter stays LONG_DELAY (and would revert in the vault).
     function _isLong(bytes calldata data) internal pure returns (bool) {
         bytes4 selector = bytes4(data);
-        return selector == _SET_INVENTORY_BOUNDS || selector == _TRANSFER_OWNERSHIP;
+        if (selector == _SET_INVENTORY_BOUNDS) return true;
+        if (selector != _TRANSFER_OWNERSHIP) return false;
+        return data.length < 36 || bytes32(data[4:36]) != bytes32(0);
     }
 
     /// @dev The address a zero-argument getter of `target` returns, or address(0) if the call fails, returns fewer than

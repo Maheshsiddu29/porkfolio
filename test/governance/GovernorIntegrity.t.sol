@@ -330,11 +330,12 @@ contract GovernorIntegrityTest is VaultTestBase {
         assertEq(vault.inventoryTargetPerShare(0), 0, "the queued LP's floor is gone");
     }
 
-    /// @notice Counterexample: retracting a nomination (`transferOwnership(address(0))`) only removes a right, yet it is
-    ///         classified with ownership transfers. It waits LONG_DELAY and is refused while any LP is queued, so the
-    ///         nominee keeps the right to accept for at least LONG_DELAY after the admin decides to retract, and for as
-    ///         long as the queue can be kept non-empty. Here the nominee accepts while the retraction is refused.
-    function test_nominationRetraction_isHeldLikeATransfer() public {
+    /// @notice Retracting a nomination (`transferOwnership(address(0))`) only removes a right, so it waits DELAY and is
+    ///         not held by queued LPs. Before this rule it was classified with ownership transfers: it waited LONG_DELAY
+    ///         and was refused while any LP was queued, so a nominee the admin wanted to retract could accept for at
+    ///         least LONG_DELAY, and for as long as the queue could be kept non-empty. Here the retraction executes
+    ///         after DELAY with an LP queued behind a commitment, and the nominee can no longer accept.
+    function test_nominationRetraction_waitsDelay_notHeldByQueuedLps() public {
         address next = makeAddr("next");
         bytes memory nominate = abi.encodeCall(vault.transferOwnership, (next));
         uint256 eta = _queue(v, nominate);
@@ -343,18 +344,58 @@ contract GovernorIntegrityTest is VaultTestBase {
         assertEq(vault.pendingOwner(), next);
 
         bytes memory retract = abi.encodeCall(vault.transferOwnership, (address(0)));
-        assertEq(gov.delayFor(v, retract), 32 days);
+        assertEq(gov.delayFor(v, retract), 3 days);
         uint256 eta2 = _queue(v, retract);
         vm.warp(eta2 - 1 days);
         _queueLpBehindCommitment(eta2 + 10 days);
         vm.warp(eta2);
-        bytes memory refusal = abi.encodeWithSelector(VaultGovernor.PendingWithdrawals.selector, vault.pendingShares());
-        vm.prank(admin);
-        vm.expectRevert(refusal);
-        gov.execute(v, retract);
-
+        _execute(v, retract);
+        assertGt(vault.pendingShares(), 0, "executed with an LP queued");
+        assertEq(vault.pendingOwner(), address(0));
         vm.prank(next);
+        vm.expectRevert(ISharedCommitmentVault.NotPendingOwner.selector);
         vault.acceptOwnership();
-        assertEq(vault.owner(), next, "the nominee the admin tried to retract took the vault");
+        assertEq(vault.owner(), address(gov));
+    }
+
+    /// @notice Only a clean zero argument word is a retraction. A word with non-zero upper bits, or calldata too short to
+    ///         hold the argument, stays LONG_DELAY, and the vault's ABI decoder rejects both, so neither can nominate
+    ///         anyone after the short delay. Bytes after a zero word are ignored by the vault: still a retraction.
+    function test_nominationRetraction_onlyACleanZeroWord() public {
+        bytes4 sel = vault.transferOwnership.selector;
+        bytes memory dirty = bytes.concat(sel, bytes32(uint256(1) << 160));
+        bytes memory short = bytes.concat(sel, bytes31(0));
+        bytes memory padded = bytes.concat(sel, bytes32(0), bytes32(uint256(uint160(attacker))));
+        assertEq(gov.delayFor(v, dirty), 32 days);
+        assertEq(gov.delayFor(v, short), 32 days);
+        assertEq(gov.delayFor(v, padded), 3 days);
+
+        vm.startPrank(address(gov));
+        (bool ok,) = v.call(dirty);
+        assertFalse(ok, "dirty address word accepted");
+        (ok,) = v.call(short);
+        assertFalse(ok, "short calldata accepted");
+        (ok,) = v.call(padded);
+        assertTrue(ok);
+        vm.stopPrank();
+        assertEq(vault.pendingOwner(), address(0));
+    }
+
+    /// @notice A retraction must not open a path around the queue check for a real transfer: the transfer it would
+    ///         clear still needed LONG_DELAY and an empty queue, and queuing a retraction and a transfer together gives
+    ///         the transfer no shorter delay.
+    function test_nominationRetraction_doesNotShortenATransfer() public {
+        address next = makeAddr("next");
+        bytes memory nominate = abi.encodeCall(vault.transferOwnership, (next));
+        bytes memory retract = abi.encodeCall(vault.transferOwnership, (address(0)));
+        uint256 etaRetract = _queue(v, retract);
+        uint256 etaNominate = _queue(v, nominate);
+        assertEq(etaNominate - etaRetract, 29 days);
+        vm.warp(etaRetract);
+        _execute(v, retract);
+        bytes32 id = gov.operationId(v, nominate);
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(VaultGovernor.NotExecutable.selector, id, etaNominate));
+        gov.execute(v, nominate);
     }
 }
