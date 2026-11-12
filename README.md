@@ -115,8 +115,9 @@ forge test --match-contract VaultLensTest -vv                      # lens vs vau
 FOUNDRY_INVARIANT_RUNS=256 FOUNDRY_INVARIANT_DEPTH=128 forge test --match-contract VaultInvariants
 ```
 
-- **Optimizer.** The vault is compiled with `optimizer_runs = 2,000` (runtime 17,035 B, EIP-170 margin 7,541 B).
-  Everything else keeps 44,444,444. Test files that import the vault compile their whole import graph at 2,000 runs, so
+- **Optimizer.** At this step the vault was compiled with `optimizer_runs = 2,000` (runtime 17,035 B, EIP-170 margin
+  7,541 B). **Since Phase 1B-4.3 it is 200 runs** (`foundry.toml`; 22,440 B, margin 2,136 B at G01). Everything else
+  keeps 44,444,444. Test files that import the vault compile their whole import graph at the vault's setting, so
   production gas comes from `test/bench/`, not `test/gas/`.
 - **Lens.** `src/VaultLens.sol` serves the previews, the request status, `N_a`, `F_a`, `D_a`, deliverable shares and
   an allocation's effective floor. It has no state and no authority, and the vault never calls it. Call it as

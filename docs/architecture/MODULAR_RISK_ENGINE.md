@@ -499,6 +499,6 @@ Existing invariants (`PHASE1AH_REPORT.md` §4.1; `PHASE1B_THREATS_AND_PLAN.md` �
 |---|---|---|
 | D17 | Architecture A, B or C | **B** (§6) |
 | D18 | Unconfigured flow bucket: closed or unlimited | **Closed** (§7.1) |
-| D19 | Vault optimizer setting | Start 1B-2 at **2,000** for the vault. Re-measure after every commit. Keep at least 2,048 B of margin; drop to 200 if the margin falls below that. |
+| D19 | Vault optimizer setting | Start 1B-2 at **2,000** for the vault. Re-measure after every commit. Keep at least 2,048 B of margin; drop to 200 if the margin falls below that. **Applied in Phase 1B-4.3: the vault is built at 200 runs** (`PHASE1B4_3_REPORT.md`). |
 | D20 | Aggregate ring-buffer expiry | **Defer** (§7.3) |
 | D21 | Exposure cap L5 (`maxReservedBps`) | Adopt, owner-set, guardian may lower |
