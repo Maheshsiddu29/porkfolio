@@ -34,6 +34,19 @@ compilation_restrictions = [{ paths = "src/SharedCommitmentVault.sol", optimizer
 
 gas_reports = ["SharedCommitmentVault", "HookA_DynamicFee", "HookB_BoundedImpact", "PoolManager"]
 
+# Three test profiles (docs/security/G01_BASELINE.md §3). Each is selected with FOUNDRY_PROFILE; every one uses the
+# same compiler settings, so only the fuzzing effort differs.
+#   default  fast development suite:    fuzz 1,000 runs; invariants 64 runs x depth 64     (`forge test`)
+#   ci       CI suite (test/bench/security.sh, .github/workflows/security.yml):
+#                                        fuzz 10,000 runs; invariants 128 runs x depth 128
+#   deep     adversarial / release suite (test/deep.sh, never run by CI):
+#                                        fuzz 10,000 runs; invariants 1,000 runs x depth 256 (release checklist I-5),
+#                                        plus test/deep.sh's extra seeds, the coverage gate and the fork tests when an
+#                                        RPC is provided
+# The seed is fixed so that a result can be reproduced; test/deep.sh adds further seeds explicitly.
+# fail_on_revert = true in every profile: each handler catches the reverts it expects, so a revert reaching the
+# fuzzer is a broken handler call that would otherwise be dropped silently and make a campaign look busier than it is.
+
 [profile.default.fuzz]
 runs = 1000
 seed = "0x5eed"               # deterministic fuzzing
@@ -41,10 +54,25 @@ seed = "0x5eed"               # deterministic fuzzing
 [profile.default.invariant]
 runs = 64
 depth = 64
-fail_on_revert = false
+fail_on_revert = true
 
 [profile.ci.fuzz]
 runs = 10000
+seed = "0x5eed"
+
+[profile.ci.invariant]
+runs = 128
+depth = 128
+fail_on_revert = true
+
+[profile.deep.fuzz]
+runs = 10000
+seed = "0x5eed"
+
+[profile.deep.invariant]
+runs = 1000
+depth = 256
+fail_on_revert = true
 
 [fmt]
 line_length = 120

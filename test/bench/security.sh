@@ -10,7 +10,8 @@
 #      with the masked runtime hashes logged;
 #   3. the complete suite, whose VaultTestBase-derived tests (unit, integration, security, fuzz, invariants) run
 #      on those same production builds.
-# Uses FOUNDRY_PROFILE=ci (10,000 fuzz runs) unless FOUNDRY_PROFILE is already set. Writes nothing except forge's
+# Uses FOUNDRY_PROFILE=ci (10,000 fuzz runs; invariants 128 runs x depth 128) unless FOUNDRY_PROFILE is already set
+# (test/deep.sh sets it to deep). Writes nothing except forge's
 # own out/ and cache/ directories. Exit status is non-zero if any step fails.
 set -euo pipefail
 
