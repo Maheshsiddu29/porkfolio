@@ -55,7 +55,9 @@ collection" is the gain side of the trades.
 - **Accounting equations.**
 
 **Non-vacuity:**
-- `afterInvariant` fails any run of 48 or more calls that filled no trade.
+- `afterInvariant` fails any run with 8 or more honest trade attempts and no fill. (An earlier rule, "48 calls
+  and no fill", was too blunt: it failed on a legitimate dead state, an asset at its floor and the other at the
+  shared cap after a guardian tightening.)
 - `InventoryProtectionLivenessTest` scripts a sequence that must reach every branch: fills on both hooks and the
   malicious consumer, a refusal at the floor, a realized loss at a corrupted price, an instant payout, a finalization
   slice, a loosening refused while a late LP is queued and then executed, an adapter swap and a depeg.

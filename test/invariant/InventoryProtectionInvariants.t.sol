@@ -107,6 +107,7 @@ contract InventoryProtectionHandler is Test {
     uint256 public payoutsChecked;
     uint256 public slicesChecked;
     uint256 public calls;
+    uint256 public tradeAttempts;
     uint256 public realizedLoss; // Q3, asset1 raw units at the true price of each fill
     uint256 public realizedGain;
     uint256 public maxShortfallToRoomBps; // largest observed shortfall / room over checked payouts (with room > 0)
@@ -366,7 +367,10 @@ contract InventoryProtectionHandler is Test {
     function tradeHook(bool useA, bool zeroForOne, uint256 amountSeed, uint256 curatorIdx) external step {
         PoolKey memory key = useA ? keyA : keyB;
         Currency out = zeroForOne ? c1 : c0;
-        uint256 amountIn = bound(amountSeed, 1e15, 50_000 ether);
+        // At most 2,000 tokens: inside the shared inventory cap even after the guardian lowers kappa to 0.1%, so a
+        // refusal reflects the state (floor, cap, reference), not an oversized order.
+        uint256 amountIn = bound(amountSeed, 1e15, 2000 ether);
+        ++tradeAttempts;
         uint256 id = _allocate(curatorIdx, key, out, _net(out) / 4, 2);
         if (id == 0) return;
         (bool ok, uint256 got) = _swap(key, zeroForOne, amountIn, abi.encode(id));
@@ -728,8 +732,10 @@ contract InventoryProtectionInvariantsTest is VaultTestBase {
 
     /// @notice Non-vacuity, per run: once a run is long enough, trades have filled.
     function afterInvariant() external view {
+        // A run can legitimately reach a state where no direction can trade (an asset at its floor and the other at
+        // the shared cap after a guardian tightening). Eight honest attempts with no fill is treated as a dead handler.
         uint256 fills = handler.fillsA() + handler.fillsB() + handler.fillsMal();
-        if (handler.calls() >= 48) assertGt(fills, 0, "a long run filled nothing");
+        if (handler.tradeAttempts() >= 8) assertGt(fills, 0, "eight trade attempts filled nothing");
         console2.log("calls", handler.calls());
         console2.log("fills A / B / malicious", handler.fillsA(), handler.fillsB(), handler.fillsMal());
         console2.log("refused at floor", handler.refusedAtFloor());
