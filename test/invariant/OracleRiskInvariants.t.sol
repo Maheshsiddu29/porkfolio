@@ -331,6 +331,8 @@ contract OracleRiskInvariantsTest is VaultTestBase {
 
     /// @notice Evidence the adversary was active in this run (logged, not asserted: a short run may not reach a fill).
     function afterInvariant() external view {
+        console2.log("COV fills", handler.fills());
+        console2.log("COV refusedAtFloor", handler.refusedAtFloor());
         console2.log("fills", handler.fills());
         console2.log("drained raw units", handler.drained());
         console2.log("refused at the inventory floor", handler.refusedAtFloor());

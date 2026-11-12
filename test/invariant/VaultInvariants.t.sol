@@ -34,11 +34,14 @@ import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
 ///         hooks (HookA, HookB, a 1:1 test hook that can drain an asset to zero), time, releases, curator
 ///         cancellations, curator registration, deregistration, freeze, unfreeze, revocation and generation bumps,
 ///         owner and guardian rotation, ERC-6909 donations, multi-LP deposits, instant/queued redemptions (with
-///         inline queue processing), queue processing, request cancellations and claims. Each action may revert; the invariants must hold after every step, and each
+///         inline queue processing), full-balance redemptions queued behind a fresh commitment, queue processing,
+///         request cancellations and claims. Each action may revert; the invariants must hold after every step, and each
 ///         successful action is checked against the ACTUAL balance movements it caused.
 /// @dev How the checks work. The fuzzer calls handler functions in random order with random arguments. Each
 ///      action wraps its vault call in try/catch: a revert is a legitimate outcome (for example a swap below the
-///      floor), so the campaign runs with fail_on_revert = false. Properties that can only be judged at the moment
+///      floor) and is counted, not propagated. The few direct calls (guardian halt, owner resume, rotations, module
+///      replacement, risk-limit setting) must never revert, so the campaign runs with fail_on_revert = true: a revert
+///      that reaches the fuzzer is a handler bug, not a skipped step. Properties that can only be judged at the moment
 ///      of an action (did this deposit lower N_a / S? did this swap move claims below the floor?) are checked inside
 ///      the handler and recorded as sticky violation flags. The invariant functions then assert those flags are
 ///      still false, together with properties of the current state.
@@ -145,6 +148,8 @@ contract VaultHandler is Test {
     uint256 public donationsOk;
     uint256 public drainsOk;
     uint256 public zeroAssetStatesSeen;
+    uint256 public swapAttempts; // calls of `swap` that reached the router
+    uint256 public queueSetupsOk; // `queueBehindCommitment` calls whose commitment was made
 
     // Cumulative pricing (INV-P2, INV-P4). The ghosts replay every successful Hook A / Hook B swap and every
     // reconfiguration with their own decay arithmetic, independent of the hooks' storage.
@@ -281,6 +286,17 @@ contract VaultHandler is Test {
         return 0;
     }
 
+    /// @dev Any unreleased, unexpired allocation, searched from `seed`; 0 if none.
+    function _liveAny(uint256 seed) internal view returns (uint256) {
+        uint256 n = allocationIds.length;
+        for (uint256 k; k < n; ++k) {
+            uint256 id = allocationIds[(seed % n + k) % n];
+            ISharedCommitmentVault.Allocation memory a = vault.getAllocation(id);
+            if (!a.released && a.expiry > block.timestamp) return id;
+        }
+        return 0;
+    }
+
     /// @notice Hook owner changes a pool's pricing parameters (reference price kept at 1:1 so that the vault's 1:1
     ///         floors stay meaningful). The ghost first applies the decay elapsed under the old parameters and, for a
     ///         Hook B depth change, rescales the position by new depth / old depth, truncating toward zero.
@@ -393,12 +409,39 @@ contract VaultHandler is Test {
         return r.registered && r.restriction == ISharedCommitmentVault.CuratorRestriction.None;
     }
 
+    /// @notice A swap of up to 150,000 against one allocation. Three calls in four use an allocation that is still
+    ///         live, when there is one; the rest pick any allocation ever made, so released and expired ones keep
+    ///         being refused. Picking uniformly among all ids made most calls target a dead allocation: over 100
+    ///         single-run campaigns of depth 128, 32 runs had no successful swap at all.
     function swap(uint256 idSeed, uint256 amountIn) external {
         if (allocationIds.length == 0) return;
         uint256 id = allocationIds[idSeed % allocationIds.length];
+        if ((idSeed >> 128) % 4 != 0) {
+            uint256 live = _liveAny(idSeed);
+            if (live != 0) id = live;
+        }
+        swapAttempts++;
         ISharedCommitmentVault.Allocation memory a = vault.getAllocation(id);
         PoolKey memory key = a.consumer == address(keyA.hooks) ? keyA : a.consumer == address(keyB.hooks) ? keyB : keyE;
-        _swap(key, a.currencyOut == c1, bound(amountIn, 1e9, 150_000 ether), id);
+        // Hook B refuses a trade that takes its position past the cap, and `hookReconfigure` often leaves a small cap
+        // or a position already near it. Three Hook B calls in four are sized to half of the room left in their
+        // direction; the rest still draw up to 150,000 so the refusal stays covered.
+        uint256 maxIn = 150_000 ether;
+        if (a.consumer == address(keyB.hooks) && (amountIn >> 200) % 4 != 0) {
+            maxIn = _hookBRoom(a.currencyOut == c1) / 2;
+        }
+        if (maxIn < 1e9) maxIn = 1e9;
+        _swap(key, a.currencyOut == c1, bound(amountIn, 1e9, maxIn), id);
+    }
+
+    /// @dev Distance from Hook B's current position to its cap in the direction of a swap (zeroForOne raises the
+    ///      position by the output, oneForZero lowers it by the input), in raw units; 0 at or past the cap.
+    function _hookBRoom(bool zeroForOne) internal view returns (uint256) {
+        HookB_BoundedImpact h = HookB_BoundedImpact(address(keyB.hooks));
+        (,,,, uint96 cap) = h.poolConfig(keyB.toId());
+        int256 x = h.positionOf(keyB);
+        int256 room = zeroForOne ? int256(uint256(cap)) - x : int256(uint256(cap)) + x;
+        return room > 0 ? uint256(room) : 0;
     }
 
     /// @notice Sell every admissible unit of one asset through the 1:1 hook: reaches N_a == 0 whenever nothing
@@ -731,6 +774,23 @@ contract VaultHandler is Test {
             _checkBalancesFollowBacking(p);
             _checkMonotonic(p);
         } catch {}
+    }
+
+    /// @notice A curator that can allocate commits all admissible capacity of one asset (Hook A or Hook B, one day),
+    ///         then an LP redeems its whole balance with `queueRemainder`, so the part that cannot be paid instantly
+    ///         is queued behind the commitment. Without this action a withdrawal queued in only 25 of 100 single-run
+    ///         campaigns of depth 128, and a request was finalized or claimed in 9.
+    function queueBehindCommitment(uint256 lpSeed, uint256 seed) external {
+        Currency out = seed % 2 == 0 ? c0 : c1;
+        uint256 q = vault.admissibleCapacity(out);
+        if (q != 0) {
+            for (uint256 i; i < curators.length; ++i) {
+                if (!_canAllocate(curators[i])) continue;
+                if (_allocate(curators[i], (seed >> 1) % 2 == 0 ? keyA : keyB, out, q, 1 days) != 0) queueSetupsOk++;
+                break;
+            }
+        }
+        this.redeem(lpSeed, vault.sharesOf(lps[lpSeed % lps.length]), true);
     }
 
     function process(uint256 steps) external {
@@ -1493,7 +1553,10 @@ contract VaultInvariantsTest is VaultTestBase {
         handler.setLifecycle(cs, makeAddr("owner2"), makeAddr("guardian2"));
 
         handler.setPricing(hookOwner);
-        bytes4[] memory selectors = new bytes4[](42);
+        // Weights: value-moving actions (swaps, LP flows, queue processing, claims) are about a third of all calls.
+        // With every action at weight one or two, a depth-128 run reached about three swap calls, and a third of
+        // runs ended without a single successful swap (G01 baseline, docs/security/G01_BASELINE.md).
+        bytes4[] memory selectors = new bytes4[](54);
         selectors[0] = VaultHandler.allocate.selector;
         selectors[1] = VaultHandler.swap.selector;
         selectors[2] = VaultHandler.warp.selector;
@@ -1536,6 +1599,18 @@ contract VaultInvariantsTest is VaultTestBase {
         selectors[39] = VaultHandler.pricingSwap.selector;
         selectors[40] = VaultHandler.pricingSwap.selector; // weighted x2: most general swaps are too large for Hook B
         selectors[41] = VaultHandler.hookReconfigure.selector;
+        selectors[42] = VaultHandler.queueBehindCommitment.selector;
+        selectors[43] = VaultHandler.queueBehindCommitment.selector;
+        selectors[44] = VaultHandler.swap.selector; // swap weighted x4
+        selectors[45] = VaultHandler.swap.selector;
+        selectors[46] = VaultHandler.swap.selector;
+        selectors[47] = VaultHandler.pricingSwap.selector; // pricingSwap weighted x4
+        selectors[48] = VaultHandler.pricingSwap.selector;
+        selectors[49] = VaultHandler.allocate.selector; // allocation weighted x3
+        selectors[50] = VaultHandler.process.selector;
+        selectors[51] = VaultHandler.claim.selector;
+        selectors[52] = VaultHandler.deposit.selector;
+        selectors[53] = VaultHandler.ownerResume.selector; // so that a guardian halt does not freeze a direction for good
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -1875,7 +1950,6 @@ contract VaultInvariantsTest is VaultTestBase {
         assertFalse(handler.guardianLoosenedRisk(), "guardian loosened a risk limit");
     }
 
-    /// @dev Logged (not asserted) per run; only the final run's log is printed by forge.
     /// INV-C3: every signed activation that succeeded named the curator's generation at that moment.
     function invariant_signedActivationUsesCurrentGeneration() public view {
         assertFalse(handler.staleActivation());
@@ -1930,7 +2004,21 @@ contract VaultInvariantsTest is VaultTestBase {
         }
     }
 
+    /// @dev Logged, not asserted, after each run; forge prints only the last run's logs. The `COV` lines are read by
+    ///      test/invariant/coverage.py, which runs many single-run campaigns and fails if an operation succeeds in too
+    ///      few of them (a vacuous campaign). Per-run assertions would be flaky: an adversarial run can legitimately
+    ///      block every swap (halts, tightened floors, restricted curators).
     function afterInvariant() public view {
+        console2.log("COV swapsOk", handler.swapsOk());
+        console2.log("COV pricingSwapsOk", handler.pricingSwapsOk());
+        console2.log("COV allocationsOk", handler.allocationsOk() + handler.signedOk());
+        console2.log("COV signedOk", handler.signedOk());
+        console2.log("COV depositsOk", handler.depositsOk());
+        console2.log("COV instantOk", handler.instantOk());
+        console2.log("COV queuedOk", handler.queuedOk());
+        console2.log("COV finalizedOk", handler.finalizedOk());
+        console2.log("COV claimsOk", handler.claimsOk());
+        console2.log("COV releasesOk", handler.releasesOk() + handler.allocationCancelsOk());
         console2.log("signed ok/refused/stale:", handler.signedOk(), handler.signedRefusals(), handler.staleRefusals());
         console2.log(
             "invalidations/moduleInstalls/moduleDisables:",
@@ -1941,6 +2029,7 @@ contract VaultInvariantsTest is VaultTestBase {
         console2.log("moduleRefusals/invalidModuleRefusals:", handler.moduleRefusals(), handler.invalidModuleRefusals());
         console2.log("timed signed ok/refused:", handler.timedOk(), handler.timedRefusals());
         console2.log("alloc/swap/release:", handler.allocationsOk(), handler.swapsOk(), handler.releasesOk());
+        console2.log("swapAttempts/queueSetups:", handler.swapAttempts(), handler.queueSetupsOk());
         console2.log("deposit/instant/queued:", handler.depositsOk(), handler.instantOk(), handler.queuedOk());
         console2.log("finalize/claim/cancel:", handler.finalizedOk(), handler.claimsOk(), handler.cancelsOk());
         console2.log(
