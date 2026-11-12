@@ -4,7 +4,8 @@
 # Three suites, one compiler configuration:
 #   fast  `forge test`                       default profile: fuzz 1,000; invariants 64 x 64
 #   CI    `test/bench/security.sh`           ci profile:      fuzz 10,000; invariants 128 x 128; size gate;
-#                                                              production-build tests (what .github/workflows runs)
+#         + `test/invariant/coverage.py`                       production-build tests; activity gate
+#                                                              (what .github/workflows runs)
 #   deep  `test/deep.sh` (this script)       deep profile:    everything below
 #
 # Steps (exit status is non-zero if any gated step fails):

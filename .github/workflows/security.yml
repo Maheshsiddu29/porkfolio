@@ -1,5 +1,6 @@
 # Production-build security suite: formatting, sizes and gas on the production artifacts (test/bench/run.sh), then
-# the security tests and the complete suite on those artifacts (test/bench/security.sh). See test/bench/README.md.
+# the security tests and the complete suite on those artifacts (test/bench/security.sh), then the invariant activity
+# gate (test/invariant/coverage.py). See test/bench/README.md.
 #
 # It only builds and tests. It deploys nothing, broadcasts nothing, publishes nothing, pushes nothing, needs no
 # secrets and makes no RPC calls (ffi is off and no test forks a chain). The token is read-only and is not kept in
@@ -43,3 +44,9 @@ jobs:
       # exceeds EIP-170 or EIP-3860, or if any test fails. Running it locally reproduces this step exactly.
       - name: Size gate and production-build security suite (CI fuzz profile)
         run: test/bench/security.sh
+
+      # Non-vacuity gate: 64 single-run campaigns per invariant suite (about 90 s, reuses the build above). Fails if
+      # an operation (swap, queued withdrawal, claim, fill, loosening...) succeeds in too few runs, or if a counter
+      # that must stay zero is not. Reproducible: profile and fuzzer settings are pinned in the script.
+      - name: Invariant campaign activity gate
+        run: python3 test/invariant/coverage.py
