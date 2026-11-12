@@ -72,13 +72,13 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 | P-1 | Per-swap behaviour characterised (before Phase 1B-3) | Done | `TRADE_SPLITTING.md` §1–6 (numbers kept); the tests now assert the cumulative behaviour |
 | P-2 | Cumulative pricing implemented with split-invariance fuzz, aggregate cap, round trip, decay and stale-price tests | Done (local) | `PHASE1B3_REPORT.md`; `CumulativePricing.t.sol` (unit and integration), `PricingAdversarial.t.sol`, `TradeSplitting.t.sol`, INV-P2/INV-P4, Python model `simulations/pricing/` |
 | P-5 | Owner decision on Hook B reversals under D14 floors (refused until the position decays) and on decay windows | Not started | `PHASE1B3_REPORT.md` §8 |
-| P-6 | Loosening delay for hook pricing parameters (`hookOwner` is trusted; no timelock) | Not started | `PHASE1B3_PLAN.md` D-P3 (deferred). Hook parameters cannot widen the vault's boundary (the vault enforces it on every fill), but they set the economics inside it; a hook-owner timelock is still open. |
+| P-6 | Loosening delay for hook pricing parameters | Done (local) | 1B-4.4: production hooks are deployed with `hookOwner = VaultGovernor`; every hook call waits DELAY and the guardian can cancel it (`test_hookParameters_waitDelay`, `GOVERNANCE_SECURITY.md` G2). Immediate tightening stays with the vault's guardian, whose edge and kappa changes reach both hooks at once. |
 | P-3 | Vault floors and the directional consistency check (D14) | Done | `PricePolicy.t.sol`, `invariant_directionalFloorsConsistent` |
 | P-4 | Reference-price update procedure and staleness monitoring (off-chain) | Designed, not implemented | Replaced on-chain by the market-risk adapter (`ORACLE_RISK_BOUNDARY_SPEC.md`); monitoring of feed ages and the sequencer still needed off-chain |
 | P-7 | Vault-enforced oracle risk boundary (dynamic floor, uncertainty breaker, price-free inventory floor) | Done (local, not released) | `PHASE1B4_3_REPORT.md`; `INVENTORY_FLOOR_GUARANTEE.md`; `test/security/OracleRiskBoundary.t.sol`, `test/invariant/OracleRiskInvariants.t.sol`; vault at 200 runs |
 | P-8 | Market-risk adapter for the launch pair, read-only, verified on a Unichain fork | Prototype done (local) | `src/oracle/PriceRiskAdapter.sol`, `test/oracle/`, `test/fork/UnichainOracles.t.sol`; `ORACLE_VERIFICATION_UNICHAIN.md` |
 | P-9 | Capital-at-risk parameter `kappa` and hooks' caps aligned (≤ `kappa`) | Alignment enforced on-chain (hooks clamp to the vault's `kappa`); value not chosen | `KAPPA_SENSITIVITY.md`: 1–2% proposed for a first mainnet launch; decision R-4 |
-| P-10 | Fresh signed price source (credentialed on Unichain) | Evaluated, not adopted | `FRESH_PRICE_EVALUATION.md` §6: a relayer can push RedStone packages permissionlessly; needs credentials; decision R-5 |
+| P-10 | Fresh signed price source (credentialed on Unichain) | Implemented as an option, not adopted | 1B-4.4: optional fresh tier in `PriceRiskAdapter`. A relayer narrows the band while it pushes; its outage widens the band instead of halting (`test/integration/RelayerOutage.t.sol`, `ORACLE_RELAYER.md`). Whether to run one is decision R-5. |
 | P-11 | Timelock owner for every risk-increasing change | Done (local) | `src/governance/VaultGovernor.sol`; `test/governance/VaultGovernor.t.sol`; a deployment must verify `vault.owner() == governor` |
 | P-12 | Hooks priced from the vault's adapter and inventory (shared core) | Done (local) | `BaseCompatibleHook` shared-core mode; `test/integration/SharedCoreHooks.t.sol`; fork gas `test/fork/UnichainIntegratedSwap.t.sol` |
 
@@ -105,8 +105,8 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 
 | ID | Item | Status | Evidence or gap |
 |---|---|---|---|
-| X-1 | Deterministic deployment script; hook addresses mined for exact permission bits (CREATE2) | Not started | Tests use `deployCodeTo`, not mining |
-| X-2 | Post-deployment verification script: on-chain bytecode equals the local build; every parameter (floors, ceilings, caps, buffers, roles, module) read back and compared with the reviewed configuration | Not started | The manual procedure for the module is written (`MODULE_INSTALLATION_CHECKLIST.md`); no script exists. |
+| X-1 | Deterministic deployment script; hook addresses mined for exact permission bits (CREATE2) | Done (local, never broadcast) | `script/DeploySystem.s.sol` (CREATE2 factory, mined hook salts, production artifacts), `ExecuteQueued.s.sol`, `Rehearse.s.sol`; run end to end on a local chain in `test/script/DeployScripts.t.sol`. Sepolia only, with test parameters. |
+| X-2 | Post-deployment verification script: on-chain bytecode equals the local build; every parameter read back and compared with the reviewed configuration | Done (local, never broadcast) | `script/VerifyDeployment.s.sol` gates 1–11, including `vault.owner() == governor`, `hookOwner() == governor` and masked runtime-code equality with the production artifacts (`ProductionArtifacts.requireProduction`). |
 | X-3 | Source verified on the Unichain explorer for every contract | Not started | — |
 | X-4 | No private key in the repository, environment files, scripts or command history; deployment through a hardware wallet or multisig | Not started | — |
 
@@ -115,7 +115,7 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 | ID | Item | Status | Evidence or gap |
 |---|---|---|---|
 | G-1 | Owner is a multisig (threshold and signers documented) | Not started | D3: required before real value |
-| G-2 | Loosening actions (floor down, ceiling up, cap up, unfreeze, register, module change) go through a timelock; tightening actions do not | Not started | — |
+| G-2 | Loosening actions (floor down, ceiling up, cap up, unfreeze, register, module change) go through a timelock; tightening actions do not | Done (local) | `VaultGovernor` owns the vault and the hooks. Tightening goes through the guardian, immediately. A LONG_DELAY change (floor, ownership) also waits for an empty withdrawal queue (`GOVERNANCE_SECURITY.md`). Mainnet values still need R-3. |
 | G-3 | Guardian is a separate key or multisig with documented response times; runbooks for curator compromise, hook compromise, module compromise, stale price | Partial | Curator runbook drafted (`CURATOR_SECURITY_MODEL.md` §4); module-compromise and exhausted-generation runbooks in `AUTH_SECURITY_RELEASE_NOTES.md` §3–§4 |
 | G-4 | Emergency drill on testnet: pause and halt within one block of the decision; LP exits keep working | Not started | — |
 | G-5 | Monitoring and alerts: floor proximity, flow-bucket saturation, queue length, `Q_a / N_a`, guardian actions | Not started | Off-chain |
