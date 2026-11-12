@@ -107,7 +107,7 @@ contract InventoryProtectionHandler is Test {
     uint256 public payoutsChecked;
     uint256 public slicesChecked;
     uint256 public calls;
-    uint256 public tradeAttempts;
+    uint256 public tradeAttempts; // `tradeHook` calls made while the active adapter reported the true price
     uint256 public realizedLoss; // Q3, asset1 raw units at the true price of each fill
     uint256 public realizedGain;
     uint256 public maxShortfallToRoomBps; // largest observed shortfall / room over checked payouts (with room > 0)
@@ -115,6 +115,16 @@ contract InventoryProtectionHandler is Test {
     uint256 public minValue; // Q4: lowest reserve value per share seen, as a fraction of the start (1e18 = 100%)
 
     bool internal loosened; // set by `governedLoosen` when it executes
+
+    // ---- adapter faults
+    /// @notice True while the active adapter is in a fault set by `adapterFault`; any price update or an adapter
+    ///         replacement clears it.
+    bool public faulted;
+    /// @notice True while the active adapter reports the true price (set by `_setActive`, cleared by a fault).
+    bool public honest = true;
+    uint256 public faults; // `adapterFault` calls
+    uint256 public filledUnderFault; // fills that succeeded while the active adapter was faulted: must stay 0
+    uint256 public refusedUnderFault; // trade or drain attempts refused while faulted (shows the check is reached)
 
     constructor(
         SharedCommitmentVault vault_,
@@ -282,8 +292,31 @@ contract InventoryProtectionHandler is Test {
 
     // =================================================================== prices
 
+    /// @dev Sets the active adapter's reading and clears any fault: a price update models the source recovering.
     function _setActive(uint256 priceX96, uint256 u) internal {
+        adapters[active].setBroken(false);
+        adapters[active].setShortReturn(false);
         adapters[active].set(priceX96, u, type(uint256).max);
+        faulted = false;
+        honest = priceX96 == truePriceX96;
+    }
+
+    /// @notice The active adapter fails in one of five ways: it reverts (sources unavailable), returns one word instead
+    ///         of a `Reading`, reports a zero price, reports a reading whose `validUntil` has passed, or reports an
+    ///         uncertainty one pip above `maxUncertaintyPips`. Each must make every fill revert while LP deposits,
+    ///         withdrawals, queue processing and claims carry on unchanged (`invariant_noFillUnderAdapterFault`,
+    ///         `invariant_lpPathsIndependentOfAdapter`).
+    function adapterFault(uint256 mode) external step {
+        MockRiskAdapter a = adapters[active];
+        mode %= 5;
+        if (mode == 0) a.setBroken(true);
+        else if (mode == 1) a.setShortReturn(true);
+        else if (mode == 2) a.set(0, 1000, type(uint256).max);
+        else if (mode == 3) a.set(truePriceX96, 1000, block.timestamp - 1);
+        else a.set(truePriceX96, vault.maxUncertaintyPips() + 1, type(uint256).max);
+        faulted = true;
+        honest = false;
+        ++faults;
     }
 
     /// @notice Honest move of the true price by -20% .. +25%; the adapter follows with a small band.
@@ -370,7 +403,7 @@ contract InventoryProtectionHandler is Test {
         // At most 2,000 tokens: inside the shared inventory cap even after the guardian lowers kappa to 0.1%, so a
         // refusal reflects the state (floor, cap, reference), not an oversized order.
         uint256 amountIn = bound(amountSeed, 1e15, 2000 ether);
-        ++tradeAttempts;
+        if (honest) ++tradeAttempts;
         uint256 id = _allocate(curatorIdx, key, out, _net(out) / 4, 2);
         if (id == 0) return;
         (bool ok, uint256 got) = _swap(key, zeroForOne, amountIn, abi.encode(id));
@@ -378,6 +411,9 @@ contract InventoryProtectionHandler is Test {
             if (useA) ++fillsA;
             else ++fillsB;
             _recordFill(zeroForOne, amountIn, got);
+            if (faulted) ++filledUnderFault;
+        } else if (faulted) {
+            ++refusedUnderFault;
         }
         _cancel(curatorIdx, id);
     }
@@ -400,6 +436,7 @@ contract InventoryProtectionHandler is Test {
         try lens.effectiveFloorX96(vault, id) returns (uint256 f) {
             floor_ = f;
         } catch {
+            if (faulted) ++refusedUnderFault;
             return _cancel(curatorIdx, id);
         }
         uint256 amountIn = FullMath.mulDivRoundingUp(out, floor_, Q96);
@@ -409,6 +446,9 @@ contract InventoryProtectionHandler is Test {
         if (ok) {
             ++fillsMal;
             _recordFill(sellAsset1, amountIn, out);
+            if (faulted) ++filledUnderFault;
+        } else if (faulted) {
+            ++refusedUnderFault;
         } else if (out > room) {
             ++refusedAtFloor;
         }
@@ -595,6 +635,8 @@ contract InventoryProtectionHandler is Test {
     /// @notice Governed adapter replacement (DELAY): the other adapter, reporting the true price, is installed.
     function replaceAdapter() external step {
         uint256 next = 1 - active;
+        adapters[next].setBroken(false);
+        adapters[next].setShortReturn(false);
         adapters[next].set(truePriceX96, 1000, type(uint256).max);
         bytes memory data = abi.encodeCall(vault.setRiskAdapter, (IMarketRiskAdapter(address(adapters[next]))));
         vm.prank(govAdmin);
@@ -603,6 +645,8 @@ contract InventoryProtectionHandler is Test {
         vm.prank(govAdmin);
         try gov.execute(address(vault), data) {
             active = next;
+            faulted = false;
+            honest = true;
             ++adapterSwaps;
         } catch {
             vm.prank(govAdmin);
@@ -624,6 +668,7 @@ contract InventoryProtectionInvariantsTest is VaultTestBase {
     address internal guardian = makeAddr("guardian");
     address internal curator2 = makeAddr("curator2");
     address internal govAdmin = makeAddr("govAdmin");
+    MockRiskAdapter[2] internal adapters;
 
     function setUp() public override {
         super.setUp();
@@ -631,7 +676,7 @@ contract InventoryProtectionInvariantsTest is VaultTestBase {
         deployCodeTo("MaliciousConsumerHook.sol:MaliciousConsumerHook", abi.encode(manager, vault), m);
         PoolKey memory keyM = PoolKey(c0, c1, 3000, 60, IHooks(m));
         manager.initialize(keyM, SQRT_PRICE_1_1);
-        MockRiskAdapter[2] memory adapters = [
+        adapters = [
             new MockRiskAdapter(address(token0), address(token1), 18, 18, keccak256("a")),
             new MockRiskAdapter(address(token0), address(token1), 18, 18, keccak256("b"))
         ];
@@ -689,7 +734,7 @@ contract InventoryProtectionInvariantsTest is VaultTestBase {
             guardian
         );
         targetContract(address(handler));
-        bytes4[] memory selectors = new bytes4[](15);
+        bytes4[] memory selectors = new bytes4[](16);
         selectors[0] = handler.priceJump.selector;
         selectors[1] = handler.depeg.selector;
         selectors[2] = handler.corruptReference.selector;
@@ -705,6 +750,7 @@ contract InventoryProtectionInvariantsTest is VaultTestBase {
         selectors[12] = handler.governedLoosen.selector;
         selectors[13] = handler.replaceAdapter.selector;
         selectors[14] = handler.warp.selector;
+        selectors[15] = handler.adapterFault.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
@@ -730,17 +776,98 @@ contract InventoryProtectionInvariantsTest is VaultTestBase {
         _assertAccountingConsistent();
     }
 
+    /// @notice No fill succeeds while the active adapter reverts, returns malformed data, or reports a zero price, an
+    ///         expired reading or an uncertainty above the vault's bound.
+    function invariant_noFillUnderAdapterFault() public view {
+        assertEq(handler.filledUnderFault(), 0);
+    }
+
+    /// @notice LP paths do not read the adapter. In the current state, the same sequence (each LP redeems half its
+    ///         shares queueing the rest, the queue is processed, the first claimable request is claimed, a new LP
+    ///         deposits) is run twice on rolled-back copies: once with both adapters answering the true price and once
+    ///         with both reverting. Every call's success flag and return data, and the resulting accounting, must be
+    ///         identical. A difference means an LP path became dependent on the oracle, which would let an oracle
+    ///         outage or a hostile adapter block exits.
+    function invariant_lpPathsIndependentOfAdapter() public {
+        assertEq(_lpProbe(false), _lpProbe(true), "an LP path depends on the adapter");
+    }
+
+    /// @dev Runs the LP sequence on a snapshot that is rolled back afterwards and hashes every outcome.
+    function _lpProbe(bool fault) internal returns (bytes32 h) {
+        uint256 snap = vm.snapshotState();
+        for (uint256 i; i < 2; ++i) {
+            adapters[i].setShortReturn(false);
+            adapters[i].setBroken(fault);
+            adapters[i].set(handler.truePriceX96(), 1000, type(uint256).max);
+        }
+        for (uint256 k; k < 3; ++k) {
+            address lp = makeAddr(string.concat("pLp", vm.toString(k)));
+            uint256 bal = vault.sharesOf(lp);
+            if (bal == 0) continue;
+            vm.prank(lp);
+            (bool ok, bytes memory ret) =
+                address(vault).call(abi.encodeCall(vault.redeem, (bal / 2 + 1, 0, 0, lp, true)));
+            h = keccak256(abi.encode(h, ok, ret));
+        }
+        (bool okQ, bytes memory retQ) = address(vault).call(abi.encodeCall(vault.processQueue, (16)));
+        h = keccak256(abi.encode(h, okQ, retQ));
+        uint256 end = vault.nextRequestId();
+        for (uint256 rid = 1; rid < end; ++rid) {
+            ISharedCommitmentVault.WithdrawalRequest memory r = vault.getRequest(rid);
+            if (r.claimable0 == 0 && r.claimable1 == 0) continue;
+            vm.prank(r.lp);
+            (bool okC, bytes memory retC) = address(vault).call(abi.encodeCall(vault.claim, (rid)));
+            h = keccak256(abi.encode(h, okC, retC));
+            break;
+        }
+        address probe = makeAddr("adapterProbe");
+        uint256 shares = vault.totalShares() / 100 + 1;
+        (uint256 p0, uint256 p1) = lens.previewDeposit(vault, shares);
+        _fundLp(probe, p0, p1);
+        vm.prank(probe);
+        (bool okD, bytes memory retD) = address(vault).call(abi.encodeCall(vault.deposit, (shares, p0, p1, probe)));
+        h = keccak256(
+            abi.encode(
+                h,
+                okD,
+                retD,
+                vault.totalShares(),
+                vault.pendingShares(),
+                vault.backing(c0),
+                vault.backing(c1),
+                vault.claimableAssets(c0),
+                vault.claimableAssets(c1)
+            )
+        );
+        vm.revertToStateAndDelete(snap);
+    }
+
     /// @notice Non-vacuity, per run: once a run is long enough, trades have filled.
     function afterInvariant() external view {
         // A run can legitimately reach a state where no direction can trade (an asset at its floor and the other at
         // the shared cap after a guardian tightening). Eight honest attempts with no fill is treated as a dead handler.
+        // Only attempts made while the adapter reports the true price count: under a corrupted reference (for example
+        // a price near zero) the hooks quote at that price and every trade can be refused, and under an adapter fault
+        // every trade must be refused. The G01 baseline found the previous count (all attempts) failing for other
+        // seeds: one `corruptReference` followed by eight trades is enough.
         uint256 fills = handler.fillsA() + handler.fillsB() + handler.fillsMal();
         if (handler.tradeAttempts() >= 8) assertGt(fills, 0, "eight trade attempts filled nothing");
+        // Read by test/invariant/coverage.py (see VaultInvariantsTest.afterInvariant).
+        console2.log("COV fillsA", handler.fillsA());
+        console2.log("COV fillsB", handler.fillsB());
+        console2.log("COV fillsMal", handler.fillsMal());
+        console2.log("COV refusedAtFloor", handler.refusedAtFloor());
+        console2.log("COV loosenings", handler.loosenings());
+        console2.log("COV looseningsBlocked", handler.looseningsBlocked());
+        console2.log("COV payoutsChecked", handler.payoutsChecked());
+        console2.log("COV slicesChecked", handler.slicesChecked());
+        console2.log("COV refusedUnderFault", handler.refusedUnderFault());
         console2.log("calls", handler.calls());
         console2.log("fills A / B / malicious", handler.fillsA(), handler.fillsB(), handler.fillsMal());
         console2.log("refused at floor", handler.refusedAtFloor());
         console2.log("loosenings executed / blocked by queue", handler.loosenings(), handler.looseningsBlocked());
         console2.log("adapter swaps / depegs", handler.adapterSwaps(), handler.depegs());
+        console2.log("adapter faults / refused under fault", handler.faults(), handler.refusedUnderFault());
         console2.log("payouts / slices checked", handler.payoutsChecked(), handler.slicesChecked());
         console2.log("Q3 realized loss / gain (asset1 raw)", handler.realizedLoss(), handler.realizedGain());
         console2.log("Q4 min value per share, 1e18 = start", handler.minValue());
@@ -774,6 +901,15 @@ contract InventoryProtectionLivenessTest is InventoryProtectionInvariantsTest {
         handler.depeg(true, 10);
         handler.tradeHook(true, false, 5000 ether, 0); // honest arbitrage after the depeg
         handler.guardianTighten(0, 0);
+        for (uint256 mode; mode < 5; ++mode) {
+            handler.adapterFault(mode);
+            handler.tradeHook(true, true, 100 ether, 0);
+            handler.drain(true, 1e18, false, 1, false);
+        }
+        assertEq(handler.refusedUnderFault(), 10, "every fault refused both a hook trade and a drain");
+        invariant_lpPathsIndependentOfAdapter();
+        handler.priceJump(1000); // recovers
+        handler.tradeHook(true, true, 100 ether, 0);
 
         assertGt(handler.fillsA(), 0, "hook A filled");
         assertGt(handler.fillsB(), 0, "hook B filled");
@@ -789,5 +925,26 @@ contract InventoryProtectionLivenessTest is InventoryProtectionInvariantsTest {
         assertEq(handler.q1Violations(), 0);
         assertEq(handler.q2Violations(), 0);
         assertEq(handler.requestViolations(), 0);
+        assertEq(handler.filledUnderFault(), 0);
+    }
+
+    /// @notice Why the per-run non-vacuity rule counts only trades made under an honest reference: this sequence (the
+    ///         counterexample the fuzzer found against the earlier rule, with its largest arguments shortened) corrupts the reference to a price near zero
+    ///         (107,250 / 2^96) and then makes eight hook trades. All eight are refused, legitimately: the hooks quote at
+    ///         the corrupted price and the vault's inventory floor or zero-output checks refuse every one. Counted as
+    ///         honest attempts they would have failed the run; they are not counted, and no fill happens.
+    function test_handler_corruptReferenceCanBlockEveryTrade() public {
+        handler.corruptReference(107_250, 8710);
+        handler.tradeHook(false, false, 2_779_027_554_591_282_533_412_073_667, 433_273_712_978_899_021);
+        handler.tradeHook(false, true, 26_787_534_065_648_167, 92_968_073_097_002_907);
+        handler.tradeHook(true, true, 3150, 41);
+        handler.tradeHook(true, false, 1_040_969_358_678_852_632, 96);
+        handler.tradeHook(false, true, 5, 26_959_946_667_150_639);
+        handler.tradeHook(false, true, 11_276_080_788_923_919, 3_461_367_875_332_493);
+        handler.tradeHook(false, false, 2_069_849_032_019_506_429, 1);
+        handler.tradeHook(false, false, 8780, 172_800);
+        assertEq(handler.fillsA() + handler.fillsB(), 0, "no trade fills at the corrupted reference");
+        assertEq(handler.tradeAttempts(), 0, "attempts under a corrupted reference are not counted");
+        assertEq(handler.q1Violations(), 0);
     }
 }

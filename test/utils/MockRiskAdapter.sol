@@ -13,6 +13,7 @@ contract MockRiskAdapter is IMarketRiskAdapter {
     uint8 internal immutable _d1;
     bytes32 public configVersion;
     bool public broken;
+    bool public shortReturn;
 
     constructor(address c0, address c1, uint8 d0, uint8 d1, bytes32 version) {
         (_c0, _c1, _d0, _d1, configVersion) = (c0, c1, d0, d1, version);
@@ -30,8 +31,20 @@ contract MockRiskAdapter is IMarketRiskAdapter {
         broken = b;
     }
 
+    /// @notice When true, `currentReference` returns one 32-byte word instead of the four-word `Reading`, as a
+    ///         malicious or mis-built adapter could. ABI decoding in the caller must then revert.
+    function setShortReturn(bool b) external {
+        shortReturn = b;
+    }
+
     function currentReference() external view returns (Reading memory) {
         require(!broken, "sources unavailable");
+        if (shortReturn) {
+            assembly ("memory-safe") {
+                mstore(0, 1)
+                return(0, 32)
+            }
+        }
         return _r;
     }
 
