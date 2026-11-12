@@ -436,8 +436,11 @@ contract InventoryProtectionHandler is Test {
         try lens.effectiveFloorX96(vault, id) returns (uint256 f) {
             floor_ = f;
         } catch {
-            if (faulted) ++refusedUnderFault;
-            return _cancel(curatorIdx, id);
+            if (!faulted) return _cancel(curatorIdx, id);
+            // The lens cannot price a fill under a fault. The malicious consumer still tries, paying twice the true
+            // price, so that the vault's own reading check is the only thing between it and a fill. (Hook trades are
+            // also refused by the hooks' own reading checks, so they alone cannot show the vault's check works.)
+            floor_ = 2 * (sellAsset1 ? FullMath.mulDiv(Q96, Q96, truePriceX96) : truePriceX96);
         }
         uint256 amountIn = FullMath.mulDivRoundingUp(out, floor_, Q96);
         if (amountIn == 0 || amountIn > type(uint120).max) return _cancel(curatorIdx, id);
