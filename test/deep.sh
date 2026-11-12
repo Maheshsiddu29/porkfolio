@@ -19,8 +19,9 @@
 #   7. Slither, when installed: printed for review, not gated (every finding is triaged by hand).
 #
 # Deploys nothing, broadcasts nothing, signs nothing. Writes only forge's out/ and cache/ directories.
-# A failing invariant sequence is persisted by forge in cache/invariant/failures and replayed first on the next run;
-# delete that directory only after the failure has been understood.
+# Forge persists a failing invariant or fuzz sequence under cache/ and replays it first on the next run, but the forced
+# rebuild in step 2 deletes cache/, so a counterexample survives this script only as the log of the run that found it.
+# Turn one worth keeping into a test.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"

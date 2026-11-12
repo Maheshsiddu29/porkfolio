@@ -8,8 +8,9 @@ runs in which that operation never succeeded, and fails if a fraction exceeds th
 
 The gates were set in the G01 baseline (docs/security/G01_BASELINE.md, section 4): each is at least four standard
 deviations (binomial, 64 seeds) above the fraction observed when it was set, which is noted next to it. The seed list
-is fixed, so a given commit always gives the same result; a gate failure after a change means the change made a
-campaign less active, not bad luck.
+is fixed. Two runs of the same handler code gave close but not identical counts (191 and 188 successful vault swaps
+over 64 runs), so the gates keep that margin; a gate failure after a change most likely means the change made a
+campaign less active.
 
 Usage (from the repository root; standard library only):
     python3 test/invariant/coverage.py                # 64 seeds, depth 128
