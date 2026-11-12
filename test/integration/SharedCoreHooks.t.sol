@@ -97,6 +97,24 @@ contract SharedCoreHooksTest is VaultTestBase {
 
     // ------------------------------------------------------------------ pricing
 
+    /// @notice `coreInputs` returns exactly what the separate getters return (the hooks read it in one call), and in
+    ///         static mode only the zero adapter, so a hook never prices static pools from stale core inputs.
+    function test_coreInputs_matchGetters() public {
+        _depositShares(makeAddr("x"), 1e21);
+        (IMarketRiskAdapter a, uint256 e, uint256 k1, uint256 t1, uint256 n1, uint256 s) = vault.coreInputs();
+        assertEq(address(a), address(vault.riskAdapter()));
+        assertEq(e, vault.riskEdgePips());
+        assertEq(k1, vault.inventoryTolerancePips(1));
+        assertEq(t1, vault.inventoryTargetPerShare(1));
+        assertEq(n1, vault.backing(c1) - vault.claimableAssets(c1));
+        assertEq(s, vault.totalShares());
+        vm.prank(owner);
+        vault.setRiskAdapter(IMarketRiskAdapter(address(0)));
+        (a, e, k1, t1, n1, s) = vault.coreInputs();
+        assertEq(address(a), address(0));
+        assertEq(e + k1 + t1 + n1 + s, 0);
+    }
+
     /// @notice Every fill of either hook, in either direction, is priced beyond the reference band widened by the
     ///         vault edge (output below input * (1 - u - e) at P = 1), and the vault accepts it.
     function test_bothHooks_fillOutsideBand() public {

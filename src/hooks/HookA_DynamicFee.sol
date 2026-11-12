@@ -175,7 +175,7 @@ contract HookA_DynamicFee is BaseCompatibleHook {
     /// @param amountIn Raw input amount.
     /// @return amountOut Raw output amount.
     function quote(PoolKey calldata key, bool zeroForOne, uint256 amountIn) external view returns (uint256 amountOut) {
-        (, amountOut,) = _quoteAny(key.toId(), key.currency1, zeroForOne, amountIn);
+        (, amountOut,) = _quoteAny(key.toId(), zeroForOne, amountIn);
     }
 
     /// @dev out = (amountIn - fee) at the reference price, rounded down. `newState` is the new level.

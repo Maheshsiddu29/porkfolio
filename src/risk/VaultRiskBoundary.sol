@@ -54,6 +54,25 @@ library VaultRiskBoundary {
         if (uncertainty > maxUncertainty) revert UncertaintyTooHigh(uncertainty, maxUncertainty);
     }
 
+    /// @notice The directional floor for one direction only: `dynamicFloors(...)` floor0 when the vault sells asset0,
+    ///         floor1 when it sells asset1, computed with the same steps and the same rounding.
+    /// @dev A fill pays out one asset, so the vault needs one floor. Skipping the other saves its 512-bit division
+    ///      (`ceil(2^192 / P)` is only needed when selling asset1). `test/risk/VaultRiskBoundary.t.sol` checks equality
+    ///      with `dynamicFloors` for random inputs.
+    /// @param priceX96 Reference mid, Q64.96. Non-zero.
+    /// @param uncertainty Reference uncertainty, pips.
+    /// @param edge Vault edge beyond the band, pips.
+    /// @param sellAsset1 True when the vault pays out asset1.
+    /// @return Minimum raw input per raw output, Q64.96.
+    function dynamicFloor(uint256 priceX96, uint256 uncertainty, uint256 edge, bool sellAsset1)
+        internal
+        pure
+        returns (uint256)
+    {
+        uint256 p = sellAsset1 ? FullMath.mulDivRoundingUp(FixedPoint96.Q96, FixedPoint96.Q96, priceX96) : priceX96;
+        return FullMath.mulDivRoundingUp(p, PIPS + uncertainty + edge, PIPS);
+    }
+
     /// @notice Directional floors outside the reference band.
     /// @dev See rule 2. Each step rounds up, so the floors are never below the exact band. The vault checks a fill as
     ///      `amountIn >= ceil(amountOut * floor / 2^96)` with the floor for the asset it pays out. Overflow: `P < 2^160`

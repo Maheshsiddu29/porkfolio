@@ -61,7 +61,10 @@ contract UnichainIntegratedSwapForkTest is Test {
     function setUp() public {
         string memory rpc = vm.envOr("UNICHAIN_RPC_URL", string(""));
         if (bytes(rpc).length == 0) return;
-        vm.createSelectFork(rpc);
+        // UNICHAIN_FORK_BLOCK pins the fork so that gas measured before and after a change is comparable.
+        uint256 forkBlock = vm.envOr("UNICHAIN_FORK_BLOCK", uint256(0));
+        if (forkBlock == 0) vm.createSelectFork(rpc);
+        else vm.createSelectFork(rpc, forkBlock);
         live = true;
         manager = IPoolManager(POOL_MANAGER);
         Currency c0 = Currency.wrap(USDC);

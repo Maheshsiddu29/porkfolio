@@ -108,8 +108,9 @@ import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
 /// claims, request cancellation, `release` and `cancelAllocation` never read them. The limits bound how much and how
 /// fast the reserve can be sold; they say nothing about the price received, which only the floors bound.
 ///
-/// Read-only helpers. This contract serves its stored records (public getters, `getAllocation`, `getRequest`) and
-/// the admission limit `admissibleCapacity`. Previews, request status, N_a, F_a, D_a, deliverable shares and an
+/// Read-only helpers. This contract serves its stored records (public getters, `getAllocation`, `getRequest`), the
+/// admission limit `admissibleCapacity`, and `coreInputs`, the values a hook prices from in shared-core mode in one
+/// call. Previews, request status, N_a, F_a, D_a, deliverable shares and an
 /// allocation's effective floor are computed by `VaultLens`, a separate stateless contract that reads the getters
 /// declared in `IVaultState`. Nothing in this contract calls the lens; every check here uses its own internal copy
 /// of those formulas.
@@ -1326,6 +1327,32 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     // Views. Derived values and previews are in VaultLens (see the contract documentation).
     // ==================================================================
 
+    /// @inheritdoc IVaultState
+    function coreInputs()
+        external
+        view
+        returns (
+            IMarketRiskAdapter adapter,
+            uint256 edgePips,
+            uint256 tolerance1Pips,
+            uint256 target1PerShare,
+            uint256 net1,
+            uint256 shares
+        )
+    {
+        adapter = riskAdapter;
+        if (address(adapter) == address(0)) return (adapter, 0, 0, 0, 0, 0);
+        return
+            (
+                adapter,
+                riskEdgePips,
+                inventoryTolerancePips[1],
+                inventoryTargetPerShare[1],
+                _netAssets(asset1),
+                totalShares
+            );
+    }
+
     /// @notice Stored state of an allocation. Returns an all-zero struct for an unknown id.
     /// @param allocationId Allocation to read.
     /// @return The allocation record.
@@ -1550,8 +1577,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         IMarketRiskAdapter adapter = riskAdapter;
         if (address(adapter) != address(0)) {
             IMarketRiskAdapter.Reading memory r = _reading(adapter);
-            (uint256 f0, uint256 f1) = VaultRiskBoundary.dynamicFloors(r.priceX96, r.uncertaintyPips, riskEdgePips);
-            uint256 dynamicFloor = i == 0 ? f0 : f1;
+            uint256 dynamicFloor = VaultRiskBoundary.dynamicFloor(r.priceX96, r.uncertaintyPips, riskEdgePips, i == 1);
             if (dynamicFloor > floor) floor = dynamicFloor;
         }
         uint256 target = inventoryTargetPerShare[i];

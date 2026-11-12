@@ -158,8 +158,10 @@ contract PriceRiskAdapter is IMarketRiskAdapter {
         uint256 low;
         uint256 high = type(uint256).max;
         r.validUntil = type(uint256).max;
-        (bool live0, uint256 l0, uint256 h0, uint256 v0) = _source(_source0(), shift0);
-        (bool live1, uint256 l1, uint256 h1, uint256 v1) = _source(_source1(), shift1);
+        (bool live0, uint256 l0, uint256 h0, uint256 v0) =
+            _source(_s0leg0, _s0leg1, _s0dev0, _s0dev1, _s0age0, _s0age1, shift0);
+        (bool live1, uint256 l1, uint256 h1, uint256 v1) =
+            _source(_s1leg0, _s1leg1, _s1dev0, _s1dev1, _s1age0, _s1age1, shift1);
         if (live0) {
             (low, high, r.validUntil) = (l0, h0, v0);
             ++r.liveSources;
@@ -189,38 +191,46 @@ contract PriceRiskAdapter is IMarketRiskAdapter {
         return Source(_s1leg0, _s1leg1, _s1dev0, _s1dev1, _s1age0, _s1age1);
     }
 
-    /// @dev One source: both legs read; live if both are within their age limits; bracket if live.
-    function _source(Source memory s, int256 shift)
-        internal
-        view
-        returns (bool live, uint256 low, uint256 high, uint256 validUntil)
-    {
-        (, int256 a0,, uint256 t0) = _read(s.leg0, false);
-        (, int256 a1,, uint256 t1) = _read(s.leg1, false);
-        uint256 until0 = t0 + s.maxAge0;
-        uint256 until1 = t1 + s.maxAge1;
+    /// @dev One source: both legs read; live if both are within their age limits; bracket if live. Takes the source's
+    ///      immutables as arguments rather than a `Source` struct, so a read builds no memory copy of the
+    ///      configuration (the struct form is kept for the `sources()` getter).
+    function _source(
+        IAggregatorV3 leg0,
+        IAggregatorV3 leg1,
+        uint256 deviation0,
+        uint256 deviation1,
+        uint256 maxAge0,
+        uint256 maxAge1,
+        int256 shift
+    ) internal view returns (bool live, uint256 low, uint256 high, uint256 validUntil) {
+        (, int256 a0,, uint256 t0) = _read(leg0, false);
+        (, int256 a1,, uint256 t1) = _read(leg1, false);
+        uint256 until0 = t0 + maxAge0;
+        uint256 until1 = t1 + maxAge1;
         validUntil = until0 < until1 ? until0 : until1;
         if (block.timestamp > validUntil) return (false, 0, 0, validUntil);
         live = true;
         // a0, a1 in (0, 2^128) checked by _read.
         // forge-lint: disable-next-line(unsafe-typecast)
-        (low, high) = ReferenceBracket.pairBracket(uint256(a0), uint256(a1), s.deviation0, s.deviation1, shift);
+        (low, high) = ReferenceBracket.pairBracket(uint256(a0), uint256(a1), deviation0, deviation1, shift);
     }
 
     /// @dev `latestRoundData` through a staticcall that copies at most 160 bytes back, so a feed cannot force a large
-    ///      return-data copy. Price legs (`isStatus = false`) must answer in (0, 2^128) with `updatedAt <= now`; the
+    ///      return-data copy. The 4-byte calldata is written at the free-memory pointer and overwritten by the answer;
+    ///      the pointer is not advanced because nothing else is allocated before the words are read. Price legs (`isStatus = false`) must answer in (0, 2^128) with `updatedAt <= now`; the
     ///      sequencer feed (`isStatus = true`) must answer 0 or 1. Anything else reverts with `FeedUnusable`.
     function _read(IAggregatorV3 feed, bool isStatus)
         internal
         view
         returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt)
     {
-        bytes memory data = abi.encodeCall(IAggregatorV3.latestRoundData, ());
         bool ok;
         uint256 rid;
+        bytes4 selector = IAggregatorV3.latestRoundData.selector;
         assembly ("memory-safe") {
             let ptr := mload(0x40)
-            ok := staticcall(gas(), feed, add(data, 0x20), mload(data), ptr, 160)
+            mstore(ptr, selector)
+            ok := staticcall(gas(), feed, ptr, 4, ptr, 160)
             if lt(returndatasize(), 160) { ok := 0 }
             rid := mload(ptr)
             answer := mload(add(ptr, 0x20))

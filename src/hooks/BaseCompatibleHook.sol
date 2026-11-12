@@ -274,32 +274,27 @@ abstract contract BaseCompatibleHook is IHooks {
     function _commitCore(PoolId id, bool zeroForOne, uint256 newState) internal virtual {}
 
     /// @notice Shared-core state for one swap, or `coreMode = false` when the vault has no adapter (static mode).
-    /// @dev Reads, in this order: the vault's adapter, the adapter's reading, the vault's kappa_1, edge, tau_1, net
-    ///      currency1 holding N1 = B1 - W1 and share supply S. The adapter's revert (stale, contradictory or
-    ///      unavailable sources) reverts the swap. The vault re-checks the reading itself, so the hook adds no
-    ///      validity checks of its own beyond what `InventoryPricing.coreState` requires (spread at most maxSpread,
-    ///      non-zero depth).
+    /// @dev Two external reads: `vault.coreInputs()` (the adapter, the vault's edge, kappa_1, tau_1, net asset1 holding
+    ///      N1 = B1 - W1 and share supply S, in one call), then the adapter's reading. N1 is the vault's asset1; a pool
+    ///      whose currency1 is not the vault's asset1 can never be filled (the vault checks the pair on every fill).
+    ///      The adapter's revert (stale, contradictory or unavailable sources) reverts the swap. The vault re-reads the
+    ///      adapter itself inside `exchange` and enforces its own floor, so the hook adds no validity checks of its own
+    ///      beyond what `InventoryPricing.coreState` requires (spread at most maxSpread, non-zero depth).
     /// @param id Pool being priced.
-    /// @param currency1 The pool's currency1 (the vault's asset1; the vault checks the pool's pair on every fill).
     /// @return coreMode True when the vault has an adapter.
     /// @return core The core state; meaningless when `coreMode` is false.
-    function _coreState(PoolId id, Currency currency1)
-        internal
-        view
-        returns (bool coreMode, InventoryPricing.Core memory core)
-    {
-        IVaultState v = IVaultState(address(vault));
-        IMarketRiskAdapter adapter = v.riskAdapter();
+    function _coreState(PoolId id) internal view returns (bool coreMode, InventoryPricing.Core memory core) {
+        (IMarketRiskAdapter adapter, uint256 edge, uint256 maxDeviation, uint256 target1, uint256 n1, uint256 shares) =
+            IVaultState(address(vault)).coreInputs();
         if (address(adapter) == address(0)) return (false, core);
         CoreParams memory p = coreParams[id];
         if (p.depthPerShare == 0) revert CoreNotConfigured();
         IMarketRiskAdapter.Reading memory r = adapter.currentReference();
-        uint256 maxDeviation = v.inventoryTolerancePips(1);
         if (p.maxDeviationPips < maxDeviation) maxDeviation = p.maxDeviationPips;
-        uint256 minEdge = uint256(v.riskEdgePips()) + 1;
+        uint256 minEdge = edge + 1;
         if (p.minEdgePips > minEdge) minEdge = p.minEdgePips;
         InventoryPricing.Config memory cfg = InventoryPricing.Config({
-            targetPerShare: v.inventoryTargetPerShare(1),
+            targetPerShare: target1,
             depthPerShare: p.depthPerShare,
             depthMax: p.depthMax,
             baseSpread: p.baseSpreadPips,
@@ -308,21 +303,20 @@ abstract contract BaseCompatibleHook is IHooks {
             maxDeviation: maxDeviation,
             bandEdge: true
         });
-        uint256 n1 = v.backing(currency1) - v.claimableAssets(currency1);
-        core = InventoryPricing.coreState(cfg, n1, v.totalShares(), r.priceX96, r.uncertaintyPips);
+        core = InventoryPricing.coreState(cfg, n1, shares, r.priceX96, r.uncertaintyPips);
         coreMode = true;
     }
 
     /// @notice Output for `amountIn` in whichever mode the vault is in, and the state to commit.
     /// @dev Used by `beforeSwap` and by the concrete hooks' `quote` views, so a quote and a swap in the same block
     ///      price identically.
-    function _quoteAny(PoolId id, Currency currency1, bool zeroForOne, uint256 amountIn)
+    function _quoteAny(PoolId id, bool zeroForOne, uint256 amountIn)
         internal
         view
         returns (bool coreMode, uint256 amountOut, uint256 newState)
     {
         InventoryPricing.Core memory core;
-        (coreMode, core) = _coreState(id, currency1);
+        (coreMode, core) = _coreState(id);
         (amountOut, newState) = coreMode ? _quoteCore(id, core, zeroForOne, amountIn) : _quote(id, zeroForOne, amountIn);
     }
 
@@ -407,7 +401,7 @@ abstract contract BaseCompatibleHook is IHooks {
 
         bool coreMode;
         uint256 newState;
-        (coreMode, amountOut, newState) = _quoteAny(id, key.currency1, zeroForOne, amountIn);
+        (coreMode, amountOut, newState) = _quoteAny(id, zeroForOne, amountIn);
         if (amountOut == 0) revert ZeroOutput();
         if (amountOut > MAX_AMOUNT) revert AmountTooLarge();
         if (amountOut < minAmountOut) revert InsufficientOutput(amountOut, minAmountOut);

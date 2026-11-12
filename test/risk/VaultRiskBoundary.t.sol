@@ -62,6 +62,17 @@ contract VaultRiskBoundaryTest is Test {
         assertGe(lhs + 1, rhs);
     }
 
+    /// @notice The one-direction floor the vault uses is exactly the matching `dynamicFloors` result, so computing only
+    ///         the needed direction changes no fill.
+    function testFuzz_dynamicFloorEqualsPair(uint256 p, uint256 u, uint256 e) public pure {
+        p = bound(p, 1, type(uint160).max);
+        u = bound(u, 0, 1e6);
+        e = bound(e, 0, 1e6);
+        (uint256 f0, uint256 f1) = VaultRiskBoundary.dynamicFloors(p, u, e);
+        assertEq(VaultRiskBoundary.dynamicFloor(p, u, e, false), f0);
+        assertEq(VaultRiskBoundary.dynamicFloor(p, u, e, true), f1);
+    }
+
     /// @notice The inventory floor is never below the exact value (rounded up) and scales with the share supply.
     function testFuzz_inventoryFloorRoundsUp(uint256 s, uint256 tau, uint256 k) public pure {
         s = bound(s, 1, 2 ** 127);

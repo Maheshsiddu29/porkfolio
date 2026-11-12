@@ -82,6 +82,26 @@ interface IVaultState is ISharedCommitmentVault {
     /// @notice Inventory tolerance of asset `index` (0 or 1), pips of the target.
     function inventoryTolerancePips(uint256 index) external view returns (uint24);
 
+    /// @notice The vault state a hook prices from in shared-core mode, in one call.
+    /// @dev In static mode (no adapter) only `adapter` (zero) is returned and the rest are zero.
+    /// @return adapter `riskAdapter`.
+    /// @return edgePips `riskEdgePips`.
+    /// @return tolerance1Pips `inventoryTolerancePips(1)`.
+    /// @return target1PerShare `inventoryTargetPerShare(1)`, raw asset1 per share scaled by 1e18.
+    /// @return net1 N_1 = backing - claimable of asset1, raw units.
+    /// @return shares S, `totalShares`.
+    function coreInputs()
+        external
+        view
+        returns (
+            IMarketRiskAdapter adapter,
+            uint256 edgePips,
+            uint256 tolerance1Pips,
+            uint256 target1PerShare,
+            uint256 net1,
+            uint256 shares
+        );
+
     /// @notice Stored state of a withdrawal request; an all-zero struct if the id does not exist.
     /// @param requestId Request to read.
     /// @return The request record.

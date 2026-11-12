@@ -219,7 +219,7 @@ contract HookB_BoundedImpact is BaseCompatibleHook {
     /// @return amountOut Raw output amount.
     function quote(PoolKey calldata key, bool zeroForOne, uint256 amountIn) external view returns (uint256 amountOut) {
         if (amountIn > MAX_AMOUNT) revert AmountTooLarge();
-        (, amountOut,) = _quoteAny(key.toId(), key.currency1, zeroForOne, amountIn);
+        (, amountOut,) = _quoteAny(key.toId(), zeroForOne, amountIn);
     }
 
     /// @notice Set Hook B's shared-core strategy for one of its pools.
