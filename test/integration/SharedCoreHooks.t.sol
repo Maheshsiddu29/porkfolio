@@ -15,6 +15,7 @@ import {StrategyPricing} from "../../src/pricing/StrategyPricing.sol";
 import {VaultRiskBoundary} from "../../src/risk/VaultRiskBoundary.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MockRiskAdapter} from "../utils/MockRiskAdapter.sol";
+import {PricingHarness} from "../pricing/PricingHarness.sol";
 
 /// @notice Both production hooks in shared-core mode, through the real PoolManager and the production builds: they read
 ///         the reference from the vault's adapter, price from the vault's inventory, and stay inside the vault's
@@ -142,6 +143,79 @@ contract SharedCoreHooksTest is VaultTestBase {
         assertEq(hookA.quote(keyA, false, amountIn), a, "Hook A");
     }
 
+    /// @notice Conformance on random states: after a random price and uncertainty, a random LP deposit, a random
+    ///         inventory move and random Hook A activity, both hooks quote exactly what the libraries compute from the
+    ///         vault's state, in both directions, and refuse exactly when the libraries refuse. The libraries are pinned
+    ///         to the Python model by 240 random vectors (`test/pricing/SharedCoreVectors.t.sol`), so this closes the
+    ///         chain hook = library = model on states no fixed test chose.
+    function testFuzz_quotesEqualLibraries_randomStates(
+        uint256 pSeed,
+        uint256 uSeed,
+        uint256 sharesSeed,
+        uint256 moveSeed,
+        uint256 amountSeed,
+        bool moveDir
+    ) public {
+        PricingHarness h = new PricingHarness();
+        vm.startPrank(owner);
+        vault.setSellFloor(c0, 0); // only the adapter band and the inventory floor bind (adapter mode)
+        vault.setSellFloor(c1, 0);
+        vm.stopPrank();
+        uint256 price = bound(pSeed, Q96 / 2, 2 * Q96);
+        adapter.set(price, bound(uSeed, 0, 5000), type(uint256).max);
+        _depositShares(makeAddr("fuzzLp"), bound(sharesSeed, 0, vault.totalShares() / 2) + 1);
+        uint256 cap = _core().cap;
+        uint256 move = bound(moveSeed, 0, cap / 3);
+        if (move > 1 ether) _swapOutMinCuratorFloor(moveSeed % 2 == 0 ? keyA : keyB, moveDir, move);
+        vm.warp(vm.getBlockTimestamp() + moveSeed % 2 hours);
+
+        InventoryPricing.Config memory cfg = InventoryPricing.Config({
+            targetPerShare: vault.inventoryTargetPerShare(1),
+            depthPerShare: 10e18,
+            depthMax: 2 ** 95 - 1,
+            baseSpread: 3000,
+            minEdge: 200 > uint256(vault.riskEdgePips()) + 1 ? 200 : uint256(vault.riskEdgePips()) + 1,
+            maxSpread: 40_000,
+            maxDeviation: vault.inventoryTolerancePips(1) < KAPPA ? vault.inventoryTolerancePips(1) : KAPPA,
+            bandEdge: true
+        });
+        IMarketRiskAdapter.Reading memory r = adapter.currentReference();
+        uint256 n1 = vault.backing(c1) - vault.claimableAssets(c1);
+        uint256 s = vault.totalShares();
+        for (uint256 d; d < 2; ++d) {
+            bool zfo = d == 0;
+            uint256 amountIn = bound(uint256(keccak256(abi.encode(amountSeed, d))), 1e12, 2 * cap);
+            StrategyPricing.ActivityFee memory fee =
+                StrategyPricing.ActivityFee(A_BASE_FEE, A_MAX_FEE, A_SCALE, A_SCALE);
+            (bool okL, bytes memory retL) = address(h)
+                .staticcall(
+                    abi.encodeCall(
+                        h.hookA,
+                        (cfg, n1, s, r.priceX96, r.uncertaintyPips, fee, hookA.flowLevel(keyA, zfo), zfo, amountIn)
+                    )
+                );
+            (bool okH, bytes memory retH) =
+                address(hookA).staticcall(abi.encodeCall(hookA.quote, (keyA, zfo, amountIn)));
+            assertEq(okH, okL, "Hook A: refuses exactly when the library does");
+            if (okH) {
+                (StrategyPricing.Quote memory q,) = abi.decode(retL, (StrategyPricing.Quote, uint256));
+                assertEq(abi.decode(retH, (uint256)), q.amountOut, "Hook A");
+            }
+            (okL, retL) = address(h)
+                .staticcall(
+                    abi.encodeCall(
+                        h.hookB, (cfg, n1, s, r.priceX96, r.uncertaintyPips, MARKUP, B_TRADE_IMPACT, zfo, amountIn)
+                    )
+                );
+            (okH, retH) = address(hookB).staticcall(abi.encodeCall(hookB.quote, (keyB, zfo, amountIn)));
+            assertEq(okH, okL, "Hook B: refuses exactly when the library does");
+            if (okH) {
+                (StrategyPricing.Quote memory q,) = abi.decode(retL, (StrategyPricing.Quote, uint256));
+                assertEq(abi.decode(retH, (uint256)), q.amountOut, "Hook B");
+            }
+        }
+    }
+
     /// @notice Hook A's activity fee keeps its state in shared-core mode: a swap raises the direction's flow level,
     ///         so the same trade right after pays a higher fee and receives less.
     function test_hookA_activityLevelPersistsInCoreMode() public {
@@ -222,6 +296,29 @@ contract SharedCoreHooksTest is VaultTestBase {
         uint256 viaA = _swapOut(keyA, true, x / 2);
         uint256 viaB = _swapOut(keyB, true, x / 2);
         assertLe(viaA + viaB, coreOnly);
+    }
+
+    /// @notice No route across the two hooks beats the shared core. A trade of `total` is cut into 1-8 random pieces,
+    ///         each sent to a random hook, with up to an hour between pieces (Hook A's fee decays; the core does not).
+    ///         The total output never exceeds what the strategy-free core pays for `total` in one piece from the
+    ///         starting inventory: the core charge telescopes on the shared inventory and each strategy only removes
+    ///         value. Routing can still pick the cheaper strategy for each piece (`simulations/mm/hook_routing.py`).
+    function testFuzz_routingAcrossHooks_neverBeatsTheCore(uint256 seed, uint256 totalSeed, bool zeroForOne) public {
+        uint256 total = bound(totalSeed, 10 ether, _core().cap * 8 / 10); // within the shared inventory cap
+        uint256 n = bound(seed, 1, 8);
+        uint256 coreOnly;
+        if (zeroForOne) (coreOnly,) = InventoryPricing.ask(_core(), total);
+        else (coreOnly,) = InventoryPricing.bid(_core(), total, total);
+        uint256 got;
+        uint256 left = total;
+        for (uint256 i; i < n; ++i) {
+            uint256 r = uint256(keccak256(abi.encode(seed, i)));
+            uint256 piece = i == n - 1 ? left : bound(r, 1 ether, left - (n - 1 - i) * 1 ether);
+            left -= piece;
+            got += _swapOut(r % 2 == 0 ? keyA : keyB, zeroForOne, piece);
+            vm.warp(vm.getBlockTimestamp() + (r >> 128) % 1 hours);
+        }
+        assertLe(got, coreOnly);
     }
 
     // ------------------------------------------------------------------ vault limits reach the hooks

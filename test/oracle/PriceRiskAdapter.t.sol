@@ -41,8 +41,8 @@ contract PriceRiskAdapterTest is Test {
     }
 
     function _deploy(uint256 minSources) internal returns (PriceRiskAdapter) {
-        PriceRiskAdapter.Source memory cl = PriceRiskAdapter.Source(clUsdc, clEth, 3100, 5100, 88_200, 88_200);
-        PriceRiskAdapter.Source memory rs = PriceRiskAdapter.Source(rsUsdc, rsEth, 5100, 5100, 12_600, 23_400);
+        PriceRiskAdapter.Source memory cl = PriceRiskAdapter.Source(clUsdc, clEth, 3100, 5100, 88_200, 88_200, 0, 0, 0);
+        PriceRiskAdapter.Source memory rs = PriceRiskAdapter.Source(rsUsdc, rsEth, 5100, 5100, 12_600, 23_400, 0, 0, 0);
         return new PriceRiskAdapter(cl, rs, USDC, WETH, 6, 18, IAggregatorV3(address(seq)), 3600, minSources);
     }
 
@@ -122,8 +122,9 @@ contract PriceRiskAdapterTest is Test {
     }
 
     function test_invalidConfig() public {
-        PriceRiskAdapter.Source memory ok = PriceRiskAdapter.Source(clUsdc, clEth, 3100, 5100, 88_200, 88_200);
-        PriceRiskAdapter.Source memory bad = PriceRiskAdapter.Source(clUsdc, clEth, 1_000_000, 5100, 88_200, 88_200);
+        PriceRiskAdapter.Source memory ok = PriceRiskAdapter.Source(clUsdc, clEth, 3100, 5100, 88_200, 88_200, 0, 0, 0);
+        PriceRiskAdapter.Source memory bad =
+            PriceRiskAdapter.Source(clUsdc, clEth, 1_000_000, 5100, 88_200, 88_200, 0, 0, 0);
         vm.expectRevert(PriceRiskAdapter.InvalidConfig.selector);
         new PriceRiskAdapter(ok, bad, USDC, WETH, 6, 18, IAggregatorV3(address(0)), 0, 2);
         vm.expectRevert(PriceRiskAdapter.InvalidConfig.selector);
@@ -131,7 +132,7 @@ contract PriceRiskAdapterTest is Test {
         MockAggregator wide = new MockAggregator(60);
         vm.expectRevert(PriceRiskAdapter.InvalidConfig.selector);
         new PriceRiskAdapter(
-            PriceRiskAdapter.Source(clUsdc, wide, 3100, 5100, 88_200, 88_200),
+            PriceRiskAdapter.Source(clUsdc, wide, 3100, 5100, 88_200, 88_200, 0, 0, 0),
             ok,
             USDC,
             WETH,
@@ -153,19 +154,94 @@ contract PriceRiskAdapterTest is Test {
         assertEq(d1, 18);
         assertTrue(adapter.configVersion() != bytes32(0));
         assertTrue(adapter.configVersion() != _deploy(1).configVersion());
-        PriceRiskAdapter.Source memory cl = PriceRiskAdapter.Source(clUsdc, clEth, 3100, 5100, 88_200, 88_200);
+        PriceRiskAdapter.Source memory cl = PriceRiskAdapter.Source(clUsdc, clEth, 3100, 5100, 88_200, 88_200, 0, 0, 0);
         vm.expectRevert(PriceRiskAdapter.InvalidConfig.selector);
         new PriceRiskAdapter(cl, cl, WETH, USDC, 6, 18, IAggregatorV3(address(0)), 0, 2);
         vm.expectRevert(PriceRiskAdapter.InvalidConfig.selector);
         new PriceRiskAdapter(cl, cl, address(0), WETH, 6, 18, IAggregatorV3(address(0)), 0, 2);
         // Two adapters that differ only in the second source's staleness limit have different versions.
-        PriceRiskAdapter.Source memory rs = PriceRiskAdapter.Source(rsUsdc, rsEth, 5100, 5100, 12_600, 23_400);
-        PriceRiskAdapter.Source memory rs2 = PriceRiskAdapter.Source(rsUsdc, rsEth, 5100, 5100, 12_600, 23_401);
+        PriceRiskAdapter.Source memory rs = PriceRiskAdapter.Source(rsUsdc, rsEth, 5100, 5100, 12_600, 23_400, 0, 0, 0);
+        PriceRiskAdapter.Source memory rs2 = PriceRiskAdapter.Source(rsUsdc, rsEth, 5100, 5100, 12_600, 23_401, 0, 0, 0);
         assertTrue(
             new PriceRiskAdapter(cl, rs, USDC, WETH, 6, 18, IAggregatorV3(address(0)), 0, 2).configVersion()
                 != new PriceRiskAdapter(cl, rs2, USDC, WETH, 6, 18, IAggregatorV3(address(0)), 0, 2).configVersion()
         );
         vm.expectRevert(PriceRiskAdapter.InvalidConfig.selector); // a pair of one token is not a pair
         new PriceRiskAdapter(cl, cl, USDC, USDC, 6, 6, IAggregatorV3(address(0)), 0, 2);
+    }
+
+    // ------------------------------------------------------------------ fresh tier (relayer)
+
+    /// @dev Chainlink as push-only; RedStone with a fresh tier: +-15 bps per leg while younger than 120 s.
+    function _deployFresh(uint256 minSources) internal returns (PriceRiskAdapter) {
+        PriceRiskAdapter.Source memory cl = PriceRiskAdapter.Source(clUsdc, clEth, 3100, 5100, 88_200, 88_200, 0, 0, 0);
+        PriceRiskAdapter.Source memory rs =
+            PriceRiskAdapter.Source(rsUsdc, rsEth, 5100, 5100, 12_600, 23_400, 120, 1500, 1500);
+        return new PriceRiskAdapter(cl, rs, USDC, WETH, 6, 18, IAggregatorV3(address(seq)), 3600, minSources);
+    }
+
+    /// @notice A relayer outage and recovery, as seen by the adapter. While a third party pushes RedStone's signed
+    ///         packages every minute the band is narrow. When it stops, the band returns to exactly the push-only
+    ///         reading 120 s after the last push: wider, not halted. Only when the provider's own heartbeat also lapses
+    ///         does the source go dark; then two-source mode refuses and one-source mode falls back to Chainlink alone.
+    ///         The next push restores the narrow band with no action by anyone else.
+    function test_freshTier_relayerOutageAndRecovery() public {
+        PriceRiskAdapter fresh = _deployFresh(2);
+        PriceRiskAdapter fresh1 = _deployFresh(1);
+        uint256 pushOnly = adapter.currentReference().uncertaintyPips;
+
+        vm.warp(T + 60);
+        rsUsdc.set(99_982_887, T + 30); // the relayer pushed both legs 30 s ago
+        rsEth.set(205_030_881_965, T + 30);
+        IMarketRiskAdapter.Reading memory r = fresh.currentReference();
+        assertLt(r.uncertaintyPips, pushOnly / 2, "narrow while fresh");
+        assertEq(r.validUntil, T + 30 + 120, "valid only while the legs stay fresh");
+        assertEq(adapter.currentReference().uncertaintyPips, pushOnly, "push-only adapter unaffected");
+
+        vm.warp(T + 30 + 121); // relayer silent: the legs left the fresh tier
+        r = fresh.currentReference();
+        assertEq(r.uncertaintyPips, adapter.currentReference().uncertaintyPips, "back to the push band");
+        assertEq(r.liveSources, 2, "wider, not halted");
+
+        vm.warp(T + 30 + 12_601); // the provider's own heartbeat lapsed too (USDC leg, 12,600 s)
+        vm.expectRevert(abi.encodeWithSelector(ReferenceBracket.InsufficientSources.selector, 1, 2));
+        fresh.currentReference();
+        r = fresh1.currentReference();
+        assertEq(r.liveSources, 1, "one-source mode: Chainlink alone");
+
+        rsUsdc.set(99_982_887, T + 30 + 12_601); // anyone pushes again
+        rsEth.set(205_030_881_965, T + 30 + 12_601);
+        r = fresh.currentReference();
+        assertEq(r.liveSources, 2);
+        assertLt(r.uncertaintyPips, pushOnly / 2, "narrow again after recovery");
+    }
+
+    /// @notice Each leg picks its own tier: a fresh USDC leg with a stale-but-live ETH leg is bracketed at 15 bps on one
+    ///         side and the push threshold on the other.
+    function test_freshTier_perLeg() public {
+        PriceRiskAdapter fresh = _deployFresh(2);
+        vm.warp(T + 60);
+        rsUsdc.set(99_982_887, T + 30);
+        uint256 oneLeg = fresh.currentReference().uncertaintyPips;
+        rsEth.set(205_030_881_965, T + 30);
+        uint256 bothLegs = fresh.currentReference().uncertaintyPips;
+        assertLt(bothLegs, oneLeg);
+        assertLe(oneLeg, adapter.currentReference().uncertaintyPips);
+    }
+
+    /// @notice A fresh tier must be strictly shorter and no wider than the push tier, and absent means all zero.
+    function test_freshTier_configValidation() public {
+        PriceRiskAdapter.Source memory cl = PriceRiskAdapter.Source(clUsdc, clEth, 3100, 5100, 88_200, 88_200, 0, 0, 0);
+        PriceRiskAdapter.Source[4] memory bad = [
+            PriceRiskAdapter.Source(rsUsdc, rsEth, 5100, 5100, 12_600, 23_400, 12_600, 1500, 1500), // not shorter
+            PriceRiskAdapter.Source(rsUsdc, rsEth, 5100, 5100, 12_600, 23_400, 120, 5101, 1500), // wider than push
+            PriceRiskAdapter.Source(rsUsdc, rsEth, 5100, 5100, 12_600, 23_400, 120, 1500, 5101),
+            PriceRiskAdapter.Source(rsUsdc, rsEth, 5100, 5100, 12_600, 23_400, 0, 1500, 0) // disabled but set
+        ];
+        for (uint256 i; i < bad.length; ++i) {
+            vm.expectRevert(PriceRiskAdapter.InvalidConfig.selector);
+            new PriceRiskAdapter(cl, bad[i], USDC, WETH, 6, 18, IAggregatorV3(address(0)), 0, 2);
+        }
+        assertTrue(_deployFresh(2).configVersion() != adapter.configVersion(), "the tier is part of the version");
     }
 }

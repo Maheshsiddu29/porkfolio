@@ -318,11 +318,19 @@ def fresh(kappa=50_000, scale=10**6, floor_on_trades=True) -> Vault:
     return v
 
 
-def random_run(seed: int, steps: int = 400, kappa: int = 50_000, honest_fee_pips: int = 3_000) -> Vault:
+def random_run(seed: int, steps: int = 400, kappa: int = 50_000, honest_fee_pips: int = 3_000,
+               recentre_every: int = 0) -> Vault:
+    """One random sequence. `recentre_every` > 0 adds a guardian re-centring every that many steps: each target is
+    raised to the current holding per share when the holding is above it (never lowered). It draws no random numbers,
+    so the default (0) reproduces the Phase 1B-4.3 sequences exactly."""
     rng = random.Random(seed)
     v = fresh(kappa)
     lps = [0, 1, 2, 3]
-    for _ in range(steps):
+    for step in range(steps):
+        if recentre_every and step % recentre_every == 0:
+            t0 = max(v.target[0], v.N(0) * WAD // v.S)
+            t1 = max(v.target[1], v.N(1) * WAD // v.S)
+            v.set_bounds(t0, t1, v.tol[0], v.tol[1])
         op = rng.random()
         lp = rng.choice(lps)
         if op < 0.18:

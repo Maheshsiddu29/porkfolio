@@ -58,6 +58,20 @@ math.
 
 **The shared-core premium over static mode falls from about +147k to about +136k.**
 
+**Later in this phase: the optional fresh tier** (`ORACLE_RELAYER.md`) **adds about 1,970 gas per swap even when
+disabled** (the tier check runs on four legs in each of the two reads). Measured on the same block:
+
+| Swap | Final |
+|---|---|
+| Hook B, 1,000 USDC → WETH | 408,181 |
+| Hook B, 0.5 WETH → USDC | 403,192 |
+| Hook A, 1,000 USDC → WETH | 435,146 |
+| Hook A, 0.5 WETH → USDC | 430,238 |
+| static mode | 296,898 |
+
+- Net against the starting point: **−9,040 (Hook B, buy) to −9,301 (Hook A, sell)**, i.e. −2.1% to −2.2%.
+- Adapter runtime 4,813 → 5,552 B.
+
 ### Local production benchmark (`test/bench/run.sh`, static mode)
 - Swaps and splits: +137 gas each (+0.05%). That is the six-word `coreInputs` return where `riskAdapter` returned one
   word.

@@ -71,8 +71,10 @@ contract UnichainIntegratedSwapForkTest is Test {
         Currency c1 = Currency.wrap(WETH);
 
         adapter = new PriceRiskAdapter(
-            PriceRiskAdapter.Source(IAggregatorV3(CL_USDC_USD), IAggregatorV3(CL_ETH_USD), 3100, 5100, 88_200, 88_200),
-            PriceRiskAdapter.Source(IAggregatorV3(RS_USDC), IAggregatorV3(RS_ETH), 5100, 5100, 12_600, 23_400),
+            PriceRiskAdapter.Source(
+                IAggregatorV3(CL_USDC_USD), IAggregatorV3(CL_ETH_USD), 3100, 5100, 88_200, 88_200, 0, 0, 0
+            ),
+            PriceRiskAdapter.Source(IAggregatorV3(RS_USDC), IAggregatorV3(RS_ETH), 5100, 5100, 12_600, 23_400, 0, 0, 0),
             USDC,
             WETH,
             6,

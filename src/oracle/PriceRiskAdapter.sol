@@ -20,6 +20,18 @@ import {ReferenceBracket} from "./ReferenceBracket.sol";
 ///      timestamp, or reverts, makes the whole read revert with `FeedUnusable` (fail closed). A leg that is only older
 ///      than its limit makes its source not live; if fewer than `minSources` sources are live the read reverts.
 ///
+///      Fresh tier (optional, per source). A push leg's threshold is how far the market may move before the provider
+///      pushes, so it is wide (RedStone ETH/USD: 0.5%). If someone pushes the provider's signed packages much more
+///      often, for example a third-party relayer every minute, a leg younger than `freshMaxAge` can only lag the market
+///      by what the market moves in that time, and the source may use the narrower `freshDeviation` for that leg.
+///      Each leg picks its tier from its own age: younger than `freshMaxAge` uses `freshDeviation`, otherwise up to
+///      `maxAge` uses `deviation`, otherwise the source is not live. So a relayer outage widens the band back to the
+///      provider's own threshold after `freshMaxAge` seconds; it never halts reads that the push tier would allow.
+///      The narrow value is an assumption about market movement over `freshMaxAge`, not a provider guarantee; the
+///      vault's inventory floor bounds what a wrong assumption can cost. `freshMaxAge = 0` disables the tier.
+///      Whoever submits the packages cannot change the price (the provider's contract verifies its signers and
+///      rejects older timestamps); it can only choose when to submit, within the provider's own rules.
+///
 ///      Sequencer. On an L2 a feed can look fresh while the sequencer has been down. If a sequencer uptime feed is
 ///      configured, the read reverts while it reports down (answer 1) and for `sequencerGrace` seconds after it came
 ///      back up.
@@ -40,6 +52,10 @@ contract PriceRiskAdapter is IMarketRiskAdapter {
     /// @param deviation1 Leg 1 deviation threshold plus a latency margin, pips. Below 1e6.
     /// @param maxAge0 Leg 0 staleness limit (its heartbeat plus a grace), seconds.
     /// @param maxAge1 Leg 1 staleness limit, seconds.
+    /// @param freshMaxAge Age below which a leg uses its fresh deviation, seconds; below both `maxAge`s. Zero: no
+    ///        fresh tier (both fresh deviations must then be zero).
+    /// @param freshDeviation0 Leg 0 deviation while fresh, pips; at most `deviation0`.
+    /// @param freshDeviation1 Leg 1 deviation while fresh, pips; at most `deviation1`.
     struct Source {
         IAggregatorV3 leg0;
         IAggregatorV3 leg1;
@@ -47,6 +63,9 @@ contract PriceRiskAdapter is IMarketRiskAdapter {
         uint256 deviation1;
         uint256 maxAge0;
         uint256 maxAge1;
+        uint256 freshMaxAge;
+        uint256 freshDeviation0;
+        uint256 freshDeviation1;
     }
 
     // Sources are held in immutables (code), not storage: a read costs no SLOAD for configuration that never changes.
@@ -56,12 +75,18 @@ contract PriceRiskAdapter is IMarketRiskAdapter {
     uint256 internal immutable _s0dev1;
     uint256 internal immutable _s0age0;
     uint256 internal immutable _s0age1;
+    uint256 internal immutable _s0fresh;
+    uint256 internal immutable _s0fdev0;
+    uint256 internal immutable _s0fdev1;
     IAggregatorV3 internal immutable _s1leg0;
     IAggregatorV3 internal immutable _s1leg1;
     uint256 internal immutable _s1dev0;
     uint256 internal immutable _s1dev1;
     uint256 internal immutable _s1age0;
     uint256 internal immutable _s1age1;
+    uint256 internal immutable _s1fresh;
+    uint256 internal immutable _s1fdev0;
+    uint256 internal immutable _s1fdev1;
     /// @notice Decimal shift from the first source's answers to raw currency1 per raw currency0.
     int256 public immutable shift0;
     /// @notice Decimal shift for the second source.
@@ -89,8 +114,9 @@ contract PriceRiskAdapter is IMarketRiskAdapter {
     error SequencerUnavailable();
 
     /// @dev Reads each leg's decimals once and derives the decimal shifts. Reverts with `InvalidConfig` if a feed is
-    ///      zero, a threshold is not below 1e6, a staleness limit is zero, `minSources` is not 1 or 2, or a shift is
-    ///      larger than 30 decimal places in either direction.
+    ///      zero, a threshold is not below 1e6, a staleness limit is zero, `minSources` is not 1 or 2, a shift is
+    ///      larger than 30 decimal places in either direction, or a fresh tier is not strictly shorter and no wider
+    ///      than the push tier (or has deviations set while disabled).
     /// @param s0 First source.
     /// @param s1 Second source.
     /// @param currency0_ Lower-address token of the pair. Non-zero and below `currency1_`.
@@ -118,8 +144,10 @@ contract PriceRiskAdapter is IMarketRiskAdapter {
         shift1 = _shift(s1, decimals0, decimals1);
         (_s0leg0, _s0leg1, _s0dev0, _s0dev1, _s0age0, _s0age1) =
         (s0.leg0, s0.leg1, s0.deviation0, s0.deviation1, s0.maxAge0, s0.maxAge1);
+        (_s0fresh, _s0fdev0, _s0fdev1) = (s0.freshMaxAge, s0.freshDeviation0, s0.freshDeviation1);
         (_s1leg0, _s1leg1, _s1dev0, _s1dev1, _s1age0, _s1age1) =
         (s1.leg0, s1.leg1, s1.deviation0, s1.deviation1, s1.maxAge0, s1.maxAge1);
+        (_s1fresh, _s1fdev0, _s1fdev1) = (s1.freshMaxAge, s1.freshDeviation0, s1.freshDeviation1);
         sequencerFeed = sequencerFeed_;
         sequencerGrace = sequencerGrace_;
         minSources = minSources_;
@@ -159,9 +187,9 @@ contract PriceRiskAdapter is IMarketRiskAdapter {
         uint256 high = type(uint256).max;
         r.validUntil = type(uint256).max;
         (bool live0, uint256 l0, uint256 h0, uint256 v0) =
-            _source(_s0leg0, _s0leg1, _s0dev0, _s0dev1, _s0age0, _s0age1, shift0);
+            _source(_s0leg0, _s0leg1, [_s0dev0, _s0dev1, _s0age0, _s0age1, _s0fresh, _s0fdev0, _s0fdev1], shift0);
         (bool live1, uint256 l1, uint256 h1, uint256 v1) =
-            _source(_s1leg0, _s1leg1, _s1dev0, _s1dev1, _s1age0, _s1age1, shift1);
+            _source(_s1leg0, _s1leg1, [_s1dev0, _s1dev1, _s1age0, _s1age1, _s1fresh, _s1fdev0, _s1fdev1], shift1);
         if (live0) {
             (low, high, r.validUntil) = (l0, h0, v0);
             ++r.liveSources;
@@ -184,41 +212,55 @@ contract PriceRiskAdapter is IMarketRiskAdapter {
     }
 
     function _source0() internal view returns (Source memory) {
-        return Source(_s0leg0, _s0leg1, _s0dev0, _s0dev1, _s0age0, _s0age1);
+        return Source(_s0leg0, _s0leg1, _s0dev0, _s0dev1, _s0age0, _s0age1, _s0fresh, _s0fdev0, _s0fdev1);
     }
 
     function _source1() internal view returns (Source memory) {
-        return Source(_s1leg0, _s1leg1, _s1dev0, _s1dev1, _s1age0, _s1age1);
+        return Source(_s1leg0, _s1leg1, _s1dev0, _s1dev1, _s1age0, _s1age1, _s1fresh, _s1fdev0, _s1fdev1);
     }
 
-    /// @dev One source: both legs read; live if both are within their age limits; bracket if live. Takes the source's
-    ///      immutables as arguments rather than a `Source` struct, so a read builds no memory copy of the
-    ///      configuration (the struct form is kept for the `sources()` getter).
-    function _source(
-        IAggregatorV3 leg0,
-        IAggregatorV3 leg1,
-        uint256 deviation0,
-        uint256 deviation1,
-        uint256 maxAge0,
-        uint256 maxAge1,
-        int256 shift
-    ) internal view returns (bool live, uint256 low, uint256 high, uint256 validUntil) {
+    /// @dev One source: both legs read; each leg's tier from its own age (see "Fresh tier"); live if both legs are
+    ///      within a tier; bracket if live. `validUntil` is the earliest time a leg leaves the tier it was read in.
+    ///      Takes the source's immutables as arguments rather than a `Source` struct, so a read builds no memory copy
+    ///      of the configuration (the struct form is kept for the `sources()` getter).
+    /// @param cfg [deviation0, deviation1, maxAge0, maxAge1, freshMaxAge, freshDeviation0, freshDeviation1].
+    function _source(IAggregatorV3 leg0, IAggregatorV3 leg1, uint256[7] memory cfg, int256 shift)
+        internal
+        view
+        returns (bool live, uint256 low, uint256 high, uint256 validUntil)
+    {
         (, int256 a0,, uint256 t0) = _read(leg0, false);
         (, int256 a1,, uint256 t1) = _read(leg1, false);
-        uint256 until0 = t0 + maxAge0;
-        uint256 until1 = t1 + maxAge1;
+        (uint256 d0, uint256 until0) = _tier(t0, cfg[0], cfg[2], cfg[4], cfg[5]);
+        (uint256 d1, uint256 until1) = _tier(t1, cfg[1], cfg[3], cfg[4], cfg[6]);
         validUntil = until0 < until1 ? until0 : until1;
         if (block.timestamp > validUntil) return (false, 0, 0, validUntil);
         live = true;
         // a0, a1 in (0, 2^128) checked by _read.
         // forge-lint: disable-next-line(unsafe-typecast)
-        (low, high) = ReferenceBracket.pairBracket(uint256(a0), uint256(a1), deviation0, deviation1, shift);
+        (low, high) = ReferenceBracket.pairBracket(uint256(a0), uint256(a1), d0, d1, shift);
+    }
+
+    /// @dev The deviation a leg updated at `updatedAt` is read with, and until when: the fresh tier while
+    ///      `now <= updatedAt + freshMaxAge` (if enabled), otherwise the push tier until `updatedAt + maxAge`.
+    ///      Example (RedStone ETH/USD, push 0.51% / 6.5 h, fresh 0.15% / 120 s): a leg pushed 90 s ago is bracketed at
+    ///      +-0.15% until 30 s from now; at 121 s it is bracketed at +-0.51%; after 6.5 h the source is not live.
+    function _tier(uint256 updatedAt, uint256 deviation, uint256 maxAge, uint256 freshMaxAge, uint256 freshDeviation)
+        internal
+        view
+        returns (uint256, uint256)
+    {
+        if (freshMaxAge != 0 && block.timestamp <= updatedAt + freshMaxAge) {
+            return (freshDeviation, updatedAt + freshMaxAge);
+        }
+        return (deviation, updatedAt + maxAge);
     }
 
     /// @dev `latestRoundData` through a staticcall that copies at most 160 bytes back, so a feed cannot force a large
     ///      return-data copy. The 4-byte calldata is written at the free-memory pointer and overwritten by the answer;
-    ///      the pointer is not advanced because nothing else is allocated before the words are read. Price legs (`isStatus = false`) must answer in (0, 2^128) with `updatedAt <= now`; the
-    ///      sequencer feed (`isStatus = true`) must answer 0 or 1. Anything else reverts with `FeedUnusable`.
+    ///      the pointer is not advanced because nothing else is allocated before the words are read. Price legs
+    ///      (`isStatus = false`) must answer in (0, 2^128) with `updatedAt <= now`; the sequencer feed
+    ///      (`isStatus = true`) must answer 0 or 1. Anything else reverts with `FeedUnusable`.
     function _read(IAggregatorV3 feed, bool isStatus)
         internal
         view
@@ -254,6 +296,14 @@ contract PriceRiskAdapter is IMarketRiskAdapter {
             address(s.leg0) == address(0) || address(s.leg1) == address(0) || s.deviation0 >= PIPS
                 || s.deviation1 >= PIPS || s.maxAge0 == 0 || s.maxAge1 == 0
         ) revert InvalidConfig();
+        if (s.freshMaxAge == 0) {
+            if (s.freshDeviation0 != 0 || s.freshDeviation1 != 0) revert InvalidConfig();
+        } else if (
+            s.freshMaxAge >= s.maxAge0 || s.freshMaxAge >= s.maxAge1 || s.freshDeviation0 > s.deviation0
+                || s.freshDeviation1 > s.deviation1
+        ) {
+            revert InvalidConfig();
+        }
         // Each sum is below 2 * 255: the casts are safe.
         uint256 up = uint256(s.leg1.decimals()) + decimals1;
         uint256 down = uint256(s.leg0.decimals()) + decimals0;
