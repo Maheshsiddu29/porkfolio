@@ -12,7 +12,7 @@
 #   1. formatting;
 #   2. test/bench/security.sh under the deep profile: forced rebuild, size gate, production-build tests and the complete
 #      suite with fuzz 10,000 and invariants 1,000 runs x depth 256 (seed 0x5eed);
-#   3. the three invariant campaigns again under further seeds (DEEP_SEEDS, 256 x 128 each);
+#   3. the four invariant campaigns again under further seeds (DEEP_SEEDS, 256 x 128 each);
 #   4. the non-vacuity gate, test/invariant/coverage.py (64 single-run campaigns per campaign, depth 128);
 #   5. Python conformance tests (simulations/);
 #   6. Unichain fork tests, only when UNICHAIN_RPC_URL is set (read-only; UNICHAIN_FORK_BLOCK defaults to the block the
@@ -28,7 +28,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 export FOUNDRY_PROFILE=deep
 DEEP_SEEDS="${DEEP_SEEDS:-0x1 0x2 0x3}"
-CAMPAIGNS='^(VaultInvariantsTest|OracleRiskInvariantsTest|InventoryProtectionInvariantsTest)$'
+CAMPAIGNS='^(VaultInvariantsTest|OracleRiskInvariantsTest|InventoryProtectionInvariantsTest|GovernanceLivenessInvariantsTest)$'
 
 echo "commit:  $(git rev-parse --short HEAD)$(git diff --quiet HEAD -- || echo ' (uncommitted changes)')"
 echo "forge:   $(forge --version | head -1)"

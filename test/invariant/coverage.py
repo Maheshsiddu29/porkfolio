@@ -66,10 +66,31 @@ CAMPAIGNS = {
             "refusedUnderFault": 0.40,  # 0.11 (0.06-0.17)
         },
     ),
+    "liveness": (
+        "^GovernanceLivenessInvariantsTest$",
+        "invariant_accountingConsistent",
+        {  # set in G02 (docs/security/G02_GOVERNANCE_LIVENESS.md), same method and seed families
+            "commitsOk": 0.10,  # 0.00 (0.00-0.02)
+            "depositsOk": 0.20,  # 0.00 (0.00-0.05)
+            "swapsOk": 0.15,  # 0.03 (0.02-0.03)
+            "queuedOk": 0.60,  # 0.36 (0.25-0.36)
+            "finalizedOk": 0.30,  # 0.09 (0.06-0.12)
+            "prefixChecks": 0.20,  # 0.05 (0.05)
+            "rotationsOk": 0.10,  # 0.00 (0.00-0.02)
+            "preEtaRotations": 0.80,  # 0.52 (0.41-0.52)
+            "execAttempts": 0.35,  # 0.03 (0.03-0.14)
+            "longExecuted": 0.45,  # 0.05 (0.05-0.22)
+            "restrictedExecutions": 0.85,  # 0.36 (0.36-0.58)
+            "expiredOps": 0.80,  # 0.53 (0.41-0.53)
+            # 0.80 (0.69-0.80). Four standard deviations above 0.80 is 1.0, which would gate nothing; 0.98 (3.6 sigma)
+            # fails only when at most one run in 64 reaches a blocked LONG_DELAY attempt.
+            "longBlocked": 0.98,
+        },
+    ),
 }
 
 # Counters that must stay zero in every run: an operation that failed for a reason the handler does not expect.
-MUST_BE_ZERO = {"inventory": ("looseningsFailedOther",)}
+MUST_BE_ZERO = {"inventory": ("looseningsFailedOther",), "liveness": ("otherFailures",)}
 
 PROFILE = "default"
 
