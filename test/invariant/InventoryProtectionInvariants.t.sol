@@ -220,7 +220,11 @@ contract InventoryProtectionHandler is Test {
             uint256 b = FullMath.mulDiv(basket[i], shares, totalShares);
             uint256 r = FullMath.mulDivRoundingUp(room[i], shares, totalShares);
             uint256 got = paid[i] * WAD;
-            // shortfall = b - got must be <= r + one raw unit (+1 for the floor in b's pro-rata split)
+            // shortfall = b - got must be <= r + 2 raw units. Each vault payout rounds down by less than one raw unit
+            // per asset (the Q2 allowance). One checked slice can span two vault payouts: a request queued and first
+            // finalized inside one handler call (the late-LP branch of `governedLoosen`) is not yet in that call's
+            // `ids`, so its next slice is checked together with the first. With one unit the queued check fails
+            // (seeds 0x5eed, 0x1, 0x2, 0x3); the instant-payout check passes with one.
             if (b > got + r + 2 * WAD) ok = false;
             if (r > 0 && b > got) {
                 uint256 bps = FullMath.mulDiv(b - got, 10_000, r);

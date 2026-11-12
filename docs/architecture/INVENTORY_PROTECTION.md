@@ -68,10 +68,25 @@ collection" is the gain side of the trades.
 - All 4 invariants pass over 32,768 calls with 0 reverts.
 - The sampled final runs (one per invariant function) had 3 / 4 / 2 fills (A / B / malicious), 2–3 loosenings
   executed and 6–7 refused by the queue check, 6–7 payouts and 5–7 slices checked.
-- The largest shortfall seen was 253–582 bps of the LP's room in this campaign's samples, and 2,361 bps in an earlier
-  campaign on the same handler before `drain` could corrupt the price itself. All are below the bound (10,000 bps).
 - Forge prints `afterInvariant` logs for the final run only, so these counts are a sample. The per-run assertion is
   what covers every run.
+
+**Correction (G01, `docs/security/G01_BASELINE.md` F5).** This section used to say that the largest shortfall seen was
+253–582 bps of the LP's room (2,361 bps in an earlier campaign) and that all were below 10,000 bps. That came from one
+sampled run per invariant and is wrong as a general statement. Over 100 single-run campaigns at depth 128 the logged
+ratio `maxShortfallToRoomBps` exceeded 10,000 bps in 36 runs (median 6,760 bps, largest 1,523,526 bps). **Q2 held in
+every one of them.** The ratio is not the bound:
+- Q2 allows the shortfall to exceed the room by one raw unit per asset per payout, because the vault rounds each payout
+  down. When an LP's room is a fraction of a raw unit (it entered with the holding at or near the floor), a shortfall
+  of under one raw unit is a very large multiple of that room.
+- The campaign checks `shortfall <= room + 2 raw units`, not `+ 1`. One checked slice can span two vault payouts: a
+  request queued and first finalized inside the same handler call (the late-LP branch of `governedLoosen`) is not yet
+  tracked at the start of that call, so its next slice is checked together with the first. Measured at one unit
+  (256 runs × depth 256, seeds `0x5eed`, `0x1`, `0x2`, `0x3`): the instant-payout invariant passes, the queued-request
+  invariant fails on every seed; at zero units both fail. So each vault payout stays within the one-unit allowance,
+  and the second unit is how the test aggregates, not extra loss.
+
+The smallest counterexample, §4.4, is this same allowance in its exact form.
 
 ## 3. What the governance change adds to Q2
 
