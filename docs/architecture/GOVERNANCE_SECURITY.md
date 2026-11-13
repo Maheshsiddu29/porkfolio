@@ -43,6 +43,7 @@ Routing checks:
 | G17 | A compromised guardian can delay governance and impose liveness costs | LIMIT. It can cancel everything except its replacement. It can pause, halt, revoke curators (permanent) and retire the authorization module (permanent). It cannot move assets, block LP exits or loosen anything. Recovery is `setGuardian` after DELAY. | `test_cancel_roles` |
 | G18 | No immediate owner tightening without a guardian | LIMIT. Every governor call waits, including tightening. Release gate: a guardian is set and differs from the admin. | — |
 | G19 | `admin` cannot be rotated | LIMIT (unchanged). Rotation means a new governor (LONG_DELAY ownership transfer) and new hooks. | — |
+| G20 | Withdrawing a nomination (`transferOwnership(address(0))`) was LONG_DELAY and refused while LPs were queued, so a nominee could keep the right to accept | **FIXED in G02.** Now DELAY and not queue-gated; a non-zero nominee stays LONG_DELAY. See `docs/security/G02_GOVERNANCE_LIVENESS.md` §6. | `test_nominationRetraction_waitsDelay_notHeldByQueuedLps` |
 
 **Privilege escalation paths examined:**
 - **Ownership changes.** G10 and G13.
@@ -93,10 +94,14 @@ How the restriction behaves:
 - **Effect on governance.** It can only delay a loosening, never hasten it. The admin calls the permissionless
   `processQueue` in the same transaction. Requests that are still undeliverable make the change wait; past GRACE it
   expires and must be re-queued.
-- **Griefing.** Blocking needs requests that cannot be finalized, i.e. pending shares above `1 − b` of supply, where
-  `b` is the vault-scope exposure cap. At the recommended `b ≤ 50%` that means more than half of all shares queued
-  behind older commitments. The guardian can release those commitments immediately. Cost to the griefer: its capital
-  stays at risk in the vault while it blocks.
+- **Griefing.** Blocking needs requests that cannot be finalized. For a lone LP that means holding, before the
+  commitments were made, more than `(1 − b)` of the non-queued shares, where `b` is the vault-scope exposure cap
+  (one share at `b = 100%` with no buffer floor). **Corrected in G02:** a registered curator that is also an LP can
+  sustain the blocking indefinitely by re-committing and re-queuing in one transaction; releasing its commitments
+  alone does not stop it. Stopping new commitments does: `MAX_HORIZON` later, any LONG_DELAY change inside its window
+  executes.
+  See `docs/security/G02_GOVERNANCE_LIVENESS.md` §4–§5. Cost to the griefer: its capital stays at risk in the vault
+  while it blocks.
 
 ### 3.4 The values
 
