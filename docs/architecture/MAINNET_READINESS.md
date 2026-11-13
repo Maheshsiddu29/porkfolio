@@ -119,6 +119,12 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 | G-3 | Guardian is a separate key or multisig with documented response times; runbooks for curator compromise, hook compromise, module compromise, stale price | Partial | Curator runbook drafted (`CURATOR_SECURITY_MODEL.md` §4); module-compromise and exhausted-generation runbooks in `AUTH_SECURITY_RELEASE_NOTES.md` §3–§4 |
 | G-4 | Emergency drill on testnet: pause and halt within one block of the decision; LP exits keep working | Not started | — |
 | G-5 | Monitoring and alerts: floor proximity, flow-bucket saturation, queue length, `Q_a / N_a`, guardian actions | Not started | Off-chain |
+| G-6 | Vault-scope exposure cap and a non-zero buffer floor in both assets, at the reviewed values. They set the capital needed to hold a LONG_DELAY change with one queued request (`G02_GOVERNANCE_LIVENESS.md` §5). The value is a reviewed choice; 50% is the rehearsal default, not a protocol invariant | Done (local, gated) | `DeploySystem` sets `BUFFER_FLOOR` and refuses zero; `VerifyDeployment` gate 9 compares cap and floor with the reviewed values and prints the blocking thresholds; `test_gates_deploymentPolicies`. Mainnet values not chosen (C-4) |
+| G-7 | Inventory targets configured before any LP share exists | Done (local, gated) | `DeploySystem` sets targets and the buffer floor before `initialDeposit` and checks the target against the minted shares; gate 9 requires non-zero targets |
+| G-8 | Vault owned by the reviewed governor with no pending nomination. A hand-over nominates only a production `VaultGovernor` for this vault, and is accepted in the nominating transaction where the admins coincide. Once a nomination has executed, nothing on-chain stops the nominee accepting, even during a retraction's DELAY | Done (local, gated) | Gate 1; gate 12 (`VerifyDeployment --sig "nominee()"`); `test_gate12_nomineeMustBeAReviewedGovernor`, `test_atomicHandover_leavesNoAcceptanceWindow`, `test_pendingNominee_canAcceptDuringRetractionDelay`. Decision R-13 |
+| G-9 | Related governance calls in one transaction: release expired commitments, `processQueue`, `execute` for a LONG_DELAY change; nomination and acceptance for a hand-over | Partial (gated) | Gate 2 (mainnet): the admin must be a contract. That the multisig actually batches is procedural (G-1) |
+| G-10 | After every guardian action and before every `execute`, no queued change loosens the current state unless it is re-approved in writing | Done (local, tool) | `script/CheckQueuedConflicts.s.sol`; `test_guardianCancellation_missesAPaddedCopy_conflictCheckFindsIt`, `test_conflictCheck_verdictsAfterGuardianEmergency`. Not run against a chain. Decision R-14 (on-chain rejection, not adopted) |
+| G-11 | Blocked LONG_DELAY change: apply a lever no later than `queuedAt + LONG_DELAY + GRACE − MAX_HORIZON` (9 days at 32 / 7 / 30); later, cancel and re-queue with the lever held, or release in an emergency | Procedure documented | `G02_GOVERNANCE_LIVENESS.md` §13.1; gate 3 (mainnet) requires `LONG_DELAY > MAX_HORIZON`; `test_leverDeadline_isQueueTimePlusNineDays`, `test_leverAfterEta_originalExpires_recoveryPaths` |
 
 ## 11. Caps for limited real value
 
@@ -127,7 +133,7 @@ it can be marked done. Status values: **Done**, **Partial**, **Not started**.
 | C-1 | Vault TVL cap (`B_a` cap per asset, checked in `deposit` and `initialDeposit`) | Not started | **Not in the current design; must be added before Gate 3.** |
 | C-2 | Per-transaction cap on `amountOut` per `exchange` | Not started | Partly covered by L1 `maxOut`; add a vault-wide per-swap maximum |
 | C-3 | Vault-wide, per-curator and per-hook flow caps configured conservatively | Partial | Mechanism built (1B-2.2); values not chosen. Size caps for the documented boundary burst (2 × cap). |
-| C-4 | Exposure cap `maxReservedBps` set low (for example ≤ 50%) | Partial | Mechanism built at hook, curator and vault scope (1B-2.2); values not chosen. |
+| C-4 | Exposure cap `maxReservedBps` set low (for example ≤ 50%) | Partial | Mechanism built at hook, curator and vault scope (1B-2.2); values not chosen. The vault-scope value and the buffer floor are now checked against the reviewed configuration (G-6). |
 | C-5 | Allow-listed depositors during Gate 3 (optional) | Not started | Decision for the owner |
 
 ## 12. Independent review

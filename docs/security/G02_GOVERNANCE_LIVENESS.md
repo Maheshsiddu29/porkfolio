@@ -1,6 +1,6 @@
 # Porkfolio — G02: Governance and Withdrawal Liveness
 
-**Status: see §11.** This document states what `VaultGovernor` and the vault's withdrawal queue guarantee about
+**Status: see §11; closeout review in §13.** This document states what `VaultGovernor` and the vault's withdrawal queue guarantee about
 governance changes and LP exits, where the two interact, and what an adversary can do at that interaction. Everything
 here is derived from the code at the commits listed in §12, not from earlier phase reports; where an earlier report
 said something different, §10 says so.
@@ -145,6 +145,9 @@ protected from a non-timelock nominee; an older queued absolute value can undo a
 | C5 | A nomination executes with the queue empty; an LP queues 20 days later; the non-timelock nominee accepts and sets the floor to zero while that LP is queued | `test_nomineeAcceptingLate_isNotHeldByLaterQueuedLps` |
 | C6 | An edge raise queued at 150 pips executes after the guardian raised the edge to 300, taking it back to 150. Canceling the queued call prevents it | `test_olderQueuedValue_undoesGuardianTightening_unlessCanceled` |
 | C7 | A `setInventoryBounds` that tightens at queue time (5% → 4%) loosens at execution after the guardian tightened to 2%. Classified by direction it would have run after DELAY with an LP queued; by selector it is held | `test_delayClass_directionAtQueueTimeIsNotDirectionAtExecution` |
+| C9 | Governance stops new commitments at eta, after a commitment made one second earlier. That commitment outlives `eta + GRACE`, so the original change is refused through its whole window and expires. Cancel + re-queue executes at the new eta; an emergency release executes the original in the same block. The lever deadline for the original is exactly `queuedAt + 9 days` | `test_leverAfterEta_originalExpires_recoveryPaths`, `test_leverDeadline_isQueueTimePlusNineDays` |
+| C10 | After a nomination executes, the nominee accepts one second before the retraction's eta. The guardian can neither retract (no ownership power) nor cancel (the nomination already executed); the retraction then fails with `NotOwner` | `test_pendingNominee_canAcceptDuringRetractionDelay` |
+| C11 | The guardian cancels the canonical copy of a conflicting edge raise; a copy with one trailing byte stays queued and undoes the tightening. `CheckQueuedConflicts` flags the copy | `test_guardianCancellation_missesAPaddedCopy_conflictCheckFindsIt` |
 | C8 | The code at a queued hook-like target is replaced after queuing. Execution calls it; it cannot use the governor's identity (every vault and governor call it tries reverts). With no code left, `execute` "succeeds" and emits `Executed` | `test_targetCodeReplacedAfterQueue_gainsNothing` |
 
 Orderings checked without a counterexample: deliverable requests (a stale one and five new redemptions from different
@@ -190,6 +193,16 @@ and by `test_restrictingNewCommitments_endsBlockingWithinMaxHorizon` (all four l
 Because LONG_DELAY (32 d) exceeds `MAX_HORIZON` (30 d), applying a lever when the change is queued makes it executable
 at eta.
 
+**L-2 recovers governance, not necessarily the queued operation** (closeout, §13.1). The original operation is
+guaranteed to execute only if the lever is applied no later than
+`queuedAt + LONG_DELAY + GRACE − MAX_HORIZON` (9 days after queuing with 32 / 7 / 30 days): every commitment made
+before the lever must expire inside `[eta, eta + GRACE]`. Applied later, a commitment made just before the lever can
+outlive the window and the original expires (C9). Governance still recovers, by either of:
+(a) cancel and re-queue as soon as the lever is on; the fresh LONG_DELAY exceeds `MAX_HORIZON`, so it executes at its
+new eta, provided the lever stays on until then; (b) an emergency release of the live commitments while the lever is
+on, which lets the original execute in the same block. Neither weakens any LP's protection: in both, every queued
+request is finalized under the old values first.
+
 **L-3. Not guaranteed: LONG_DELAY liveness while new commitments are allowed.** C2 holds a change indefinitely. §5
 quantifies it.
 
@@ -218,7 +231,8 @@ entry (MEASURED); one `processQueue(100)` clears them. Flooding adds cost, not b
 
 **Impact.** A held change is a LONG_DELAY change: an inventory-floor change (usually a loosening) or a non-zero
 nomination. No LP asset is at risk, no delay is shortened, and every tightening path (§1.4, S-4) stays open. A held
-change is delayed, not lost: it expires after GRACE and can be re-queued.
+change is delayed, not lost: it may expire after GRACE (C9), and it can then be canceled and re-queued with a fresh
+LONG_DELAY (§13.1).
 
 **Response, in order of cost.** (1) Freeze, revoke or deregister an identified coalition curator (immediate). (2) Apply
 a lever that stops new commitments when queuing the change; it then executes at eta (L-2); the cost is no new
@@ -272,10 +286,14 @@ nomination, not acceptance.
    apply to shares still queued. The bound is the inventory floor, which a DELAY change cannot lower. In static mode
    with `tau_a = 0` there is no inventory floor and the sell floor, a DELAY-class setting, is the only price bound.
    Recommended release rule (not in the checklist yet): configure `tau_a` before LPs are admitted.
-3. **Nomination vs acceptance** (C5). After a nomination executes, a non-timelock nominee can accept at any time and
-   LPs who queue later have notice (`pendingOwner` is public) but no protection.
-4. **Absolute values** (C6). An older queued call can undo a guardian tightening after its own delay; the guardian must
-   cancel conflicting queued calls when it tightens.
+3. **Nomination vs acceptance** (C5, C10). After a nomination executes, a non-timelock nominee can accept at any time,
+   including during the DELAY of a retraction, and LPs who queue later have notice (`pendingOwner` is public) but no
+   protection. A reviewed-governor nominee keeps both the timelock and the queue check after a late acceptance
+   (`test_reviewedGovernorNominee_acceptingLate_keepsTheTimelock`). Release rule and gate 12: nominate only a reviewed
+   governor; accept in the nominating transaction where both governors share the admin.
+4. **Absolute values** (C6, C11). An older queued call can undo a guardian tightening after its own delay. The governor
+   does not detect this; the design relies on explicit cancellation, checked by `CheckQueuedConflicts` after every
+   guardian action and before every `execute` (§13.3).
 5. **Target check at queue time only** (C8). Execution to an address whose code changed, or that has none, is not
    detected; it gains no authority, but `Executed` is emitted. Monitors decode target and calldata.
 6. **Tightening the inventory floor through the governor** is LONG_DELAY and queue-gated (by selector, C7). The
@@ -283,10 +301,15 @@ nomination, not acceptance.
    admin.
 7. **Trailing calldata** gives one effect several ids (1B-4.4 G15, unchanged); each waits its full delay.
 8. **The admin's batch must be atomic** (release, process, execute). With an EOA admin, a deliverable queue can still be
-   emptied, but an attacker meeting §5's capital condition can insert a request between transactions.
+   emptied, but an attacker meeting §5's capital condition can insert a request between transactions. With mainnet
+   delays, `VerifyDeployment` gate 2 requires the admin to be a contract (closeout, §13.4); that it actually batches is
+   procedural.
 9. **Governor admin and hook owners cannot be rotated** (1B-4.4 G19, unchanged).
-10. **Deployment values decide exploitability.** The test fixtures use `b = 100%`; the deployment script defaults to
-    `b = 50%` and `R_a` is not set by it. Neither is enforced on-chain.
+10. **Deployment values decide exploitability.** The test fixtures use `b = 100%`. The deployment script defaults to
+    `b = 50%` and, since the closeout, a buffer floor of 10% of the seed; `VerifyDeployment` gate 9 requires both to
+    equal the reviewed values and the floor to be non-zero. The vault itself enforces neither.
+11. **A blocked LONG_DELAY change can expire** (C9) if the levers come more than `LONG_DELAY + GRACE − MAX_HORIZON`
+    after queuing. Recovery is cancel + re-queue or an emergency release (§13.1).
 
 ## 8. Validation
 
@@ -398,7 +421,10 @@ path is admin-only), timestamp comparisons (the delay window), assembly (revert-
 `test/invariant/GovernanceLivenessInvariants.t.sol`, `test/utils/GovernanceActors.sol`; governor benchmark in
 `test/bench/`; `test/invariant/coverage.py` (liveness campaign and gates); `test/deep.sh` (campaign added to the
 extra-seed step); `test/invariant/InventoryProtectionInvariants.t.sol` (§8.2); this document;
-`docs/architecture/GOVERNANCE_SECURITY.md` (§3.3 corrected, G20 added).
+`docs/architecture/GOVERNANCE_SECURITY.md` (§3.3 corrected, G20 added). Closeout (§13): tests in the two governance
+files and `test/script/DeployScripts.t.sol`; `script/CheckQueuedConflicts.s.sol` (new); `script/DeploySystem.s.sol`,
+`script/VerifyDeployment.s.sol`, `script/README.md`; `docs/architecture/MAINNET_READINESS.md` (G-6 … G-11, C-4);
+`GOVERNANCE_SECURITY.md` (G21 … G23).
 
 ## 10. Corrections to earlier documents
 
@@ -434,7 +460,9 @@ extra-seed step); `test/invariant/InventoryProtectionInvariants.t.sol` (§8.2); 
   LONG_DELAY change's eta (vault change, needs architectural review).
 - **R-11:** add to the release checklist: `b ≤ 50%` and a non-zero `R_a` at launch; `tau_a` configured before LPs are
   admitted; nominate only a reviewed governor and accept in the same transaction; the guardian cancels queued calls
-  that conflict with its tightening; the admin's LONG_DELAY batch is atomic.
+  that conflict with its tightening; the admin's LONG_DELAY batch is atomic. *Closeout: added as checklist rows
+  G-6 … G-11 and, where a script can check it, as deployment gates (§13.4). The cap is checked against the reviewed
+  value, not against 50%.*
 - **R-12:** accept the G01 inventory-handler fix (`8241124`), a test-only change to a G01 campaign.
 
 ## 12. Commits
@@ -448,6 +476,191 @@ Branch `phase-2-g02-governance-liveness` from `52fefdc`:
 | `f2419cc` | fix: let the governor retract an ownership nomination after DELAY |
 | `439af7e` | test: add governance liveness invariant campaign |
 | `8241124` | test: check same-call queue slices before a claim can hide them |
-| (this commit) | docs: define governance and withdrawal liveness guarantees |
+| `98b2434` | docs: define governance and withdrawal liveness guarantees |
 
 Nothing was pushed, merged, deployed or broadcast. `AGENTS.md` (untracked, not created in this work) was not touched.
+
+## 13. Closeout review
+
+The G02 closeout brief asked for four focused reviews before owner integration. All four were answered with tests
+against the real contracts. **No production contract changed:** `git diff 98b2434 -- src` is empty, and the vault
+(22,440 B) and governor (4,152 B) were re-measured after the prototypes below were removed.
+
+### 13.1 Execution window: does the grace-period claim hold?
+
+The constraints are LONG_DELAY = 32 d, GRACE = 7 d, `MAX_HORIZON` = 30 d, and a LONG_DELAY change refused while
+`pendingShares ≠ 0`. A commitment made at time `t` can hold inventory until `t + 30 d`. If governance stops new
+commitments at `L`, the queue is guaranteed deliverable from `L + 30 d`. The original change can still execute only
+if that time falls inside its window:
+
+`L + MAX_HORIZON ≤ eta + GRACE`, that is `L ≤ queuedAt + LONG_DELAY + GRACE − MAX_HORIZON = queuedAt + 9 d`.
+
+| Claim | Holds? | Evidence |
+|---|---|---|
+| Governance can always recover a blocked LONG_DELAY change once new commitments are stopped | **Yes** | L-2; recoveries (a), (b) below |
+| The same queued operation will execute | **Only if the lever is applied by `queuedAt + 9 d`** | `test_leverDeadline_isQueueTimePlusNineDays`: lever at the deadline, and the original executes at `eta + GRACE` (its last executable second); one second later, it expires |
+| Stopping commitments at eta saves the original | **No** (C9) | `test_leverAfterEta_originalExpires_recoveryPaths` (a): a commitment made at `eta − 1` lives until `eta + 30 d − 1`, after `eta + 7 d`; refused at `eta + GRACE`, `NotExecutable` one second later |
+
+**Recovery sequence (intended behaviour, now documented).**
+1. *Preferred:* when queuing a LONG_DELAY change while commitments are near capacity, or as soon as blocking is seen,
+   apply a lever in the same block as the `queue` (buffer floor at the maximum, vault-scope cap 0, pause or curator
+   deregistration). The change executes at eta (L-2). The latest lever time is `queuedAt + 9 d`.
+2. *Lever applied later, change blocked:* do not wait for the window to pass. Either:
+   - (a) cancel and re-queue at once. The fresh LONG_DELAY (32 d) outlasts every commitment made before the lever
+     (30 d), so the change executes at its new eta. The lever must stay on until then. Cost: no new commitments for up
+     to 32 days. Test: case (b) of the C9 test.
+   - (b) release the live commitments in an emergency (guardian or owner) with the lever on. The original executes in
+     the same block. Cost: commitments to hooks are broken. Test: case (c) of the C9 test.
+3. An expired record must be canceled before the change can be queued again (`AlreadyQueued`,
+   `test_expiredOperation_requeueStartsAFullDelay`).
+4. Lifting the lever is an owner change through the governor (DELAY). Queue the lift at least DELAY before the planned
+   execution and execute it in the same batch, after the LONG_DELAY change. Lifting it earlier lets new commitments
+   and new requests block again.
+
+In every path the batch finalizes each queued request under the old values before the change applies. **No LP
+protection is weakened.** Guaranteeing the same operation would need one of:
+- a GRACE longer than `MAX_HORIZON`, which leaves approved changes executable for weeks after their notice;
+- the snapshot rule (R-9), which weakens LP protection;
+- an expiry cap on new commitments (R-10), which is a vault change.
+
+None is adopted here.
+
+### 13.2 Ownership nomination and acceptance
+
+| Question | Result | Evidence |
+|---|---|---|
+| Sequence: (1) nomination executed, (2) LP queues, (3) nominee accepts, (4) new owner bypasses the old timelock | **Possible only with a nominee that is not a timelock.** An EOA nominee sets the floor to zero at once while the LP is queued (C5). A reviewed `VaultGovernor` nominee accepting late changes nothing: its admin cannot call the vault (`NotOwner`), and a floor change waits LONG_DELAY and is refused while the LP is queued | `test_nomineeAcceptingLate_isNotHeldByLaterQueuedLps`, `test_reviewedGovernorNominee_acceptingLate_keepsTheTimelock` |
+| Can a pending nominee accept during the retraction's DELAY? | **Yes** (C10). Nothing on-chain stops it: the guardian has no ownership power and cannot cancel an executed nomination. The nominee accepts at `eta2 − 1`, and the retraction then fails with `NotOwner` | `test_pendingNominee_canAcceptDuringRetractionDelay` |
+| Can the window be avoided? | **Yes**, when both governors share the admin: the nomination and `acceptVaultOwnership` run in one transaction. If acceptance fails, the nomination reverts with it and no nominee remains | `test_atomicHandover_leavesNoAcceptanceWindow` |
+
+**Does this violate a documented protection?** No. The governor's NatSpec and §1.5 and §7.3 state that the queue check
+binds when the nomination executes, not when the nominee accepts.
+- The nomination itself waited LONG_DELAY in public and could execute only with the queue empty, so every LP queued
+  before it was finalized under the old values.
+- LPs who queue after the nomination can read `pendingOwner`: they have notice but no protection from a non-timelock
+  nominee.
+
+So no contract change is made. The release rule is now an executable check:
+- **Gate 12** (`VerifyDeployment.nominee()`) accepts only a production `VaultGovernor` for this vault, with the
+  expected admin and the mainnet delay minimums (`test_gate12_nomineeMustBeAReviewedGovernor`);
+- **gate 1** already refuses any pending nomination after a hand-over.
+
+**Smallest on-chain options, measured, not applied (owner decision R-13).** Measurements are from production builds;
+the prototypes were removed.
+
+| Option | Size | Effect | Cost |
+|---|---|---|---|
+| V-A: the vault's `acceptOwnership` also requires `pendingShares == 0` | vault +19 B (22,459; margin 2,117) | Moves the queue check to acceptance, so C5 cannot hit a queued LP | Does not close C10. Acceptance becomes griefable like L-3. A vault change to the ownership rule |
+| G-A: an immediate retraction through the governor, by the admin or guardian | not prototyped | Narrows C10 to a same-block front-run | Breaks "every owner call waits" (§6). Gives the guardian a power over ownership |
+
+### 13.3 Guardian tightening and queued operations
+
+**Reproduction.** C6 shows an edge raise queued at 150 undoing a later guardian raise to 300. C11 shows that cancelling
+by id misses a copy of the call with one trailing byte, which then undoes the tightening as well.
+
+**Can the governor reject stale, conflicting changes at execution?** Not from its own state:
+- it sees only `(target, data)`;
+- the guardian acts on the vault directly;
+- as owner, every governor call passes the vault's `_authorize`, so the governor cannot tell a loosening from a
+  tightening.
+
+Rejection needs a signal from the vault. The smallest such design was prototyped and measured on production builds,
+then removed:
+- **Vault:** a counter incremented in `_authorize`'s guardian branch, with a public getter.
+- **Governor:** stores the counter at `queue` for vault calls, and at `execute` refuses any vault call (except
+  `setGuardian`) whose counter changed.
+
+| | Current | Prototype | Change |
+|---|---|---|---|
+| Vault runtime (B) | 22,440 (margin 2,136) | 22,505 (margin 2,071) | +65 B; 23 B above the 2,048 B target |
+| Governor runtime (B) | 4,152 | 4,710 | +558 B |
+| `queue` setPaused / setInventoryBounds / transferOwnership(0) (gas) | 49,781 / 55,674 / 54,336 | 57,614 / 63,509 / 62,170 | about +7.8k with the counter at zero; storing a non-zero counter adds about 20k more (not measured) |
+| `execute` setPaused / setInventoryBounds / transferOwnership(0) (gas) | 40,396 / 109,497 / 41,524 | 45,716 / 114,839 / 46,866 | about +5.3k |
+
+The prototype was also incomplete: the guardian's emergency `release` uses its own authorization path and was not
+counted; it had no NatSpec and no tests.
+
+**Not selected.** It would protect against admin mistakes without depending on the guardian, but:
+1. It uses almost all of the vault's remaining headroom, which C-1 (TVL cap) and R-10 need.
+2. Every guardian action invalidates every queued vault change, including unrelated ones and the LONG_DELAY change a
+   lever is meant to rescue. Recovery (a) of §13.1 then becomes the only path after a lever.
+3. It changes the vault's governance interface: architectural review.
+
+A compromised guardian would gain nothing from it: it can already cancel everything except its replacement. This is
+owner decision R-14.
+
+**Assumption the design relies on, and its failure modes.** *After any guardian tightening, every queued change that
+would loosen the tightened state is canceled before its eta, by the guardian or the admin.*
+
+Failure modes:
+1. **A missed id.** Trailing-byte copies (C11, 1B-4.4 G15) or an equivalent call with other arguments.
+2. **A slow or absent guardian.** The admin, who alone can execute, executes the stale change.
+3. **A verdict on stale state.** The check is valid only at the block simulated.
+4. **Owner-only calls** (unfreeze, guardian or ownership changes) can only be flagged for review, not classified by
+   direction.
+5. **Hook calls cannot be classified.** They cannot undo a vault tightening, because hooks are priced inside the
+   vault's limits.
+
+**Executable check: `script/CheckQueuedConflicts.s.sol`.**
+- It reads every `Queued` event and simulates each still-queued vault call from the guardian's address on a discarded
+  snapshot. The vault's own `_authorize` then says whether the call would loosen the *current* state.
+- It needs no per-function table and finds padded copies, because it simulates the exact queued bytes.
+- It reverts if any change loosens or is owner-only.
+- Run it after every guardian action and before every `execute`.
+- Tests: `test_guardianCancellation_missesAPaddedCopy_conflictCheckFindsIt` and
+  `test_conflictCheck_verdictsAfterGuardianEmergency` (unpause and an older edge loosen; unfreeze is owner-only; a
+  further tightening and a hook call are not flagged; no state is left behind).
+
+### 13.4 Deployment policies
+
+| Requirement (checklist) | How it is enforced | Evidence |
+|---|---|---|
+| Exposure cap and non-zero protected buffer (G-6) | `DeploySystem` sets `BUFFER_FLOOR` (default 10% of the seed) and refuses zero. Gate 9 requires the vault-scope cap and the buffer floor to equal the reviewed values, and the floor to be non-zero. It prints the two blocking thresholds `1 − b` and `R_a / B_a`. The cap is compared with the reviewed value, **not with 50%**: 50% is the rehearsal default, not a protocol invariant | `test_gates_deploymentPolicies` |
+| Inventory targets before LP deposits (G-7) | `DeploySystem` sets the targets and the buffer floor before `initialDeposit`, then checks the target against the shares minted. LPs can deposit only after the seed, so no share ever exists without a floor. Gate 9 requires both targets to be non-zero | `test_gates_deploymentPolicies` (`inventoryTargetPerShare(0) == 1e18`) |
+| Reviewed governor ownership and transfer acceptance (G-8) | Gate 1: owner is the governor and nothing is pending. Gate 12 for a hand-over. Atomic acceptance where the admins coincide | `test_gates_refuseUntilGovernorAccepts`, `test_gate12_nomineeMustBeAReviewedGovernor`, `test_atomicHandover_leavesNoAcceptanceWindow` |
+| Atomic handling of related operations (G-9) | Gate 2 (mainnet): the admin must be a contract (a multisig can batch). The governor itself has no batching | `test_gates_deploymentPolicies` |
+| Conflict checks after emergency guardian actions (G-10) | `CheckQueuedConflicts` | §13.3 tests |
+| Lever timing for LONG_DELAY changes (G-11) | Gate 3 (mainnet): `LONG_DELAY > MAX_HORIZON`. The deadline itself (`queuedAt + 9 d`) is procedural | §13.1 tests |
+
+**Not enforceable by a script:**
+- that the multisig really submits one transaction;
+- that the guardian runs the conflict check;
+- when a lever is applied.
+
+### 13.5 Validation
+
+| Command | Commit | Result |
+|---|---|---|
+| `forge fmt --check` | `b257017` | clean |
+| `forge test` (default profile) | `b257017` | **628 passed, 0 failed, 8 skipped** (fork tests, no RPC). +9 since G02: 3 liveness, 4 integrity, 2 deployment-gate tests |
+| `forge test --match-path test/governance/*` | `b257017` | 14 + 15 + 22 passed |
+| `forge test --match-path test/script/DeployScripts.t.sol` | `b257017` | 6 passed, including the full local rehearsal with the new gates |
+| `forge test --match-path test/invariant/GovernanceLivenessInvariants.t.sol` (default; then `FOUNDRY_PROFILE=ci`) | `b257017` | 5 invariants, 64 × 64 and 128 × 128 (16,384 calls), 0 reverts; scripted branch test passes |
+| `python3 test/invariant/coverage.py --campaign liveness` | `b257017` | every gate passed (64 seeds; `longBlocked` zero-runs 0.80 against a gate of 0.98, as at G02) |
+| `forge test --match-test test_bench_governor --isolate` | restored tree | governor gas identical to §6 (49,781 / 55,674 / 54,336; 40,396 / 109,497 / 41,524) |
+| sizes from `out/` after `forge build` | restored tree | vault 22,440 B, governor 4,152 B: unchanged |
+
+**Deliberately deferred,** because no production contract changed and nothing failed:
+- `test/deep.sh`, the mutation campaign, `test/bench/security.sh`, Slither, the fork tests and the historical
+  benchmarks;
+- `CheckQueuedConflicts.run()` and `VerifyDeployment.nominee()` have not run against a chain: `run` needs
+  `eth_getLogs` from an RPC. The classification and gate logic they call is tested locally.
+
+### 13.6 Owner decisions added
+
+- **R-13:** ownership acceptance. Keep the current rule with gate 12 and atomic acceptance, or adopt V-A (+19 B vault)
+  and/or G-A (§13.2).
+- **R-14:** stale-change rejection. Keep explicit cancellation with `CheckQueuedConflicts`, or adopt the vault counter
+  (+65 B vault, +558 B governor, §13.3), which needs architectural review.
+- R-9 and R-10 also decide whether the queued operation itself, and not only governance, is guaranteed to execute
+  (§13.1).
+
+### 13.7 Closeout commits
+
+| Commit | Subject |
+|---|---|
+| `ed47b2b` | test: check governance expiry after a late commitment stop |
+| `d56d557` | test: cover ownership acceptance with queued exits |
+| `752d891` | test: add a queued-change conflict check for guardian actions |
+| `b257017` | test: gate deployments on buffer, cap, admin and nominee policy |
+| (this commit) | docs: define governance recovery conditions |
