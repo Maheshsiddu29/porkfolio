@@ -39,8 +39,9 @@ import {TestnetAggregator} from "./testnet/TestnetAggregator.sol";
 ///      What it then does:
 ///      - initializes one pool per hook at 1:1;
 ///      - configures the vault as its temporary owner (the broadcaster);
-///      - seeds it with `initialDeposit`;
-///      - sets the inventory target to the seeded holding;
+///      - sets the inventory target to the holding the seed will give each share, and a non-zero buffer floor in
+///        each asset, before any share exists (release checklist G-6, G-7);
+///      - seeds it with `initialDeposit` and checks the target against the minted shares;
 ///      - installs the adapter;
 ///      - nominates the governor.
 ///      If the broadcaster is also the governor's admin (allowed only with labelled testnet delays), it also accepts
@@ -79,6 +80,7 @@ contract DeploySystem is Script {
         uint24 maxUncertaintyPips;
         uint256 flowCap; // per scope, per asset, per day, raw units
         uint16 exposureBps;
+        uint256 bufferFloor; // raw units per asset that new commitments must leave free
         bytes32 salt; // namespace for every CREATE2 salt
     }
 
@@ -127,14 +129,17 @@ contract DeploySystem is Script {
         c.maxUncertaintyPips = uint24(vm.envOr("MAX_UNCERTAINTY_PIPS", uint256(20_000)));
         c.flowCap = vm.envOr("FLOW_CAP", c.seed * 4 / 10);
         c.exposureBps = uint16(vm.envOr("EXPOSURE_BPS", uint256(5000)));
+        c.bufferFloor = vm.envOr("BUFFER_FLOOR", c.seed / 10);
         c.salt = vm.envOr("SALT_NAMESPACE", keccak256("porkfolio.rehearsal.v1"));
         validate(c);
     }
 
     /// @notice Refuses a configuration the rehearsal must never use: a chain other than Sepolia or local, a guardian
-    ///         that is the governor admin, or the deployer administering a governor with non-test delays.
+    ///         that is the governor admin, the deployer administering a governor with non-test delays, or a zero
+    ///         buffer floor.
     function validate(Config memory c) public view {
         if (block.chainid != UNICHAIN_SEPOLIA && block.chainid != LOCAL) revert("DeploySystem: Sepolia or local only");
+        if (c.bufferFloor == 0) revert("DeploySystem: buffer floor must be non-zero");
         if (c.admin == c.guardian) revert("DeploySystem: guardian must differ from the governor admin");
         if (c.admin == c.deployer && c.delay >= 1 days) {
             revert("DeploySystem: deployer as admin only with test delays");
@@ -231,14 +236,22 @@ contract DeploySystem is Script {
         _limits(v, ISharedCommitmentVault.RiskScope.Curator, c.curator, c);
         v.setGuardian(c.guardian);
         v.setRiskBounds(c.edgePips, c.maxUncertaintyPips);
+        v.setBufferFloor(c0, c.bufferFloor);
+        v.setBufferFloor(c1, c.bufferFloor);
+        // initialDeposit(seed, seed) mints sqrt(seed * seed) = seed shares, so each share starts with exactly one raw
+        // unit of each asset: the per-share target (1e18 fixed point) is 1e18. Set before any share exists, so no LP
+        // can ever hold a share without an inventory floor.
+        uint256 tau = 1e18;
+        v.setInventoryBounds(tau, tau, c.kappaPips, c.kappaPips);
 
         MockERC20(d.token0).mint(c.deployer, c.seed);
         MockERC20(d.token1).mint(c.deployer, c.seed);
         MockERC20(d.token0).approve(d.vault, c.seed);
         MockERC20(d.token1).approve(d.vault, c.seed);
         v.initialDeposit(c.seed, c.seed, c.deployer);
-        uint256 tau = FullMath.mulDiv(c.seed, 1e18, v.totalShares());
-        v.setInventoryBounds(tau, tau, c.kappaPips, c.kappaPips);
+        require(
+            FullMath.mulDiv(c.seed, 1e18, v.totalShares()) == tau, "DeploySystem: inventory target != seeded holding"
+        );
         v.setRiskAdapter(IMarketRiskAdapter(d.adapter));
         v.transferOwnership(d.governor);
     }

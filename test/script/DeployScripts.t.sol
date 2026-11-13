@@ -108,6 +108,7 @@ contract DeployScriptsTest is Test {
         VerifyDeployment.Expect memory e;
         (e.poolManager, e.admin, e.guardian, e.curator) = (c.poolManager, c.admin, c.guardian, c.curator);
         (e.kappaPips, e.edgePips, e.maxUncertaintyPips) = (c.kappaPips, c.edgePips, c.maxUncertaintyPips);
+        (e.exposureBps, e.bufferFloor) = (c.exposureBps, c.bufferFloor);
         VerifyDeployment verify = new VerifyDeployment();
         vm.expectRevert(bytes("gate 1: vault.owner() != governor"));
         verify.check(ds, d, e);
@@ -115,6 +116,74 @@ contract DeployScriptsTest is Test {
         vm.prank(c.admin);
         VaultGovernor(d.governor).acceptVaultOwnership();
         verify.check(ds, d, e); // every gate that applies before stage 2
+    }
+
+    /// @dev A deployment administered by a separate admin with mainnet-length delays, accepted by that admin, and the
+    ///      expectations that match it.
+    function _mainnetLike() internal returns (DeploySystem.Deployment memory d, VerifyDeployment.Expect memory e) {
+        DeploySystem.Config memory c = ds.loadConfig();
+        (c.admin, c.delay, c.longDelay, c.grace) = (makeAddr("multisig"), 3 days, 32 days, 7 days);
+        c.salt = keccak256("mainnet-like");
+        d = ds.runWith(c);
+        vm.prank(c.admin);
+        VaultGovernor(d.governor).acceptVaultOwnership();
+        (e.poolManager, e.admin, e.guardian, e.curator, e.mainnetDelays) =
+        (c.poolManager, c.admin, c.guardian, c.curator, true);
+        (e.kappaPips, e.edgePips, e.maxUncertaintyPips) = (c.kappaPips, c.edgePips, c.maxUncertaintyPips);
+        (e.exposureBps, e.bufferFloor) = (c.exposureBps, c.bufferFloor);
+    }
+
+    /// @notice Deployment policies as gates. The seed never exists without an inventory target or a buffer floor: both
+    ///         are set before `initialDeposit`. With mainnet delays the admin must be a contract (a multisig can execute
+    ///         release, processQueue and execute, or a nomination and its acceptance, in one transaction). The
+    ///         vault-scope exposure cap and the buffer floor must equal the reviewed values; a zero buffer floor is
+    ///         refused by the deployment and by the gate. The cap's value is whatever was reviewed, not a constant.
+    function test_gates_deploymentPolicies() public {
+        (DeploySystem.Deployment memory d, VerifyDeployment.Expect memory e) = _mainnetLike();
+        SharedCommitmentVault v = SharedCommitmentVault(d.vault);
+        assertEq(v.inventoryTargetPerShare(0), 1e18, "target equals the seeded holding per share");
+        assertEq(v.bufferFloor(v.asset0()), e.bufferFloor);
+        VerifyDeployment verify = new VerifyDeployment();
+
+        vm.expectRevert(bytes("gate 2: admin must be a contract (multisig) to batch"));
+        verify.check(ds, d, e);
+        vm.etch(e.admin, hex"00");
+        verify.check(ds, d, e);
+
+        uint256 snap = vm.snapshotState();
+        e.exposureBps = 3000;
+        vm.expectRevert(bytes("gate 9: vault exposure cap"));
+        verify.check(ds, d, e);
+        vm.revertToState(snap);
+        e.bufferFloor = 0;
+        vm.expectRevert(bytes("gate 9: reviewed buffer floor is zero"));
+        verify.check(ds, d, e);
+
+        DeploySystem.Config memory c = ds.loadConfig();
+        c.bufferFloor = 0;
+        vm.expectRevert(bytes("DeploySystem: buffer floor must be non-zero"));
+        ds.validate(c);
+    }
+
+    /// @notice Gate 12 accepts as nominee only a production `VaultGovernor` for this vault, administered by the expected
+    ///         admin, with mainnet delay minimums: an externally owned account, a governor for someone else's admin
+    ///         and a governor with short delays are all refused.
+    function test_gate12_nomineeMustBeAReviewedGovernor() public {
+        (DeploySystem.Deployment memory d, VerifyDeployment.Expect memory e) = _mainnetLike();
+        VerifyDeployment verify = new VerifyDeployment();
+        address next = makeAddr("nextMultisig");
+        string memory artifact = "out/VaultGovernor.sol/VaultGovernor.json";
+        address good = deployCode(artifact, abi.encode(d.vault, next, 3 days, 32 days, 7 days));
+        address otherAdmin = deployCode(artifact, abi.encode(d.vault, e.admin, 3 days, 32 days, 7 days));
+        address fast = deployCode(artifact, abi.encode(d.vault, next, 3 days, 3 days, 7 days));
+
+        verify.checkNominee(d.vault, good, next, true);
+        vm.expectRevert();
+        verify.checkNominee(d.vault, makeAddr("eoa"), next, true);
+        vm.expectRevert(bytes("gate 12: nominee bound to another vault or admin"));
+        verify.checkNominee(d.vault, otherAdmin, next, true);
+        vm.expectRevert(bytes("gate 12: nominee delays"));
+        verify.checkNominee(d.vault, fast, next, true);
     }
 
     /// @notice The scripts refuse Unichain mainnet (130) and every chain but Sepolia (1301) and local.

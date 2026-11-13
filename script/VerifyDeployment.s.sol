@@ -7,6 +7,7 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 
 import {SharedCommitmentVault} from "../src/SharedCommitmentVault.sol";
 import {ISharedCommitmentVault} from "../src/interfaces/ISharedCommitmentVault.sol";
@@ -24,9 +25,11 @@ import {DeploySystem} from "./DeploySystem.s.sol";
 ///         that holds. It sends no transaction. Run it after each stage and before anything is announced.
 /// @dev Gates:
 ///      1. vault owned by the governor, with no pending nomination;
-///      2. the governor bound to this vault and the expected admin;
-///      3. governor delays at least the profile minimum (mainnet: 3 / 32 / 7 days; a testnet profile prints its
-///         values as TEST);
+///      2. the governor bound to this vault and the expected admin; with mainnet delays, the admin is a contract (a
+///         multisig), because a LONG_DELAY change and an ownership hand-over must be executed in one batch;
+///      3. governor delays at least the profile minimum (mainnet: 3 / 32 / 7 days, and LONG_DELAY above the vault's
+///         MAX_HORIZON so that stopping new commitments when a LONG_DELAY change is queued lets it execute at eta;
+///         a testnet profile prints its values as TEST);
 ///      4. a guardian set, as expected, and distinct from the admin;
 ///      5. each hook owned by the governor, bound to this vault and PoolManager, registered, and at an address with
 ///         exactly its permission bits;
@@ -36,8 +39,14 @@ import {DeploySystem} from "./DeploySystem.s.sol";
 ///      8. every deployed runtime code equal to the local production build, immutables masked, with production
 ///         compiler settings;
 ///      9. risk parameters: inventory targets set, tolerance, edge, uncertainty bound and risk limits as reviewed;
+///         the vault-scope exposure cap and the buffer floor equal the reviewed values, and the buffer floor is
+///         non-zero. Together they set the shares an LP must hold, before a commitment, to keep one request queued
+///         behind it (G02 report §5); the gate prints both fractions. The reviewed cap is a deployment choice, not a
+///         protocol constant;
 ///      10. both pools initialized;
-///      11. (after stage 2) both hooks configured.
+///      11. (after stage 2) both hooks configured;
+///      12. (`nominee()`, before queuing and before executing an ownership hand-over) the nominee is a production
+///          `VaultGovernor` bound to this vault and the expected admin, with the same delay minimums as gate 3.
 contract VerifyDeployment is Script {
     using StateLibrary for IPoolManager;
 
@@ -56,6 +65,8 @@ contract VerifyDeployment is Script {
         uint24 maxUncertaintyPips;
         bytes32 adapterVersion; // zero: not checked (print it for the record)
         bool hooksConfigured;
+        uint16 exposureBps; // reviewed vault-scope maxReservedBps, both assets
+        uint256 bufferFloor; // reviewed buffer floor, raw units, both assets
     }
 
     function run() external {
@@ -71,9 +82,39 @@ contract VerifyDeployment is Script {
             edgePips: uint24(vm.envOr("EDGE_PIPS", uint256(100))),
             maxUncertaintyPips: uint24(vm.envOr("MAX_UNCERTAINTY_PIPS", uint256(20_000))),
             adapterVersion: vm.envOr("ADAPTER_CONFIG_VERSION", bytes32(0)),
-            hooksConfigured: vm.envOr("EXPECT_HOOKS_CONFIGURED", false)
+            hooksConfigured: vm.envOr("EXPECT_HOOKS_CONFIGURED", false),
+            exposureBps: uint16(vm.envOr("EXPOSURE_BPS", uint256(5000))),
+            bufferFloor: vm.envOr("BUFFER_FLOOR", vm.envOr("SEED_AMOUNT", uint256(1_000_000 ether)) / 10)
         });
         check(ds, d, e);
+    }
+
+    /// @notice Gate 12, for an ownership hand-over. Environment: VAULT, NOMINEE, NOMINEE_ADMIN, MAINNET_DELAYS.
+    function nominee() external view {
+        checkNominee(
+            vm.envAddress("VAULT"),
+            vm.envAddress("NOMINEE"),
+            vm.envAddress("NOMINEE_ADMIN"),
+            vm.envOr("MAINNET_DELAYS", false)
+        );
+    }
+
+    /// @notice Reverts unless `nominee` is a production `VaultGovernor` for `vault` administered by `admin`, with the
+    ///         delay minimums of gate 3. A nominee that is not a timelock would own the vault without any delay.
+    function checkNominee(address vault, address nominee_, address admin, bool mainnetDelays) public view {
+        ProductionArtifacts.requireProduction(
+            nominee_, "out/VaultGovernor.sol/VaultGovernor.json", ProductionArtifacts.DEFAULT_RUNS
+        );
+        VaultGovernor g = VaultGovernor(nominee_);
+        require(g.vault() == vault && g.admin() == admin, "gate 12: nominee bound to another vault or admin");
+        _delays(g, SharedCommitmentVault(vault), mainnetDelays, "gate 12: nominee delays");
+        console2.log("PASS 12 nominee is a production governor for this vault", nominee_);
+    }
+
+    function _delays(VaultGovernor g, SharedCommitmentVault v, bool mainnetDelays, string memory reason) internal view {
+        if (!mainnetDelays) return;
+        require(g.DELAY() >= 3 days && g.LONG_DELAY() >= 32 days && g.GRACE() >= 7 days, reason);
+        require(g.LONG_DELAY() > v.MAX_HORIZON(), reason);
     }
 
     function check(DeploySystem ds, DeploySystem.Deployment memory d, Expect memory e) public view {
@@ -92,9 +133,10 @@ contract VerifyDeployment is Script {
         require(v.pendingOwner() == address(0), "gate 1: an ownership nomination is pending");
         console2.log("PASS 1 vault owned by governor", d.governor);
         require(g.vault() == d.vault && g.admin() == e.admin, "gate 2: governor bound to another vault or admin");
+        if (e.mainnetDelays) require(e.admin.code.length != 0, "gate 2: admin must be a contract (multisig) to batch");
         console2.log("PASS 2 governor bound to vault and admin", e.admin);
         if (e.mainnetDelays) {
-            require(g.DELAY() >= 3 days && g.LONG_DELAY() >= 32 days && g.GRACE() >= 7 days, "gate 3: delays");
+            _delays(g, v, true, "gate 3: delays");
             console2.log("PASS 3 mainnet delays", g.DELAY(), g.LONG_DELAY(), g.GRACE());
         } else {
             console2.log("PASS 3 TEST delays (not for mainnet)", g.DELAY(), g.LONG_DELAY(), g.GRACE());
@@ -181,6 +223,23 @@ contract VerifyDeployment is Script {
         }
         ISharedCommitmentVault.CuratorRecord memory r = v.getCurator(e.curator);
         require(r.registered && r.restriction == ISharedCommitmentVault.CuratorRestriction.None, "gate 9: curator");
-        console2.log("PASS 9 inventory bounds, kappa, edge, uncertainty bound, risk limits, curator");
+        require(e.bufferFloor != 0, "gate 9: reviewed buffer floor is zero");
+        Currency[2] memory assets = [v.asset0(), v.asset1()];
+        for (uint256 i; i < 2; ++i) {
+            ISharedCommitmentVault.RiskLimit memory l =
+                v.getRiskLimit(ISharedCommitmentVault.RiskScope.Vault, address(0), assets[i]);
+            require(l.maxReservedBps == e.exposureBps, "gate 9: vault exposure cap");
+            require(v.bufferFloor(assets[i]) == e.bufferFloor, "gate 9: buffer floor");
+            // A request queued behind a full commitment is held only if free inventory is below its pro-rata claim:
+            // the LP needs more than (1 - cap) of the other shares, and more than R_a / N_a of all shares.
+            console2.log("asset", i, "blocking threshold, 1 - cap (bps):", 10_000 - uint256(l.maxReservedBps));
+            console2.log(
+                "asset",
+                i,
+                "blocking threshold, R / backing (bps):",
+                FullMath.mulDiv(v.bufferFloor(assets[i]), 10_000, v.backing(assets[i]))
+            );
+        }
+        console2.log("PASS 9 inventory bounds, kappa, edge, uncertainty bound, risk limits, curator, cap, buffer floor");
     }
 }
