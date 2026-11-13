@@ -10,6 +10,7 @@ import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVaul
 import {VaultGovernor} from "../../src/governance/VaultGovernor.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
+import {CheckQueuedConflicts} from "../../script/CheckQueuedConflicts.s.sol";
 
 /// @dev Passes the governor's target check at queue time; its code is replaced before execution in one test.
 contract FakeHook {
@@ -177,6 +178,79 @@ contract GovernorIntegrityTest is VaultTestBase {
         vm.prank(admin);
         vm.expectRevert(abi.encodeWithSelector(VaultGovernor.NotQueued.selector, id));
         gov.execute(v, raise);
+        assertEq(vault.riskEdgePips(), 300);
+    }
+
+    /// @notice Explicit cancellation is the design's answer to C6, and its failure mode is a missed id. Calldata with
+    ///         trailing bytes the vault ignores is a different operation with the same effect: the guardian cancels the
+    ///         canonical edge raise after tightening, the padded copy stays queued and undoes the tightening anyway.
+    ///         The conflict check reads every queued call and simulates it from the guardian's address, so it flags
+    ///         the copy (it loosens the current state) without decoding anything.
+    function test_guardianCancellation_missesAPaddedCopy_conflictCheckFindsIt() public {
+        CheckQueuedConflicts check = new CheckQueuedConflicts();
+        bytes memory raise = abi.encodeCall(vault.setRiskBounds, (150, 5000));
+        bytes memory padded = bytes.concat(raise, bytes1(0));
+        uint256 eta = _queue(v, raise);
+        _queue(v, padded);
+        assertEq(uint8(check.classify(gov, v, padded)), uint8(CheckQueuedConflicts.Verdict.Tightens), "100 -> 150");
+
+        vm.startPrank(guardian);
+        vault.setRiskBounds(300, 5000);
+        gov.cancel(v, raise);
+        vm.stopPrank();
+        assertEq(uint8(check.classify(gov, v, raise)), uint8(CheckQueuedConflicts.Verdict.NotQueued));
+        assertEq(uint8(check.classify(gov, v, padded)), uint8(CheckQueuedConflicts.Verdict.Loosens), "300 -> 150");
+        assertEq(vault.riskEdgePips(), 300, "the check leaves no state behind");
+
+        uint256 snap = vm.snapshotState();
+        vm.warp(eta);
+        _execute(v, padded);
+        assertEq(vault.riskEdgePips(), 150, "the missed copy undid the tightening");
+        vm.revertToState(snap);
+        vm.prank(guardian);
+        gov.cancel(v, padded);
+        assertEq(uint8(check.classify(gov, v, padded)), uint8(CheckQueuedConflicts.Verdict.NotQueued));
+    }
+
+    /// @notice The check's verdicts after an emergency (pause, curator freeze, edge raise), for each kind of queued
+    ///         change: an unpause and an older edge value loosen the current state, an unfreeze is owner-only, a
+    ///         further tightening and a hook call cannot undo anything. `report` counts the first three.
+    function test_conflictCheck_verdictsAfterGuardianEmergency() public {
+        CheckQueuedConflicts check = new CheckQueuedConflicts();
+        address[] memory targets = new address[](5);
+        bytes[] memory calls = new bytes[](5);
+        (targets[0], calls[0]) = (v, abi.encodeCall(vault.setPaused, (false)));
+        (targets[1], calls[1]) = (v, abi.encodeCall(vault.setRiskBounds, (150, 5000)));
+        (targets[2], calls[2]) = (v, abi.encodeCall(vault.unfreezeCurator, (curator)));
+        (targets[3], calls[3]) = (v, abi.encodeCall(vault.setRiskBounds, (400, 5000)));
+        (targets[4], calls[4]) = (address(hookA), abi.encodeWithSignature("hookOwner()"));
+        for (uint256 i; i < 4; ++i) {
+            _queue(targets[i], calls[i]);
+        }
+        // The fixture's hooks are owned by the test owner, not this governor, so `queue` would refuse the hook call;
+        // its `eta` entry (mapping at slot 0) is written directly. The verdict depends only on the target.
+        vm.store(
+            address(gov), keccak256(abi.encode(gov.operationId(targets[4], calls[4]), uint256(0))), bytes32(uint256(1))
+        );
+
+        vm.startPrank(guardian);
+        vault.setPaused(true);
+        vault.freezeCurator(curator);
+        vault.setRiskBounds(300, 5000);
+        vm.stopPrank();
+
+        CheckQueuedConflicts.Verdict[5] memory expected = [
+            CheckQueuedConflicts.Verdict.Loosens,
+            CheckQueuedConflicts.Verdict.Loosens,
+            CheckQueuedConflicts.Verdict.OwnerOnly,
+            CheckQueuedConflicts.Verdict.Tightens,
+            CheckQueuedConflicts.Verdict.Hook
+        ];
+        for (uint256 i; i < 5; ++i) {
+            assertEq(uint8(check.classify(gov, targets[i], calls[i])), uint8(expected[i]));
+        }
+        assertEq(check.report(gov, targets, calls), 3);
+        assertTrue(vault.paused());
         assertEq(vault.riskEdgePips(), 300);
     }
 
