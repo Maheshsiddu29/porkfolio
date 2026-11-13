@@ -514,6 +514,37 @@ contract GovernanceLivenessTest is VaultTestBase {
         }
     }
 
+    // =================================================================== ownership hand-over
+
+    /// @notice A hand-over to a second governor with the same admin can execute the nomination and accept it in one
+    ///         transaction, so no block ever has a pending nominee. If the acceptance fails (here: the nominee's admin
+    ///         is someone else), the nomination reverts with it and the vault keeps its owner and no nominee.
+    function test_atomicHandover_leavesNoAcceptanceWindow() public {
+        VaultGovernor other = new VaultGovernor(v, makeAddr("otherAdmin"), 3 days, 32 days, 7 days);
+        VaultGovernor gov2 = new VaultGovernor(v, address(admin), 3 days, 32 days, 7 days);
+        bytes memory toOther = abi.encodeCall(vault.transferOwnership, (address(other)));
+        bytes memory toGov2 = abi.encodeCall(vault.transferOwnership, (address(gov2)));
+        uint256 eta = _queueGov(toOther);
+        _queueGov(toGov2);
+        vm.warp(eta);
+
+        AdminBatch.Call[] memory calls = new AdminBatch.Call[](2);
+        calls[0] = AdminBatch.Call(address(gov), abi.encodeCall(gov.execute, (v, toOther)));
+        calls[1] = AdminBatch.Call(address(other), abi.encodeCall(other.acceptVaultOwnership, ()));
+        vm.prank(signer);
+        vm.expectRevert(VaultGovernor.NotAdmin.selector);
+        admin.run(calls);
+        assertEq(vault.owner(), address(gov));
+        assertEq(vault.pendingOwner(), address(0));
+
+        calls[0] = AdminBatch.Call(address(gov), abi.encodeCall(gov.execute, (v, toGov2)));
+        calls[1] = AdminBatch.Call(address(gov2), abi.encodeCall(gov2.acceptVaultOwnership, ()));
+        vm.prank(signer);
+        admin.run(calls);
+        assertEq(vault.owner(), address(gov2));
+        assertEq(vault.pendingOwner(), address(0), "no nomination outlives the transaction");
+    }
+
     /// @notice An oracle outage stops fills but neither LP exits nor governance: with the adapter reverting, the
     ///         queued LP is finalized and claims, and the LONG_DELAY change executes once the commitment is released.
     function test_oracleFailure_doesNotHoldTheQueueOrGovernance() public {

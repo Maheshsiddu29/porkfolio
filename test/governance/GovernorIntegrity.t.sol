@@ -398,4 +398,67 @@ contract GovernorIntegrityTest is VaultTestBase {
         vm.expectRevert(abi.encodeWithSelector(VaultGovernor.NotExecutable.selector, id, etaNominate));
         gov.execute(v, nominate);
     }
+
+    /// @notice The four-step sequence (nomination executed, LP queues, nominee accepts late, new owner skips the old
+    ///         governor's timelock) needs a nominee that is not a timelock. With a reviewed governor as nominee the
+    ///         late acceptance changes nothing for the queued LP: the new admin cannot call the vault, and a floor
+    ///         change through the new governor waits LONG_DELAY and is refused while the LP is queued.
+    function test_reviewedGovernorNominee_acceptingLate_keepsTheTimelock() public {
+        address admin2 = makeAddr("admin2");
+        VaultGovernor gov2 = new VaultGovernor(v, admin2, 3 days, 32 days, 7 days);
+        bytes memory nominate = abi.encodeCall(vault.transferOwnership, (address(gov2)));
+        uint256 eta = _queue(v, nominate);
+        vm.warp(eta);
+        _execute(v, nominate);
+        vm.warp(eta + 20 days);
+        _queueLpBehindCommitment(eta + 40 days);
+        vm.prank(admin2);
+        gov2.acceptVaultOwnership();
+        assertEq(vault.owner(), address(gov2));
+
+        bytes memory loosen = abi.encodeCall(vault.setInventoryBounds, (0, 0, 1e6, 1e6));
+        vm.prank(admin2);
+        vm.expectRevert(ISharedCommitmentVault.NotOwner.selector);
+        v.call(loosen);
+        vm.prank(admin2);
+        (, uint256 eta2) = gov2.queue(v, loosen);
+        assertEq(eta2, vm.getBlockTimestamp() + 32 days);
+        vm.warp(eta2);
+        bytes memory refusal = abi.encodeWithSelector(VaultGovernor.PendingWithdrawals.selector, vault.pendingShares());
+        vm.prank(admin2);
+        vm.expectRevert(refusal);
+        gov2.execute(v, loosen);
+    }
+
+    /// @notice Once a nomination has executed, nothing on-chain stops the nominee from accepting before a retraction
+    ///         executes. The retraction waits DELAY; the guardian has no ownership power and cannot cancel what already
+    ///         executed. The nominee accepts one second before the retraction's eta, and the retraction then fails
+    ///         because the governor no longer owns the vault. The only protection is to leave no window: nominate only
+    ///         a reviewed governor and accept in the transaction that executes the nomination.
+    function test_pendingNominee_canAcceptDuringRetractionDelay() public {
+        address next = makeAddr("next");
+        bytes memory nominate = abi.encodeCall(vault.transferOwnership, (next));
+        bytes memory retract = abi.encodeCall(vault.transferOwnership, (address(0)));
+        uint256 eta = _queue(v, nominate);
+        vm.warp(eta);
+        _execute(v, nominate);
+        uint256 eta2 = _queue(v, retract);
+        assertEq(eta2, eta + 3 days);
+
+        vm.startPrank(guardian);
+        vm.expectRevert(ISharedCommitmentVault.NotOwner.selector);
+        vault.transferOwnership(address(0));
+        vm.expectRevert(abi.encodeWithSelector(VaultGovernor.NotQueued.selector, gov.operationId(v, nominate)));
+        gov.cancel(v, nominate);
+        vm.stopPrank();
+
+        vm.warp(eta2 - 1);
+        vm.prank(next);
+        vault.acceptOwnership();
+        assertEq(vault.owner(), next);
+        vm.warp(eta2);
+        vm.prank(admin);
+        vm.expectRevert(ISharedCommitmentVault.NotOwner.selector);
+        gov.execute(v, retract);
+    }
 }
