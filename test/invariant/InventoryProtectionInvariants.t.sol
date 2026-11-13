@@ -224,10 +224,11 @@ contract InventoryProtectionHandler is Test {
             uint256 r = FullMath.mulDivRoundingUp(room[i], shares, totalShares);
             uint256 got = paid[i] * WAD;
             // shortfall = b - got must be <= r + 2 raw units. Each vault payout rounds down by less than one raw unit
-            // per asset (the Q2 allowance). One checked slice can span two vault payouts: a request queued and first
-            // finalized inside one handler call (the late-LP branch of `governedLoosen`) is not yet in that call's
-            // `ids`, so its next slice is checked together with the first. With one unit the queued check fails
-            // (seeds 0x5eed, 0x1, 0x2, 0x3); the instant-payout check passes with one.
+            // per asset (the Q2 allowance). The second unit was measured when slices were checked only for requests
+            // pending at the start of a call, so that a request queued and first finalized inside one call (the
+            // late-LP branch of `governedLoosen`) had two vault payouts checked in one comparison; with one unit the
+            // queued check then failed (seeds 0x5eed, 0x1, 0x2, 0x3). `governedLoosen` now checks that slice inside the
+            // call. Whether one unit now suffices has not been re-measured; the tolerance is unchanged.
             if (b > got + r + 2 * WAD) ok = false;
             if (r > 0 && b > got) {
                 uint256 bps = FullMath.mulDiv(b - got, 10_000, r);
@@ -238,7 +239,8 @@ contract InventoryProtectionHandler is Test {
         }
     }
 
-    /// @dev Finalization slices of the requests that were pending when the call started: each slice is compared with
+    /// @dev Finalization slices of the requests that were pending when the call started (and, from `governedLoosen`,
+    ///      of the request its late-LP branch queues inside the call): each slice is compared with
     ///      the request's own attribution (the basket and room it carried when queued). A slice is the drop in pending
     ///      shares; what it paid is the rise in claimable amounts (a claim inside the same call is impossible: claims
     ///      are their own action and reset `lastClaimable`).
@@ -636,7 +638,10 @@ contract InventoryProtectionHandler is Test {
         }
         vm.warp(eta);
         _releaseExpired();
-        vault.processQueue(64); // the admin's same-transaction step; slices are checked after the call
+        vault.processQueue(64); // the admin's same-transaction step
+        // A request queued above was not pending when this call started, so the modifier would leave its first slice
+        // to the next call, where a claim could zero its claimable amount first. Check every slice now.
+        _checkSlices(pendingIds);
         vm.prank(govAdmin);
         try gov.execute(address(vault), data) {
             if (vault.pendingShares() != 0) ++requestViolations; // the governor must have refused
@@ -955,6 +960,63 @@ contract InventoryProtectionLivenessTest is InventoryProtectionInvariantsTest {
         assertEq(handler.q2Violations(), 0);
         assertEq(handler.requestViolations(), 0);
         assertEq(handler.filledUnderFault(), 0);
+    }
+
+    /// @notice Regression for a false Q2 violation found by the deep profile (1,000 runs x depth 256, seed 0x5eed), shrunk
+    ///         to these 19 calls. The 18th call (late-LP `governedLoosen`) queues a request and finalizes part of it in
+    ///         the same call. Slices used to be checked only for requests pending when a call started, so that slice
+    ///         was left for the next call; the 19th call claims the request first, which zeroes its claimable amount,
+    ///         and the late check saw a slice that paid nothing. Checked in the call that finalizes it, the slice
+    ///         respects its request's room; the vault's payouts were correct throughout.
+    function test_handler_claimAfterSameCallSlice_isNotAViolation() public {
+        handler.deposit(11_611, 3_372_311_224);
+        handler.governedLoosen(3865, 11_497_200_130_456_475_686, true);
+        handler.replaceAdapter();
+        handler.warp(0);
+        handler.depeg(true, 833_623_200);
+        handler.drain(
+            false,
+            45_670_125_594_945_764_044_636_625_722_001_037_730_321_968_907_075_421_360_775_393_710_374_728_793_096,
+            false,
+            13_654,
+            false
+        );
+        handler.deposit(
+            1_819_380_751_835_336_709_895_143_112_015_904_833_265_444_461_778,
+            115_792_089_237_316_195_423_570_985_008_687_907_853_269_984_665_640_564_039_457_584_007_913_129_639_933
+        );
+        handler.governedLoosen(
+            995_052_390_126_889_444_992,
+            115_511_665_097_946_291_959_938_613_635_867_626_708_365_621_175_334_970_235_240_266_565_768_426_883_790,
+            true
+        );
+        handler.deposit(1_313_316_170_325_430_996_050, 77_200_996_467_043_020_699_920_143_141_786_649);
+        handler.governedLoosen(
+            553_167_029_386_880_237_123_308_677_539_348_740,
+            31_830_599_215_378_085_499_048_728_659_976_988_649_498_244_547_259_996_485_020_864,
+            true
+        );
+        handler.governedLoosen(
+            216_174_973_413_615_672_037_805_694,
+            218_397_729_682_874_776_973_718_559_663_783_263_234_474_097_174_577_408,
+            true
+        );
+        handler.redeem(0, 523_605_124_442_277_146_355_038_901_827_118_899_764_746_825_876_391_762_265, true);
+        handler.guardianTighten(225, 9401);
+        handler.governedLoosen(
+            1_399_850_636_466_786_186_030_012_289_106_011_872_955_228_750_799_251_744_701_395_520_506,
+            7_074_667_599_941_698_627_788_004_630_049_688_393_624_263_008_955,
+            true
+        );
+        handler.governedLoosen(5147, 1_000_000_000, true);
+        handler.governedLoosen(27_147, 14_621, true);
+        handler.deposit(6647, 213_858_110_318_464_157_220_103_747_397);
+        handler.governedLoosen(4_099_181_377_491_743_255_354_558, 2, true);
+        uint256 checked = handler.slicesChecked();
+        handler.claim(23_525);
+        assertEq(handler.slicesChecked(), checked, "every slice was checked before the claim");
+        assertEq(handler.requestViolations(), 0);
+        assertEq(handler.q2Violations(), 0);
     }
 
     /// @notice Why the per-run non-vacuity rule counts only trades made under an honest reference: this sequence (the
