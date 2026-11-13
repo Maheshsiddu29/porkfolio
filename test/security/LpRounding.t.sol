@@ -198,6 +198,11 @@ contract LpRoundingTest is VaultTestBase {
             uint256 s = vault.totalShares();
             (uint256 p0, uint256 p1) = _depositShares(lpA, shares);
             _assertNoDilution(n0, n1, s);
+            // Checked against the state just after the deposit, so a redemption that rounded up would fail here even
+            // though the deposit's round-up would hide it from a whole-round-trip comparison.
+            n0 = lens.netAssets(vault, c0);
+            n1 = lens.netAssets(vault, c1);
+            s = vault.totalShares();
             (, uint256 a0, uint256 a1,) = _redeem(lpA, shares, false);
             _assertNoDilution(n0, n1, s);
             assertLe(a0, p0);
