@@ -439,6 +439,81 @@ contract GovernanceLivenessTest is VaultTestBase {
         assertEq(eta2, vm.getBlockTimestamp() + 32 days);
     }
 
+    // =================================================================== execution window (GRACE)
+
+    /// @notice L-2 recovers governance, not necessarily the queued operation. A commitment made just before eta keeps
+    ///         an LP queued past eta; governance stops new commitments at eta. The commitment lives until
+    ///         eta − 1 + MAX_HORIZON, which is after eta + GRACE, so the original operation is refused through its whole
+    ///         window and then expires (a). Two recoveries keep every LP's protection: cancel and re-queue as soon as
+    ///         new commitments are stopped, so the fresh LONG_DELAY (32 d) outlasts every older commitment (30 d) (b);
+    ///         or release the live commitments in an emergency while new commitments stay stopped, which lets the
+    ///         original execute in the same block (c). In both the queued LP is finalized under the old floor first.
+    function test_leverAfterEta_originalExpires_recoveryPaths() public {
+        _depositShares(lpA, 1000 ether);
+        uint256 eta = _queueGov(loosen);
+        vm.warp(eta - 1);
+        uint256 id = _commitAll(30 days);
+        (,,, uint256 rid) = _redeem(lpA, 1000 ether, true);
+        vm.warp(eta);
+        _assertBlocked(loosen);
+        vm.prank(guardian);
+        vault.setBufferFloor(c0, type(uint256).max); // no new commitment from here on
+        uint256 expiry = vault.getAllocation(id).expiry;
+        assertGt(expiry, eta + 7 days, "the commitment outlives the window");
+        uint256 snap = vm.snapshotState();
+
+        // (a) waiting: refused at the window's last second, then expired
+        vm.warp(eta + 7 days);
+        _assertBlocked(loosen);
+        vm.warp(eta + 7 days + 1);
+        (bool ok, bytes memory err) = _tryExecute(loosen, true);
+        assertFalse(ok);
+        assertEq(bytes4(err), VaultGovernor.NotExecutable.selector);
+
+        // (b) cancel and re-queue at once
+        vm.revertToState(snap);
+        _run1(address(gov), abi.encodeCall(gov.cancel, (v, loosen)));
+        uint256 eta2 = _queueGov(loosen);
+        assertGe(eta2, expiry, "a fresh LONG_DELAY outlasts every commitment made before the lever");
+        vm.warp(eta2);
+        _assertExecutes(loosen);
+        assertEq(vault.getRequest(rid).sharesPending, 0);
+
+        // (c) emergency release, same block as the lever
+        vm.revertToState(snap);
+        vm.prank(guardian);
+        vault.release(id);
+        _assertExecutes(loosen);
+        assertEq(vm.getBlockTimestamp(), eta);
+    }
+
+    /// @notice The original operation survives a lever only if the lever comes early enough: every commitment made
+    ///         before it must expire inside the window, i.e. lever time + MAX_HORIZON <= eta + GRACE. With 32 / 7 / 30
+    ///         days that is 9 days after queuing. A full-horizon commitment made at that second, with the lever right
+    ///         after it, expires at eta + GRACE exactly and the operation executes at its last executable second; made
+    ///         one second later, it expires one second too late.
+    function test_leverDeadline_isQueueTimePlusNineDays() public {
+        _depositShares(lpA, 1000 ether);
+        uint256 queuedAt = vm.getBlockTimestamp();
+        uint256 eta = _queueGov(loosen);
+        uint256 deadline = eta + gov.GRACE() - vault.MAX_HORIZON();
+        assertEq(deadline, queuedAt + 9 days);
+        for (uint256 late; late < 2; ++late) {
+            uint256 snap = vm.snapshotState();
+            vm.warp(deadline + late);
+            _commitAll(30 days);
+            _redeem(lpA, 1000 ether, true);
+            vm.prank(guardian);
+            vault.setBufferFloor(c0, type(uint256).max);
+            vm.warp(eta);
+            _assertBlocked(loosen);
+            vm.warp(eta + 7 days);
+            if (late == 0) _assertExecutes(loosen);
+            else _assertBlocked(loosen);
+            vm.revertToState(snap);
+        }
+    }
+
     /// @notice An oracle outage stops fills but neither LP exits nor governance: with the adapter reverting, the
     ///         queued LP is finalized and claims, and the LONG_DELAY change executes once the commitment is released.
     function test_oracleFailure_doesNotHoldTheQueueOrGovernance() public {
