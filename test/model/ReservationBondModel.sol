@@ -172,6 +172,20 @@ contract ReservationBondModel {
         r.closed = true;
     }
 
+    /// @notice Return `x` of the unused remainder before expiry, keeping the rest reserved. Only the payer. Accrual on the
+    ///         returned units stops now; the remainder keeps accruing.
+    function releasePartial(uint256 id, uint128 x, address caller, uint64 now_) external {
+        Reservation storage r = _r[id];
+        if (r.closed) revert Closed();
+        if (caller != r.payer) revert NotPayer();
+        if (now_ >= r.expiry) revert Expired();
+        if (x > r.remaining) revert QuotaExceeded();
+        _accrue(r, now_);
+        r.remaining -= x;
+        reserved -= x;
+        if (r.remaining == 0) r.closed = true;
+    }
+
     /// @dev Moves fee from escrow to the vault and the protocol bucket so that the cumulative charge equals `target`.
     function _realizeTo(Reservation storage r, uint256 target) internal {
         if (target <= r.realized) return;

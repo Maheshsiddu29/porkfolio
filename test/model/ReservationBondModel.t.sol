@@ -56,6 +56,21 @@ contract ReservationBondModelTest is Test {
         m.checkpoint(id, uint64(7 * DAY));
     }
 
+    /// @notice Partial early release: returning 60,000 of 100,000 on day 1 of 10 stops accrual on those units only.
+    ///         Charge = rho * (100,000 * 1 d + 40,000 * 9 d) = 39.744 tokens; refund 46.656.
+    function test_partialEarlyRelease() public {
+        ReservationBondModel m = new ReservationBondModel(1_000_000 ether, 0, 0);
+        uint256 id = m.create(hook, 100_000 ether, uint64(10 * DAY), RATE, 0);
+        vm.expectRevert(ReservationBondModel.NotPayer.selector);
+        m.releasePartial(id, 60_000 ether, keeper, uint64(DAY));
+        m.releasePartial(id, 60_000 ether, hook, uint64(DAY));
+        assertEq(m.reserved(), 40_000 ether);
+        assertEq(m.admissible(), 960_000 ether, "returned capacity is admissible again at once");
+        m.settle(id, uint64(10 * DAY));
+        assertEq(m.get(id).realized, 39.744 ether);
+        assertEq(m.refundOwed(hook), 46.656 ether);
+    }
+
     /// @notice A reservation released one second after creation still pays the minimum charge, so reserving all
     ///         capacity briefly to push LPs into the queue or to block other curators is not free.
     function test_minimumCharge_onImmediateRelease() public {
@@ -125,7 +140,7 @@ contract ReservationBondModelTest is Test {
     // ------------------------------------------------------------------
 
     struct Op {
-        uint8 kind; // 0 consume, 1 checkpoint, 2 release by payer, 3 settle
+        uint8 kind; // 0 consume, 1 checkpoint, 2 release by payer, 3 settle, 4 partial release by payer
         uint8 which;
         uint32 dt;
         uint128 x;
@@ -133,7 +148,7 @@ contract ReservationBondModelTest is Test {
 
     /// @dev Runs one schedule on `m`. With `checkpoints` false every checkpoint is skipped, so two runs differ only
     ///      in how often fees were moved.
-    function _run(ReservationBondModel m, uint256 seed, bool checkpoints) internal returns (uint256[4] memory done) {
+    function _run(ReservationBondModel m, uint256 seed, bool checkpoints) internal returns (uint256[5] memory done) {
         uint64 t;
         for (uint256 i; i < 3; ++i) {
             uint256 h = uint256(keccak256(abi.encode(seed, "create", i)));
@@ -147,7 +162,7 @@ contract ReservationBondModelTest is Test {
             t += uint64(h % (3 * DAY));
             uint256 id = (h >> 32) % 3;
             ReservationBondModel.Reservation memory r = m.get(id);
-            uint256 kind = (h >> 64) % 4;
+            uint256 kind = (h >> 64) % 5;
             if (r.settled) continue;
             if (kind == 0 && !r.closed && t < r.expiry && r.remaining != 0) {
                 m.consume(id, uint128(1 + (h >> 96) % r.remaining), t);
@@ -161,6 +176,9 @@ contract ReservationBondModelTest is Test {
             } else if (kind == 3 && (r.closed || t >= r.expiry)) {
                 m.settle(id, t);
                 ++done[3];
+            } else if (kind == 4 && !r.closed && t < r.expiry && r.remaining != 0) {
+                m.releasePartial(id, uint128(1 + (h >> 96) % r.remaining), r.payer, t);
+                ++done[4];
             }
             _checkLedgers(m);
         }
@@ -206,10 +224,10 @@ contract ReservationBondModelTest is Test {
     /// @notice Non-vacuity of the two fuzz tests above: over 32 schedules, every operation kind is executed many
     ///         times inside the schedule (not only in the final settlement sweep).
     function test_schedulesExerciseEveryOperation() public {
-        uint256[4] memory total;
+        uint256[5] memory total;
         for (uint256 seed; seed < 32; ++seed) {
-            uint256[4] memory done = _run(new ReservationBondModel(1_000_000 ether, 1500, 1 hours), seed, true);
-            for (uint256 k; k < 4; ++k) {
+            uint256[5] memory done = _run(new ReservationBondModel(1_000_000 ether, 1500, 1 hours), seed, true);
+            for (uint256 k; k < 5; ++k) {
                 total[k] += done[k];
             }
         }
@@ -217,7 +235,8 @@ contract ReservationBondModelTest is Test {
         emit log_named_uint("checkpoint", total[1]);
         emit log_named_uint("early or expiry release", total[2]);
         emit log_named_uint("settle", total[3]);
-        for (uint256 k; k < 4; ++k) {
+        emit log_named_uint("partial release", total[4]);
+        for (uint256 k; k < 5; ++k) {
             assertGe(total[k], 32, "an operation kind is rarely reached");
         }
     }
