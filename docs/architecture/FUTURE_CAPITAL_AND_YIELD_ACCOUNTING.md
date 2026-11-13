@@ -296,6 +296,163 @@ part of D-6.
 | Bond counted as backing | over-admission | separate custody and admission on `N` only (§2.6) |
 | Rate rounding to zero | free reservations | `RATE_SCALE = 1e36` (§2.1) |
 
+## 3. Idle capital in an external ERC-4626 strategy
+
+Capital that no commitment, liability or buffer needs could earn yield in an external ERC-4626 vault (a "strategy").
+This section starts from the generic ERC-4626 interface and assumes nothing about a particular strategy: its
+`totalAssets`, `convertToAssets`, `previewRedeem`, `maxWithdraw` and `maxRedeem` describe the present, are set by its
+own code, and promise nothing about the future. No strategy is selected here, and none should be selected on
+advertised yield.
+
+### 3.1 Seven quantities, per asset
+
+`N_a` in this section is **physical**: `B_a − W_a`, exactly as today.
+
+| # | Quantity | Symbol | Definition | Guaranteed? |
+|---|---|---|---|---|
+| 1 | Physical ERC-6909 backing | `B_a` | as today: claims on the PoolManager the vault has accounted for | yes (P-1) |
+| 2 | External shares | `Z_a` | strategy shares owned for the LP shares, by internal count, held by a custody module | the count, yes; their value, no |
+| 3 | Conservative economic value | `V_a` | at most `previewRedeem(Z_a)` (after the strategy's exit fee), less a haircut | an estimate; can fall to zero |
+| 4 | Immediately redeemable | `M_a` | `min(previewRedeem(Z_a), previewRedeem(maxRedeem(custody)))` now | a snapshot; nothing about later |
+| 5 | Needed for commitments | `Q_a` | as today | must be physical |
+| 6 | Protected withdrawal liabilities | `W_a`, `D_a`, buffers `R_a`, `K_a` | finalized claims, the queue's pro-rata claim, the admission buffer, and a liquidity buffer for instant exits | must be physical |
+| 7 | Available for new investment | `I_a` | `max(0, N_a − Q_a − R_a − D_a − K_a)`, and also at most `N_a − Q_a − L_a` (§3.7) | — |
+
+### 3.2 No commitment relies on external assets
+
+**Claim (ARGUED; PROVEN (model)).** If admission, fills, `W_a` and `D_a` are computed on physical assets only, and
+deployment is limited to `I_a`, then every outstanding commitment and every protected liability stays covered by
+physical claims whatever the strategy does.
+
+- Admission (P-3) reads physical `N_a`, so a new reservation is admitted only within physical inventory.
+- Deploying `x ≤ I_a` leaves `N_a − x ≥ Q_a + R_a + D_a + K_a`, so `Q_a ≤ N_a` and `F_a ≥ D_a + K_a` still hold.
+- Fills pay from physical claims (as today), and `W_a` is physical.
+- A later strategy loss, pause or shutdown changes `Z_a`'s value, never `B_a`.
+
+`test_admission_physicalOnly`: with 500,000 of 1,000,000 deployed and 300,000 reserved, a new reservation is limited
+to `N − Q − R = 150,000`, not to the 650,000 that total value would suggest; queuing 100,000 shares takes their
+`D = 50,000` out of both limits.
+
+This is the requirement the brief states: a valid future commitment must not rely on assets whose availability
+cannot be enforced. `maxWithdraw` today says nothing about tomorrow, so it is never an input to admission.
+
+### 3.3 Custody boundary (REQUIREMENTS)
+
+- **Separate module.** A custody module holds the strategy shares; the vault keeps the ledger (`Z_a`) and its existing
+  custody of ERC-6909 claims. No core accounting, no approval over vault claims and no operator right moves to the
+  strategy.
+- **Internal counts.** `Z_a` changes only through deploy, recall and LP operations; shares sent to the module
+  directly are not counted, as donated claims are not (`test_donatedExternalShares_notCounted`). Every strategy call's
+  return value is checked against the measured balance change.
+- **Exact approvals.** Approve exactly the amount of each deposit and nothing standing. (The model approves the
+  maximum for brevity; an implementation must not.)
+- **Where strategy code runs.** Never inside `exchange` or `unlockCallback`. Only in deploy, recall and (design Y1)
+  deposit, under the vault's transaction lock, after all state changes (checks-effects-interactions).
+- **Allowlist.** A strategy is usable only if `asset()` is exactly the pair asset. Adding a strategy or raising a cap
+  is an owner change through the governor's delay; the guardian may only stop deployment and request recalls.
+
+### 3.4 What a share holds: two designs
+
+**Y1, in kind (recommended).** Each share is a fraction of physical `N_a` and of `Z_a`, for both assets:
+- deposit `s`: `ceil(s·N_a/S)` physical, plus `ceil(s·Z_a/S)` strategy shares minted at the depositor's expense
+  (`previewMint` rounds up, against the depositor);
+- exit `s`: `floor(s·N_a/S)` physical (limited by `F_a`, as today) plus `floor(s·Z_a/S)` strategy shares transferred.
+
+No valuation is ever made, so nothing can be manipulated through one. P-4 extends to both parts:
+`testFuzz_inKind_noDilutionAndNoRoundTripGain` checks that no deposit or exit lowers `N_a/S` or `Z_a/S` and that a
+round trip never gains, at strategy share prices anywhere from a loss of all but one unit to a 5× gain. Costs: LPs receive strategy shares
+on exit; deposits stop while the strategy refuses `mint`; and a strategy whose shares cannot be transferred needs a
+fallback (the external part of an exit becomes a claimable balance, like `W_a`).
+
+**Y2, book value.** The position is carried at a book value `C_a`; exits pay `floor(s·(N_a + C_a)/S)` in physical
+assets. `C_a` must be lowered to `previewRedeem(Z_a)` before every exit, or a loss nobody has recorded is paid out to
+whoever exits first: `test_bookValue_staleExitTransfersLoss` pays an LP holding 40% `400,000` at the stale book value
+against a fair `360,000`, and the remaining LPs absorb the 40,000. A fresh check means calling the strategy in every
+exit path, which breaks P-5; a strategy that reverts would then stop LP exits. Y2 also pays exits only from physical
+assets, so exits drain `B_a` while `Z_a` stays, and deposits priced at book value let new LPs buy unrecognized gains.
+Not recommended (D-7).
+
+### 3.5 Admission conditions for moving assets out (REQUIREMENT)
+
+Deploy `x` of asset `a` only if all hold:
+1. `x ≤ N_a − Q_a − R_a − D_a − K_a` (quantity 7);
+2. `x ≤ N_a − Q_a − L_a`, so outstanding reservations stay sellable above the inventory floor (§3.7);
+3. the strategy is allowlisted for `a`, and `maxDeposit(custody) ≥ x`;
+4. after deployment, the strategy's share of the asset stays within its cap (fraction of `N_a + V_a`) and the
+   per-strategy cap;
+5. **value check:** the shares received redeem now for at least `x·(1 − ε)`, with `ε` the accepted entry cost. This
+   refuses a deposit into a strategy whose share price an attacker inflated by donation
+   (`test_inflationAttack_onDeployment`: without it, 1,500,000 deposited buys one share redeemable for 1,250,000);
+6. the shares received equal the measured balance change;
+7. the deployment is made by an authorized role within these limits (D-9).
+
+Recall (strategy shares back to physical) is best effort: at most `maxRedeem(custody)`, with a minimum-assets bound;
+any shortfall against the pre-fee value is a realized loss borne by every share through `N_a`
+(`test_recall_illiquidityAndFee`). Recalls should be permissionless when physical free inventory is below `K_a` or the
+head of the queue is waiting (D-11).
+
+### 3.6 What can happen to the position
+
+| Event | Y1 (in kind) | Requirement or note |
+|---|---|---|
+| Yield accrues | strategy share price rises; every share's `Z_a/S` is worth more; new LPs pay for it at entry, exiting LPs take it (example E) | nothing to account |
+| Exchange rate falls | each share's external part is worth less, pro rata | nothing to account; no exit is affected |
+| Partial availability (`maxWithdraw` < position) | recalls are partial | exits do not depend on recalls (in kind) |
+| Withdrawal fee | paid only on recall; a realized loss shared through `N_a` | bound with a minimum-assets argument |
+| Realized loss | pro rata through `Z_a`'s value (example F) | no LP exits ahead of others at a stale price (contrast Y2) |
+| Illiquidity / pause | recalls and deposits stop; exits continue in kind (example F) | P-5 holds |
+| Strategy shutdown | as pause; shares may become non-transferable | fallback claimable balance for the external part |
+| Donation to the strategy | raises the share price; benefits holders | the value check (§3.5.5) protects first deposits |
+| Inflation attack on first deposit | the custody would receive too few shares | value check (§3.5.5) |
+| Reentrancy | strategy code runs in deploy, recall, deposit | under the vault lock, after state changes, never in `exchange` |
+| LP withdrawal ordering | the physical part follows the FIFO queue as today; the external part needs no inventory | queued shares keep their external part until finalized; finalization delivers it in kind |
+| Two assets, depegs | each asset's ledger is separate; no cross-asset value is computed | a strategy that holds something other than its `asset()` shows up as share-price loss |
+
+### 3.7 The inventory floor and deployment
+
+Fills sell physical inventory, and the inventory floor compares physical `N_a` with `L_a = ⌈S·τ_a(1 − κ_a)⌉`.
+Deploying `x` lowers physical `N_a / S` and with it the room above the floor. Two consequences:
+- Condition 2 of §3.5 keeps every outstanding reservation sellable at the moment of deployment.
+- If `τ_a` was set to the full per-share holding, any deployment puts the physical holding below `τ_a`, and fills of
+  that asset stop once it reaches `L_a`. Lowering `τ_a` to match is a loosening: LONG_DELAY and an empty queue
+  (G02). So either deployments are sized inside the room `N_a − L_a − Q_a`, or the floor is redefined on physical plus
+  external holdings, which needs a value for `Z_a` inside a fill (an external call in `exchange`). D-8.
+
+### 3.8 Examples E and F (model; `test/model/IdleYieldModel.t.sol`)
+
+Setup for both: one asset, 1,000,000 units for 1,000,000 shares; `Q = 300,000` reserved; `R = 50,000`;
+`K = 100,000`. Available for investment: `1,000,000 − 300,000 − 50,000 − 0 − 100,000 = 550,000`. 500,000 is
+deployed into a fresh strategy at one share per unit. Physical `N = 500,000`, `Z = 500,000` shares.
+
+**E. Positive yield** (`test_exampleE_positiveYield`). The strategy earns 10% (its assets go to 550,000).
+- A new LP buys 100,000 shares: `ceil(100,000·500,000/1,000,000) = 50,000` physical, plus 50,000 strategy shares,
+  which cost `previewMint(50,000) = ceil(50,000·550,000/500,000) = 55,000`. It pays 105,000 for 100,000 shares: the
+  yield earned before it arrived is priced in.
+- The seed LP redeems 100,000 shares: 50,000 physical and 50,000 strategy shares worth 55,000. It takes its yield
+  with it.
+
+**F. Loss, then pause** (`test_exampleF_lossAndPause`). The strategy loses 20% (assets 400,000) and pauses.
+- Recall reverts; a deposit reverts (the strategy refuses `mint`).
+- The seed LP redeems 200,000 shares: 100,000 physical (free inventory `500,000 − 300,000` covers it) and 100,000
+  strategy shares worth 80,000. 0.9 per share: exactly the pro-rata loss.
+- The remaining 800,000 shares hold 400,000 physical and 400,000 strategy shares: 0.5 + 0.5 per share, unchanged.
+- Under Y2 without a fresh impairment check, the same exit would have been paid at the old book value (see §3.4).
+
+**Illiquidity and fees** (`test_recall_illiquidityAndFee`). With the strategy able to return only 10,000 now and a
+1% exit fee, recalling 10,001 shares reverts; recalling 10,000 returns 9,900, and a minimum of 10,000 refuses it.
+
+## 4. Requirements for the implementing milestone
+
+Before either extension is built:
+1. Keep P-1 … P-8 (§1), and test each again with the extension in place.
+2. Keep bonds and strategy shares out of `B_a`; keep admission on physical `N_a` (§2.6, §3.2).
+3. No module or strategy call in any LP exit path (P-5). Deposits may fail closed; exits may not.
+4. A dedicated, caller-restricted vault entry for realized fees that raises `B_φ` with an equal claim inflow and mints
+   no shares; nothing else may raise `B` without minting shares.
+5. Settle the decisions in §5 that the chosen scope touches; D-6 and D-8 change what LPs and hooks are promised.
+6. Measure the vault's byte headroom and the checkpoint gas before choosing the epoch length (D-2).
+7. Re-run G03's rounding, deliverability and accounting campaigns with bonds and deployments in the handlers.
+
 ## 5. Decisions for the owner
 
 | # | Decision | Options | Recommendation |
@@ -306,4 +463,18 @@ part of D-6.
 | D-4 | Who may release early | payer only; payer or curator | payer or curator, as `cancelAllocation` is the curator's today |
 | D-5 | Unclaimed refunds | kept forever; swept to the protocol after a long period | kept forever (no new trust in a sweeper) |
 | D-6 | Capacity the vault refuses to sell | B1 admission against `L_a`; B2 credits; B4 disclose | B1 + B4; decide whether pause, halt and freeze stop accrual |
+| D-7 | What a share holds when capital is deployed | Y1 in kind; Y2 book value | Y1 (§3.4) |
+| D-8 | Inventory floor and deployment | size deployments inside `N − L − Q`; redefine the floor on total holdings | size deployments; do not put a strategy call in `exchange` |
+| D-9 | Who deploys | owner through the governor; a keeper role within limits; anyone within limits | a keeper role within the §3.5 limits |
+| D-10 | Liquidity buffer `K_a` | absolute; fraction of `N_a` | a fraction of `N_a`, reviewed with the exposure caps |
+| D-11 | When recalls are permissionless | never; when `F_a < K_a` or the queue head waits | the latter |
+| D-12 | Strategy shares that cannot be transferred | refuse such strategies; fallback claimable balance | refuse at allowlisting, keep the fallback |
+
+## 6. What this note does not claim
+
+- Nothing here is implemented or audited. The model tests check the proposed equations, not any contract in `src/`.
+- No gas, yield or utilization figure is given; none was measured.
+- The bond fee is a payment for reserved capacity, not a guarantee that the capacity can be sold (§2.10).
+- The in-kind design keeps exits independent of the strategy; it does not protect LPs from the strategy's losses,
+  which they bear pro rata.
 
