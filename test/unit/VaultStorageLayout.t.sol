@@ -5,19 +5,22 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultGetterHarness} from "../utils/VaultGetterHarness.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 
 /// @notice Pins the vault's storage layout, which `VaultLens` decodes through `extsload`.
 /// @dev Every slot number and packed offset below is a literal written from `forge inspect
 ///      src/SharedCommitmentVault.sol:SharedCommitmentVault storageLayout`, independently of the constants in
-///      `src/libraries/VaultStateReader.sol`. Three kinds of check:
+///      `src/libraries/VaultStateReader.sol`. The fixture's vault is `VaultGetterHarness`, whose test-only getters
+///      read each internal state variable by name. Three kinds of check:
 ///      1. after real state transitions, the raw word at each literal slot (`vm.load`) decodes to the value the
-///         vault's own getter returns: this pins the slot and offset of every variable the lens reads;
+///         by-name getter returns: this pins the slot and offset of every variable the lens reads;
 ///      2. a fuzzed word written into each packed slot (`vm.store`) decodes identically through the lens and the
-///         getter: masks and shifts are exact for every field at full width, and no field bleeds into its
+///         by-name getter: masks and shifts are exact for every field at full width, and no field bleeds into its
 ///         neighbour;
 ///      3. `extsload` returns the raw word of any slot.
-///      A layout change in the vault (reordering, retyping, inserting a variable) fails check 1 even if the lens
+///      A layout change in the vault (reordering, retyping, inserting a variable) fails check 1 even if the library
 ///      were changed to match, so the change cannot reach the lens unnoticed.
 contract VaultStorageLayoutTest is VaultTestBase {
     // Literal slots (declaration order of SharedCommitmentVault).
@@ -47,6 +50,13 @@ contract VaultStorageLayoutTest is VaultTestBase {
     uint256 internal allocationId;
     uint256 internal finalizedRequestId; // fully finalized: claimable amounts, nothing pending
     uint256 internal pendingRequestId; // queued: shares pending
+
+    VaultGetterHarness internal ref; // the fixture's vault, with by-name reference getters
+
+    function _newVault() internal override returns (SharedCommitmentVault) {
+        ref = new VaultGetterHarness(manager, owner, c0, c1);
+        return ref;
+    }
 
     /// @dev Puts a non-zero value into every variable the lens reads, through the vault's own functions: an
     ///      allocation partly consumed by a real swap, a queued and partly finalized redemption, a buffer floor,
@@ -105,15 +115,15 @@ contract VaultStorageLayoutTest is VaultTestBase {
     }
 
     // ------------------------------------------------------------------
-    // Old-getter readers. The vault's own getters are the reference for what each slot means.
+    // By-name readers: the reference for what each slot means.
     // ------------------------------------------------------------------
 
     function _oldAllocation(uint256 id) internal view returns (ISharedCommitmentVault.Allocation memory) {
-        return vault.getAllocation(id);
+        return ref.oldGetAllocation(id);
     }
 
     function _oldRequest(uint256 id) internal view returns (ISharedCommitmentVault.WithdrawalRequest memory) {
-        return vault.getRequest(id);
+        return ref.oldGetRequest(id);
     }
 
     function _oldRiskLimit(ISharedCommitmentVault.RiskScope s, address a, Currency c)
@@ -121,64 +131,64 @@ contract VaultStorageLayoutTest is VaultTestBase {
         view
         returns (ISharedCommitmentVault.RiskLimit memory)
     {
-        return vault.getRiskLimit(s, a, c);
+        return ref.oldGetRiskLimit(s, a, c);
     }
 
     function _oldSellPolicy(Currency c) internal view returns (uint160 f, bool h) {
-        return vault.sellPolicy(c);
+        return ref.oldSellPolicy(c);
     }
 
     // ------------------------------------------------------------------
     // 1. Slots after real transitions
     // ------------------------------------------------------------------
 
-    /// @notice Each literal slot holds the value the vault's getter reports, for every variable the lens decodes.
+    /// @notice Each literal slot holds the value the by-name getter reports, for every variable the lens decodes.
     function test_layout_slotsHoldGetterValues() public view {
         Currency[2] memory cs = [c0, c1];
         for (uint256 i; i < 2; ++i) {
             Currency c = cs[i];
             bytes32 k = bytes32(uint256(uint160(Currency.unwrap(c))));
-            assertEq(_load(_map(k, S_BACKING)), vault.backing(c), "backing");
-            assertEq(_load(_map(k, S_RESERVED)), vault.reserved(c), "reserved");
-            assertEq(_load(_map(k, S_BUFFER_FLOOR)), vault.bufferFloor(c), "bufferFloor");
-            assertEq(_load(_map(k, S_CLAIMABLE)), vault.claimableAssets(c), "claimableAssets");
+            assertEq(_load(_map(k, S_BACKING)), ref.oldBacking(c), "backing");
+            assertEq(_load(_map(k, S_RESERVED)), ref.oldReserved(c), "reserved");
+            assertEq(_load(_map(k, S_BUFFER_FLOOR)), ref.oldBufferFloor(c), "bufferFloor");
+            assertEq(_load(_map(k, S_CLAIMABLE)), ref.oldClaimableAssets(c), "claimableAssets");
             uint256 sp = _load(_map(k, S_SELL_POLICY));
             (uint160 f, bool h) = _oldSellPolicy(c);
             assertEq(uint160(sp), f, "sellPolicy.minInPerOutX96");
             assertEq((sp >> 160) & 0xff != 0, h, "sellPolicy.halted");
-            assertEq(_load(_nested(curator, c, S_CURATOR_CEILING)), vault.curatorCeiling(curator, c), "ceiling");
-            assertEq(_load(_nested(curator, c, S_CURATOR_RESERVED)), vault.curatorReserved(curator, c), "cur res");
-            assertEq(_load(_nested(address(hookA), c, S_HOOK_RESERVED)), vault.hookReserved(address(hookA), c), "hk");
-            assertEq(_load(_nested(address(hookB), c, S_HOOK_RESERVED)), vault.hookReserved(address(hookB), c), "hk");
+            assertEq(_load(_nested(curator, c, S_CURATOR_CEILING)), ref.oldCuratorCeiling(curator, c), "ceiling");
+            assertEq(_load(_nested(curator, c, S_CURATOR_RESERVED)), ref.oldCuratorReserved(curator, c), "cur res");
+            assertEq(_load(_nested(address(hookA), c, S_HOOK_RESERVED)), ref.oldHookReserved(address(hookA), c), "hk");
+            assertEq(_load(_nested(address(hookB), c, S_HOOK_RESERVED)), ref.oldHookReserved(address(hookB), c), "hk");
         }
         // Non-zero where it matters, so the equalities above are not 0 == 0.
-        assertGt(vault.reserved(c1), 0);
-        assertGt(vault.claimableAssets(c1), 0);
-        assertGt(vault.claimableAssets(c0), 0);
-        assertGt(vault.bufferFloor(c0), 0);
-        assertGt(vault.curatorReserved(curator, c1), 0);
-        assertGt(vault.hookReserved(address(hookB), c1), 0);
+        assertGt(ref.oldReserved(c1), 0);
+        assertGt(ref.oldClaimableAssets(c1), 0);
+        assertGt(ref.oldClaimableAssets(c0), 0);
+        assertGt(ref.oldBufferFloor(c0), 0);
+        assertGt(ref.oldCuratorReserved(curator, c1), 0);
+        assertGt(ref.oldHookReserved(address(hookB), c1), 0);
 
-        assertEq(_load(S_NEXT_ALLOCATION_ID), vault.nextAllocationId(), "nextAllocationId");
-        assertEq(_load(S_TOTAL_SHARES), vault.totalShares(), "totalShares");
+        assertEq(_load(S_NEXT_ALLOCATION_ID), ref.oldNextAllocationId(), "nextAllocationId");
+        assertEq(_load(S_TOTAL_SHARES), ref.oldTotalShares(), "totalShares");
         assertEq(_load(S_PENDING_SHARES), vault.pendingShares(), "pendingShares");
         assertGt(vault.pendingShares(), 0);
-        assertEq(_load(_map(lp0, S_SHARES_OF)), vault.sharesOf(lp0), "sharesOf");
-        assertEq(_load(S_NEXT_REQUEST_ID), vault.nextRequestId(), "nextRequestId");
-        assertEq(_load(S_QUEUE_HEAD), vault.queueHead(), "queueHead");
+        assertEq(_load(_map(lp0, S_SHARES_OF)), ref.oldSharesOf(lp0), "sharesOf");
+        assertEq(_load(S_NEXT_REQUEST_ID), ref.oldNextRequestId(), "nextRequestId");
+        assertEq(_load(S_QUEUE_HEAD), ref.oldQueueHead(), "queueHead");
 
         uint256 rp = _load(S_RISK_PARAMS);
-        assertEq(address(uint160(rp)), address(vault.riskAdapter()), "riskAdapter");
-        assertEq(uint24(rp >> 160), vault.riskEdgePips(), "riskEdgePips");
-        assertEq(uint24(rp >> 184), vault.maxUncertaintyPips(), "maxUncertaintyPips");
-        assertEq(vault.riskEdgePips(), 123);
-        assertEq(vault.maxUncertaintyPips(), 4567);
-        assertEq(_load(S_INVENTORY_TARGET), vault.inventoryTargetPerShare(0), "target0");
-        assertEq(_load(S_INVENTORY_TARGET + 1), vault.inventoryTargetPerShare(1), "target1");
+        assertEq(address(uint160(rp)), address(ref.oldRiskAdapter()), "riskAdapter");
+        assertEq(uint24(rp >> 160), ref.oldRiskEdgePips(), "riskEdgePips");
+        assertEq(uint24(rp >> 184), ref.oldMaxUncertaintyPips(), "maxUncertaintyPips");
+        assertEq(ref.oldRiskEdgePips(), 123);
+        assertEq(ref.oldMaxUncertaintyPips(), 4567);
+        assertEq(_load(S_INVENTORY_TARGET), ref.oldInventoryTargetPerShare(0), "target0");
+        assertEq(_load(S_INVENTORY_TARGET + 1), ref.oldInventoryTargetPerShare(1), "target1");
         uint256 tol = _load(S_INVENTORY_TOLERANCE);
-        assertEq(uint24(tol), vault.inventoryTolerancePips(0), "tolerance0");
-        assertEq(uint24(tol >> 24), vault.inventoryTolerancePips(1), "tolerance1");
-        assertEq(vault.inventoryTolerancePips(1), 400_000);
+        assertEq(uint24(tol), ref.oldInventoryTolerancePips(0), "tolerance0");
+        assertEq(uint24(tol >> 24), ref.oldInventoryTolerancePips(1), "tolerance1");
+        assertEq(ref.oldInventoryTolerancePips(1), 400_000);
 
         _checkAllocationSlots(allocationId);
         _checkRequestSlots(finalizedRequestId);
@@ -240,7 +250,7 @@ contract VaultStorageLayoutTest is VaultTestBase {
     // 2. Packed words at full width
     // ------------------------------------------------------------------
 
-    /// @notice Any word written into a packed slot decodes the same through the lens as through the vault's
+    /// @notice Any word written into a packed slot decodes the same through the lens as through the by-name
     ///         getter. Covers every packed struct and variable at every bit, including values no transition can
     ///         produce (dirty high bits, boolean bytes other than 0 and 1).
     function testFuzz_layout_packedWordsDecodeLikeGetters(bytes32 w0, bytes32 w1) public {
@@ -254,13 +264,13 @@ contract VaultStorageLayoutTest is VaultTestBase {
         assertEq(h, oldH, "sellPolicy.halted");
 
         vm.store(v, bytes32(S_RISK_PARAMS), w0);
-        assertEq(address(lens.riskAdapter(vault)), address(vault.riskAdapter()), "riskAdapter");
-        assertEq(lens.riskEdgePips(vault), vault.riskEdgePips(), "riskEdgePips");
-        assertEq(lens.maxUncertaintyPips(vault), vault.maxUncertaintyPips(), "maxUncertaintyPips");
+        assertEq(address(lens.riskAdapter(vault)), address(ref.oldRiskAdapter()), "riskAdapter");
+        assertEq(lens.riskEdgePips(vault), ref.oldRiskEdgePips(), "riskEdgePips");
+        assertEq(lens.maxUncertaintyPips(vault), ref.oldMaxUncertaintyPips(), "maxUncertaintyPips");
 
         vm.store(v, bytes32(S_INVENTORY_TOLERANCE), w0);
-        assertEq(lens.inventoryTolerancePips(vault, 0), vault.inventoryTolerancePips(0), "tolerance0");
-        assertEq(lens.inventoryTolerancePips(vault, 1), vault.inventoryTolerancePips(1), "tolerance1");
+        assertEq(lens.inventoryTolerancePips(vault, 0), ref.oldInventoryTolerancePips(0), "tolerance0");
+        assertEq(lens.inventoryTolerancePips(vault, 1), ref.oldInventoryTolerancePips(1), "tolerance1");
 
         uint256 b = _map(bytes32(allocationId), S_ALLOCATIONS);
         for (uint256 i; i < 7; ++i) {
@@ -286,7 +296,7 @@ contract VaultStorageLayoutTest is VaultTestBase {
         );
     }
 
-    /// @notice Out-of-range array indices revert with the same panic as the former public array getters.
+    /// @notice Out-of-range array indices revert with the same panic as a public array getter.
     function test_layout_arrayIndexOutOfRangePanics() public {
         vm.expectRevert(abi.encodeWithSignature("Panic(uint256)", 0x32));
         lens.inventoryTargetPerShare(vault, 2);

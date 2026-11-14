@@ -14,6 +14,10 @@ import {VaultRiskBoundary} from "../../src/risk/VaultRiskBoundary.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
 import {MockRiskAdapter} from "../utils/MockRiskAdapter.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice The vault's market-risk boundary through the real PoolManager: the dynamic floor around the adapter's band,
 ///         the price-free inventory floor, malformed adapter answers, and every transition between static and adapter

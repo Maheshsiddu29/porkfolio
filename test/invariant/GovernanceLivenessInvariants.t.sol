@@ -18,6 +18,9 @@ import {CuratorAuthorization} from "../../src/CuratorAuthorization.sol";
 import {VaultGovernor} from "../../src/governance/VaultGovernor.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {QueueGriefer} from "../utils/GovernanceActors.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Handler for the governance-liveness campaign: LPs (deposit, redeem and queue, cancel, claim), honest curators
 ///         (commit, cancel), fills through both hooks, a curator that is also an LP rotating its commitments, the

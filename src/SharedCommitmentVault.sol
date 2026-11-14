@@ -108,12 +108,16 @@ import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
 /// claims, request cancellation, `release` and `cancelAllocation` never read them. The limits bound how much and how
 /// fast the reserve can be sold; they say nothing about the price received, which only the floors bound.
 ///
-/// Read-only helpers. This contract serves its stored records (public getters, `getAllocation`, `getRequest`), the
-/// admission limit `admissibleCapacity`, and `coreInputs`, the values a hook prices from in shared-core mode in one
-/// call, and `extsload`, which returns any raw storage word. Previews, request status, N_a, F_a, D_a, deliverable
-/// shares and an allocation's effective floor are computed by `VaultLens`, a separate stateless contract that
-/// decodes this contract's storage through `extsload`; the storage layout is therefore part of the read interface.
-/// Nothing in this contract calls the lens; every check here uses its own internal copy of those formulas.
+/// Read-only helpers. This contract serves only the reads other contracts need on-chain: `coreInputs` (the values a
+/// hook prices from in shared-core mode, in one call), `getCurator` (the authorization module), the role and
+/// configuration getters `owner`, `guardian`, `pendingOwner`, `paused`, `pendingShares`, `isConsumer` and
+/// `authModule` (the governor and module installation), the immutables and constants, and `extsload`, which returns
+/// any raw storage word. Every other stored value (B_a, Q_a, W_a, S, floors, limits, allocations, requests), the
+/// admission limit, previews, request status, N_a, F_a, D_a, deliverable shares and an allocation's effective floor
+/// are read through `VaultLens`, a separate stateless contract that decodes this contract's storage through
+/// `extsload` with `VaultStateReader`. The storage layout is therefore part of the read interface:
+/// `test/unit/VaultStorageLayout.t.sol` pins it. Nothing in this contract calls the lens; every check here uses its
+/// own internal copy of those formulas.
 ///
 /// Authorization module. New allocations are created only through `reserveFor`, which only `authModule` may call.
 /// The module (`CuratorAuthorization`) verifies the curator's EIP-712 signature, or that the curator itself is
@@ -195,54 +199,55 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     /// @dev Curator records (registration, restriction, generation), one storage slot each. Read with
     ///      `getCurator`. See `CuratorRecord` for the states they encode.
     mapping(address curator => CuratorRecord) internal _curators;
-    /// @notice Most unused capacity, in raw units of `currency`, that a curator may hold across its unreleased
-    ///         allocations. Zero means the curator can allocate nothing in that currency.
-    mapping(address curator => mapping(Currency currency => uint256)) public curatorCeiling;
-    /// @notice Unused capacity currently held by a curator's unreleased allocations, in raw units of `currency`.
-    /// @dev Moves in lockstep with `reserved`: raised by `reserveFor`, lowered by `exchange`, `release` and
+    /// @dev Most unused capacity, in raw units of `currency`, that a curator may hold across its unreleased
+    ///      allocations. Zero means the curator can allocate nothing in that currency.
+    mapping(address curator => mapping(Currency currency => uint256)) internal curatorCeiling;
+    /// @dev Unused capacity currently held by a curator's unreleased allocations, in raw units of `currency`. Moves
+    ///      in lockstep with `reserved`: raised by `reserveFor`, lowered by `exchange`, `release` and
     ///      `cancelAllocation`.
-    mapping(address curator => mapping(Currency currency => uint256)) public curatorReserved;
+    mapping(address curator => mapping(Currency currency => uint256)) internal curatorReserved;
 
-    /// @notice B_a: ERC-6909 claims the vault has accounted for, in raw units of the asset.
-    mapping(Currency currency => uint256) public backing;
-    /// @notice Q_a: total unused capacity of all unreleased allocations that sell this asset.
-    mapping(Currency currency => uint256) public reserved;
-    /// @notice R_a: inventory that new allocations must leave unreserved. Existing allocations and LP exits are
-    ///         not affected by it.
-    mapping(Currency currency => uint256) public bufferFloor;
-    /// @notice Vault price floor and halt flag for the direction in which the vault sells `currencyOut`.
-    mapping(Currency currencyOut => SellPolicy) public sellPolicy;
-    /// @notice W_a: assets finalized for queued redemptions but not yet claimed. These belong to specific
-    ///         requests, not to the remaining shares, and no path except `claim` reduces them.
-    mapping(Currency currency => uint256) public claimableAssets;
+    /// @dev B_a: ERC-6909 claims the vault has accounted for, in raw units of the asset.
+    mapping(Currency currency => uint256) internal backing;
+    /// @dev Q_a: total unused capacity of all unreleased allocations that sell this asset.
+    mapping(Currency currency => uint256) internal reserved;
+    /// @dev R_a: inventory that new allocations must leave unreserved. Existing allocations and LP exits are not
+    ///      affected by it.
+    mapping(Currency currency => uint256) internal bufferFloor;
+    /// @dev Vault price floor and halt flag for the direction in which the vault sells `currencyOut`.
+    mapping(Currency currencyOut => SellPolicy) internal sellPolicy;
+    /// @dev W_a: assets finalized for queued redemptions but not yet claimed. These belong to specific requests,
+    ///      not to the remaining shares, and no path except `claim` reduces them.
+    mapping(Currency currency => uint256) internal claimableAssets;
 
     /// @dev Allocation records by id. Ids start at 1, so an all-zero record (consumer == address(0)) means
     ///      "unknown allocation".
     mapping(uint256 allocationId => Allocation) internal _allocations;
-    /// @notice Id the next successful `reserveFor` call will assign.
-    uint256 public nextAllocationId = 1;
+    /// @dev Id the next successful `reserveFor` call will assign.
+    uint256 internal nextAllocationId = 1;
 
-    /// @notice S: all outstanding shares, including queued shares and the MIN_SHARES held by address(0).
-    uint256 public totalShares;
+    /// @dev S: all outstanding shares, including queued shares and the MIN_SHARES held by address(0).
+    uint256 internal totalShares;
     /// @notice P: shares escrowed in the withdrawal queue and not yet finalized.
     uint256 public pendingShares;
-    /// @notice Free (not escrowed) shares of each account. Shares are not transferable.
-    mapping(address account => uint256) public sharesOf;
+    /// @dev Free (not escrowed) shares of each account. Shares are not transferable.
+    mapping(address account => uint256) internal sharesOf;
 
     /// @dev Withdrawal requests by id. Ids start at 1 and increase, which defines FIFO order.
     mapping(uint256 requestId => WithdrawalRequest) internal _requests;
-    /// @notice Id the next queued redemption will receive.
-    uint256 public nextRequestId = 1;
-    /// @notice Lowest request id that may still hold pending shares. Every request below it is finished or
-    ///         canceled, so queue processing starts here.
-    uint256 public queueHead = 1;
+    /// @dev Id the next queued redemption will receive.
+    uint256 internal nextRequestId = 1;
+    /// @dev Lowest request id that may still hold pending shares. Every request below it is finished or canceled,
+    ///      so queue processing starts here.
+    uint256 internal queueHead = 1;
 
-    /// @notice Unused capacity currently held by a hook's unreleased allocations, in raw units of `currency`.
-    /// @dev The per-hook counterpart of `curatorReserved`, and like it the sum of maxOut - consumed over the hook's
+    /// @dev Unused capacity currently held by a hook's unreleased allocations, in raw units of `currency`. The
+    ///      per-hook counterpart of `curatorReserved`, and like it the sum of maxOut - consumed over the hook's
     ///      unreleased allocations: raised by `allocate`, lowered by `exchange` and `_close`. Summed over all hooks it
     ///      equals Q_a. Used only for the hook-scope exposure cap.
-    mapping(address consumer => mapping(Currency currency => uint256)) public hookReserved;
-    /// @dev Risk limits by keccak256(abi.encode(scope, account, currency)); see `RiskLimit` and `getRiskLimit`.
+    mapping(address consumer => mapping(Currency currency => uint256)) internal hookReserved;
+    /// @dev Risk limits by keccak256(abi.encode(scope, account, currency)); see `RiskLimit` and
+    ///      `VaultLens.getRiskLimit`.
     mapping(bytes32 key => RiskLimit) internal _riskLimits;
 
     /// @notice The authorization module, the only address allowed to call `reserveFor`. Zero: none installed, so no
@@ -251,19 +256,20 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     /// @dev Modules that were installed and then replaced or disabled. A retired module can never be installed again.
     mapping(address module => bool) internal _retiredAuthModule;
 
-    /// @notice Market-risk adapter read on every fill. Zero: static mode (only the stored floors price fills). Hooks
-    ///         read it from here, so they cannot price from a different adapter than the one the vault enforces.
-    IMarketRiskAdapter public riskAdapter;
-    /// @notice e: the vault's edge beyond the reference band, pips. Guardian may only raise it.
-    uint24 public riskEdgePips;
-    /// @notice Largest reference uncertainty u the vault accepts, pips. Guardian may only lower it.
-    uint24 public maxUncertaintyPips;
-    /// @notice tau_a: inventory target per share, by asset index (0: asset0, 1: asset1), in raw units scaled by 1e18.
-    ///         Zero: no inventory floor for that asset (and, in adapter mode, no selling of it).
-    uint256[2] public inventoryTargetPerShare;
-    /// @notice kappa_a: how far below its target the holding of each asset may fall, pips of the target. Guardian may
-    ///         only lower it.
-    uint24[2] public inventoryTolerancePips;
+    /// @dev Market-risk adapter read on every fill. Zero: static mode (only the stored floors price fills). Hooks
+    ///      read it through `coreInputs`, so they cannot price from a different adapter than the one the vault
+    ///      enforces.
+    IMarketRiskAdapter internal riskAdapter;
+    /// @dev e: the vault's edge beyond the reference band, pips. Guardian may only raise it.
+    uint24 internal riskEdgePips;
+    /// @dev Largest reference uncertainty u the vault accepts, pips. Guardian may only lower it.
+    uint24 internal maxUncertaintyPips;
+    /// @dev tau_a: inventory target per share, by asset index (0: asset0, 1: asset1), in raw units scaled by 1e18.
+    ///      Zero: no inventory floor for that asset (and, in adapter mode, no selling of it).
+    uint256[2] internal inventoryTargetPerShare;
+    /// @dev kappa_a: how far below its target the holding of each asset may fall, pips of the target. Guardian may
+    ///      only lower it.
+    uint24[2] internal inventoryTolerancePips;
 
     /// @dev Transient-storage (EIP-1153) slot of the reentrancy lock: keccak256 of
     ///      "porkfolio.SharedCommitmentVault.reentrancyLock". Transient storage is cleared at the end of every
@@ -533,8 +539,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     }
 
     /// @notice Set R_a, the inventory of `currency` that new allocations must leave unreserved.
-    /// @dev Checked only by `reserveFor`, through the admission rule (`admissibleCapacity`). It does not reserve anything for a particular
-    ///      LP and does not limit redemptions. Raising it above current free inventory does not affect existing
+    /// @dev Checked only by `reserveFor`, through the admission rule (`_admissible`). It does not reserve anything
+    ///      for a particular LP and does not limit redemptions. Raising it above current free inventory does not affect existing
     ///      allocations; it only stops new ones. Owner may raise or lower; the guardian may only raise (or set the
     ///      same value).
     /// @param currency Asset the buffer applies to.
@@ -1021,7 +1027,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///
     ///      Admission and eligible backing. E_a = N_a - D_a is net assets minus the queue's pro-rata claim. The
     ///      admission limit is max(0, E_a - Q_a - R_a), computed by subtracting in turn with a floor at zero, which
-    ///      equals max(0, N_a - Q_a - R_a - D_a) (see `admissibleCapacity`). It protects three things from being
+    ///      equals max(0, N_a - Q_a - R_a - D_a) (see `_admissible`). It protects three things from being
     ///      promised to a hook: existing commitments (Q_a), the buffer (R_a), and the queue's pro-rata share (D_a).
     ///      Claimable assets W_a are excluded because N_a = B_a - W_a.
     ///
@@ -1360,59 +1366,11 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         }
     }
 
-    /// @notice Stored state of an allocation. Returns an all-zero struct for an unknown id.
-    /// @param allocationId Allocation to read.
-    /// @return The allocation record.
-    function getAllocation(uint256 allocationId) external view returns (Allocation memory) {
-        return _allocations[allocationId];
-    }
-
     /// @notice Stored record of a curator. All-zero for an address that was never touched.
     /// @param curator Curator to read.
     /// @return The curator record.
     function getCurator(address curator) external view returns (CuratorRecord memory) {
         return _curators[curator];
-    }
-
-    /// @notice Stored risk limits and flow usage of one scope in one asset. All-zero if never configured.
-    /// @dev `flowUsed` belongs to window `epoch`; it is current usage only while `epoch` equals
-    ///      block.timestamp / FLOW_WINDOW. `VaultLens.flowAvailable` applies that rule.
-    /// @param scope Hook, Curator or Vault.
-    /// @param account The hook or curator; address(0) for the vault scope.
-    /// @param currency Asset the limit applies to.
-    /// @return The stored record.
-    function getRiskLimit(RiskScope scope, address account, Currency currency)
-        external
-        view
-        returns (RiskLimit memory)
-    {
-        return _riskLimit(scope, account, currency);
-    }
-
-    /// @notice Stored state of a withdrawal request. Returns an all-zero struct for an unknown id.
-    /// @param requestId Request to read.
-    /// @return The request record.
-    function getRequest(uint256 requestId) external view returns (WithdrawalRequest memory) {
-        return _requests[requestId];
-    }
-
-    /// @notice Largest new allocation of `currency` the admission rule accepts right now: N_a - Q_a - R_a - D_a,
-    ///         or 0 if that is negative.
-    /// @dev Example: N_a = 1,000, Q_a = 300, R_a = 100 and D_a = 150 give 450. This does not include the curator's
-    ///      own ceiling or the exposure caps, which `reserveFor` checks separately.
-    ///
-    ///      Computed as max(0, max(0, E_a - Q_a) - R_a) with E_a = N_a - D_a (exact, since D_a <= N_a), the same
-    ///      E_a the exposure caps use. Each term is subtracted in turn with a floor at zero instead of summing
-    ///      Q_a + R_a + D_a first. R_a is an admin input with no upper bound (the guardian may raise it to
-    ///      type(uint256).max to stop new allocations in this asset), so the sum could overflow and revert with a
-    ///      panic. Because every term is non-negative, the floored chain equals max(0, N - D - Q - R) exactly: once an
-    ///      intermediate result reaches zero, the exact value is already <= 0. The result is therefore unchanged
-    ///      wherever the sum did not overflow, and is 0 (so `reserveFor` reverts with `InsufficientBacking`) wherever
-    ///      it did.
-    /// @param currency Asset the allocation would sell.
-    /// @return Raw units of `currency`.
-    function admissibleCapacity(Currency currency) external view returns (uint256) {
-        return _admissible(currency, _eligibleBacking(currency));
     }
 
     // ==================================================================
@@ -1432,8 +1390,16 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         return _netAssets(currency) - _pendingDemand(currency);
     }
 
-    /// @dev Admission limit max(0, E_a - Q_a - R_a), with each term subtracted in turn and floored at zero (see
-    ///      `admissibleCapacity` for why that equals max(0, N_a - Q_a - R_a - D_a) and never overflows).
+    /// @dev Admission limit max(0, E_a - Q_a - R_a) = max(0, N_a - Q_a - R_a - D_a) with E_a = N_a - D_a (exact,
+    ///      since D_a <= N_a). Example: N_a = 1,000, Q_a = 300, R_a = 100 and D_a = 150 give 450.
+    ///
+    ///      Each term is subtracted in turn with a floor at zero instead of summing Q_a + R_a + D_a first. R_a is an
+    ///      admin input with no upper bound (the guardian may raise it to type(uint256).max to stop new allocations
+    ///      in this asset), so the sum could overflow and revert with a panic. Because every term is non-negative,
+    ///      the floored chain equals max(0, N - D - Q - R) exactly: once an intermediate result reaches zero, the
+    ///      exact value is already <= 0. The result is therefore the exact limit wherever the sum would not
+    ///      overflow, and 0 (so `reserveFor` reverts with `InsufficientBacking`) wherever it would.
+    ///      `VaultLens.admissibleCapacity` repeats this formula.
     function _admissible(Currency currency, uint256 eligible) internal view returns (uint256) {
         return _sub0(_sub0(eligible, reserved[currency]), bufferFloor[currency]);
     }

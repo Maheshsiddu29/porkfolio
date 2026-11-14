@@ -9,6 +9,9 @@ import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {CuratorAuthorization} from "../../src/CuratorAuthorization.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @dev Stand-in for the governor's admin multisig: runs a list of calls in one transaction and reverts with the first
 ///      failure's revert data. Release, `processQueue` and `execute` in one batch is the procedure the governor's

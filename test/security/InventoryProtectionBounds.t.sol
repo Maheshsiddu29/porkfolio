@@ -15,6 +15,10 @@ import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVaul
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
 import {MockRiskAdapter} from "../utils/MockRiskAdapter.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice The four loss quantities of INVENTORY_PROTECTION.md are different, and the floor bounds only the first two.
 ///         Each test drives the real vault (production builds, real PoolManager) to a state where one quantity is

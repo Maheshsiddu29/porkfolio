@@ -9,6 +9,9 @@ import {AuthTestBase} from "../utils/AuthTestBase.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
 import {ModuleCandidate} from "../utils/ModuleCandidate.sol";
 import {MaliciousAuthModule} from "../utils/MaliciousAuthModule.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice The vault's installation check on `setAuthModule`, repeated and idempotent changes, and replay of
 ///         instructions signed for a module that has since been retired. Runs on the production builds

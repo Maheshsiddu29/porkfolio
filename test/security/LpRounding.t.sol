@@ -10,6 +10,10 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Rounding when one LP position leaves in several pieces: split instant redemptions and queue finalization
 ///         in several slices.

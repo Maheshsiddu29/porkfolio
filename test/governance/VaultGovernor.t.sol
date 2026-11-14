@@ -16,6 +16,9 @@ import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MockRiskAdapter} from "../utils/MockRiskAdapter.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @dev Claims to be a hook of the governed vault owned by the governor, and tries to re-enter the governor when called.
 contract ReenteringFakeHook {

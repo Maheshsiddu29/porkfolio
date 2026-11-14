@@ -27,6 +27,9 @@ import {HookA_DynamicFee} from "../../src/hooks/HookA_DynamicFee.sol";
 import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
 import {BatchSwapRouter} from "./BatchSwapRouter.sol";
 import {ProductionArtifacts} from "./ProductionArtifacts.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Shared fixture: REAL v4-core PoolManager (pinned), two distinct hooks on two distinct pools that
 ///         share one vault, and a funded vault. No PoolManager behaviour is mocked.
@@ -83,7 +86,7 @@ abstract contract VaultTestBase is Test {
         c0 = Currency.wrap(address(token0));
         c1 = Currency.wrap(address(token1));
 
-        vault = new SharedCommitmentVault(manager, owner, c0, c1);
+        vault = _newVault();
         lens = VaultLens(deployCode(ProductionArtifacts.LENS));
         auth = _deployAuth(vault);
         batchRouter = new BatchSwapRouter(manager, address(vault));
@@ -137,6 +140,13 @@ abstract contract VaultTestBase is Test {
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
+
+    /// @dev The fixture's vault. Suites that need a test-only subclass with the same storage layout (the lens parity
+    ///      and storage-layout tests use `VaultGetterHarness`) override this; everything else gets the production
+    ///      contract.
+    function _newVault() internal virtual returns (SharedCommitmentVault) {
+        return new SharedCommitmentVault(manager, owner, c0, c1);
+    }
 
     uint256 internal constant MAX_FLOW_CAP = type(uint104).max;
 
@@ -349,18 +359,18 @@ abstract contract VaultTestBase is Test {
     /// @dev As `_assertEquations`, with B_a = PM balance - donated_a.
     function _assertEquationsWith(uint256 don0, uint256 don1) internal view {
         uint256[2] memory don = [don0, don1];
-        uint256 S = vault.totalShares();
+        uint256 S = lens.totalShares(vault);
         uint256 P;
         uint256[2] memory W;
-        for (uint256 id = 1; id < vault.nextRequestId(); ++id) {
-            ISharedCommitmentVault.WithdrawalRequest memory r = vault.getRequest(id);
+        for (uint256 id = 1; id < lens.nextRequestId(vault); ++id) {
+            ISharedCommitmentVault.WithdrawalRequest memory r = lens.getRequest(vault, id);
             P += r.sharesPending;
             W[0] += r.claimable0;
             W[1] += r.claimable1;
         }
         uint256[2] memory Q;
-        for (uint256 id = 1; id < vault.nextAllocationId(); ++id) {
-            ISharedCommitmentVault.Allocation memory a = vault.getAllocation(id);
+        for (uint256 id = 1; id < lens.nextAllocationId(vault); ++id) {
+            ISharedCommitmentVault.Allocation memory a = lens.getAllocation(vault, id);
             if (a.released) continue;
             Q[a.currencyOut == c0 ? 0 : 1] += a.maxOut - a.consumed;
         }
@@ -371,9 +381,9 @@ abstract contract VaultTestBase is Test {
         for (uint256 i; i < 2; ++i) {
             Currency c = cs[i];
             uint256 B = _claims(address(vault), c) - don[i];
-            assertEq(vault.backing(c), B, "B != PM balance - donations");
-            assertEq(vault.claimableAssets(c), W[i], "W != sum claimable");
-            assertEq(vault.reserved(c), Q[i], "Q != sum allocations");
+            assertEq(lens.backing(vault, c), B, "B != PM balance - donations");
+            assertEq(lens.claimableAssets(vault, c), W[i], "W != sum claimable");
+            assertEq(lens.reserved(vault, c), Q[i], "Q != sum allocations");
             assertLe(Q[i] + W[i], B, "Q + W > B");
             uint256 N = B - W[i];
             nSum += N;
@@ -385,9 +395,9 @@ abstract contract VaultTestBase is Test {
             // Q + D <= 2N < 2^129 cannot overflow. R is unbounded (the guardian may raise it to type(uint256).max),
             // so it is compared against what is left rather than added to Q + D.
             uint256 qd = Q[i] + D;
-            uint256 R = vault.bufferFloor(c);
+            uint256 R = lens.bufferFloor(vault, c);
             uint256 expected = N > qd && N - qd > R ? N - qd - R : 0;
-            assertEq(vault.admissibleCapacity(c), expected, "admission != max(0, N - Q - R - D)");
+            assertEq(lens.admissibleCapacity(vault, c), expected, "admission != max(0, N - Q - R - D)");
         }
         if (S != 0) assertGt(nSum, 0, "shares outstanding with no assets");
     }

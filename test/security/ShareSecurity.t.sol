@@ -14,6 +14,9 @@ import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {BatchSwapRouter} from "../utils/BatchSwapRouter.sol";
 import {ClaimDonor} from "../utils/ClaimDonor.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Adversarial tests for the share and redemption layer, on the real PoolManager.
 contract ShareSecurityTest is VaultTestBase {

@@ -24,6 +24,9 @@ import {ReentrantToken, ReentryAgent} from "../utils/ReentrantToken.sol";
 import {ScriptedHook} from "../utils/ScriptedHook.sol";
 import {ClaimDonor} from "../utils/ClaimDonor.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Reentrancy: every external-call path of the vault, attacked from the two places foreign code can run.
 /// @dev Two kinds of attacker, both against the real PoolManager:

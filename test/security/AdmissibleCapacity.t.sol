@@ -6,6 +6,10 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Regression and boundary tests for `admissibleCapacity` and the admission check in `allocate`.
 /// @dev The defect these tests pin down: capacity used to be computed as N - (Q + R + D). R (the buffer floor) is an
@@ -283,14 +287,20 @@ contract AdmissibleCapacityTest is VaultTestBase {
         assertGt(lens.netAssets(vault, c1), vault.reserved(c1) + lens.pendingDemand(vault, c1), "fixture: room left");
     }
 
+    /// @dev Writes B_a, W_a, Q_a, R_a and S straight into the vault's storage at the slots `VaultStateReader` decodes
+    ///      (pinned by `VaultStorageLayout.t.sol`), and P through its getter with stdstore.
     function _write(Currency c, uint256 b, uint256 w, uint256 q, uint256 r, uint256 s, uint256 p) internal {
         address a = Currency.unwrap(c);
-        stdstore.target(address(vault)).sig("backing(address)").with_key(a).checked_write(b);
-        stdstore.target(address(vault)).sig("claimableAssets(address)").with_key(a).checked_write(w);
-        stdstore.target(address(vault)).sig("reserved(address)").with_key(a).checked_write(q);
-        stdstore.target(address(vault)).sig("bufferFloor(address)").with_key(a).checked_write(r);
-        stdstore.target(address(vault)).sig("totalShares()").checked_write(s);
+        _store(keccak256(abi.encode(a, VaultStateReader.BACKING_SLOT)), b);
+        _store(keccak256(abi.encode(a, VaultStateReader.CLAIMABLE_ASSETS_SLOT)), w);
+        _store(keccak256(abi.encode(a, VaultStateReader.RESERVED_SLOT)), q);
+        _store(keccak256(abi.encode(a, VaultStateReader.BUFFER_FLOOR_SLOT)), r);
+        _store(bytes32(VaultStateReader.TOTAL_SHARES_SLOT), s);
         stdstore.target(address(vault)).sig("pendingShares()").checked_write(p);
+    }
+
+    function _store(bytes32 slot, uint256 value) internal {
+        vm.store(address(vault), slot, bytes32(value));
     }
 
     function _tryAdd3(uint256 x, uint256 y, uint256 z) internal pure returns (bool overflow, uint256 sum) {

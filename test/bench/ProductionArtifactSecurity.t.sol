@@ -27,6 +27,10 @@ import {Mock1271Wallet} from "../utils/Mock1271Wallet.sol";
 import {MaliciousAuthModule} from "../utils/MaliciousAuthModule.sol";
 import {ModuleCandidate} from "../utils/ModuleCandidate.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+// Stored values are read by decoding `extsload`; the library imports interfaces only, not the vault source.
+using VaultStateReader for IBenchVault;
 
 /// @title Production-artifact security tests
 /// @notice Security-relevant paths run against the exact bytecode that would be deployed: the vault, HookA, HookB and

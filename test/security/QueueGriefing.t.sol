@@ -5,6 +5,10 @@ import {console2} from "forge-std/console2.sol";
 
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Queue griefing: can an LP, by queuing, cancelling or splitting requests, block or overtake others?
 ///         Each test is labelled INTENDED (a fairness property that must hold) or DOS (behaviour that would be an

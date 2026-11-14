@@ -24,6 +24,9 @@ import {IMarketRiskAdapter} from "../../src/interfaces/IMarketRiskAdapter.sol";
 import {IAggregatorV3} from "../../src/interfaces/IAggregatorV3.sol";
 import {PriceRiskAdapter} from "../../src/oracle/PriceRiskAdapter.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice The integrated system on a read-only Unichain mainnet fork: the production builds of the vault, both hooks
 ///         and the authorization module on Unichain's own v4 PoolManager, priced by `PriceRiskAdapter` over the live

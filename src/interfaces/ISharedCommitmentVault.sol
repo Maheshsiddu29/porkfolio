@@ -476,9 +476,4 @@ interface ISharedCommitmentVault {
     /// @param amountOut Raw output claims the vault sends.
     function exchange(PoolKey calldata key, bool zeroForOne, uint256 allocationId, uint256 amountIn, uint256 amountOut)
         external;
-
-    /// @notice Stored state of an allocation; an all-zero struct if the id does not exist.
-    /// @param allocationId Allocation to read.
-    /// @return The allocation record.
-    function getAllocation(uint256 allocationId) external view returns (Allocation memory);
 }

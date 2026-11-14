@@ -16,6 +16,10 @@ import {VaultRiskBoundary} from "../../src/risk/VaultRiskBoundary.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MockRiskAdapter} from "../utils/MockRiskAdapter.sol";
 import {PricingHarness} from "../pricing/PricingHarness.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Both production hooks in shared-core mode, through the real PoolManager and the production builds: they read
 ///         the reference from the vault's adapter, price from the vault's inventory, and stay inside the vault's

@@ -11,6 +11,10 @@ import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVaul
 import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {AuthModeHook} from "../utils/AuthModeHook.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Curator cancellation and the shared close path (`_close`) behind cancel, expiry release, emergency
 ///         release and revoked-curator cleanup.

@@ -9,6 +9,9 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Multi-LP ownership, deposits and two-tier redemption, interleaved with real swaps through both hooks
 ///         on the real PoolManager.

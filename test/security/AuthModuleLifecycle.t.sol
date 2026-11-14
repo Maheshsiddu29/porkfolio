@@ -10,6 +10,9 @@ import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVaul
 import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
 import {AuthTestBase} from "../utils/AuthTestBase.sol";
 import {MaliciousAuthModule} from "../utils/MaliciousAuthModule.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Installing, disabling, retiring and replacing the authorization module, and what a compromised module can
 ///         and cannot do. Runs on the production builds (`VaultTestBase`).

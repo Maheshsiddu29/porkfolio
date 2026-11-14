@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 
 import {ISharedCommitmentVault} from "../interfaces/ISharedCommitmentVault.sol";
 import {IVaultState} from "../interfaces/IVaultState.sol";
@@ -10,8 +11,9 @@ import {IMarketRiskAdapter} from "../interfaces/IMarketRiskAdapter.sol";
 
 /// @title VaultStateReader
 /// @notice Decodes `SharedCommitmentVault`'s stored accounting from raw storage words read with the vault's
-///         `extsload(slot)`. `VaultLens` serves these reads as external functions; scripts and other contracts can
-///         call this library directly, without a deployed lens.
+///         `extsload(slot)`, and computes from them the admission quantities N_a, D_a, E_a and the admission limit.
+///         `VaultLens` serves these reads as external functions; scripts and other contracts can call this library
+///         directly, without a deployed lens.
 /// @dev The slot numbers and packed offsets below mirror the vault's storage layout, which is fixed by the
 ///      declaration order of its state variables. `test/unit/VaultStorageLayout.t.sol` pins every one of them
 ///      against the compiled vault, so a layout change in the vault fails that test instead of making these reads
@@ -243,6 +245,42 @@ library VaultStateReader {
     }
 
     // forge-lint: disable-end(unsafe-typecast)
+
+    /// @dev N_a = B_a - W_a, raw units: assets owned by outstanding shares, including committed capacity Q_a. The
+    ///      vault's `_netAssets`. Cannot underflow while the vault maintains W_a <= B_a.
+    function netAssets(IVaultState vault, Currency currency) internal view returns (uint256) {
+        return backing(vault, currency) - claimableAssets(vault, currency);
+    }
+
+    /// @dev D_a = ceil(P * N_a / S), raw units: the pending queue's pro-rata claim. The vault's `_pendingDemand`,
+    ///      rounded up so the capacity protected for the queue is never less than its exact share. Example: P = 300,
+    ///      S = 1,000 and N_a = 1,001 give ceil(300.3) = 301. P > 0 implies S >= P > 0, so the division is safe;
+    ///      0 when nothing is pending.
+    function pendingDemand(IVaultState vault, Currency currency) internal view returns (uint256) {
+        uint256 p = vault.pendingShares();
+        if (p == 0) return 0;
+        return FullMath.mulDivRoundingUp(p, netAssets(vault, currency), totalShares(vault));
+    }
+
+    /// @dev E_a = N_a - D_a, raw units: the backing admission and the exposure caps are measured against. The
+    ///      vault's `_eligibleBacking`. D_a <= N_a because P <= S, so this cannot underflow.
+    function eligibleBacking(IVaultState vault, Currency currency) internal view returns (uint256) {
+        return netAssets(vault, currency) - pendingDemand(vault, currency);
+    }
+
+    /// @dev Admission limit max(0, N_a - Q_a - R_a - D_a), raw units: the largest new allocation `reserveFor`'s
+    ///      admission rule accepts now (the curator ceiling and the exposure caps are separate). The vault's
+    ///      `_admissible(currency, _eligibleBacking(currency))`: each term is subtracted in turn with a floor at zero,
+    ///      which equals the exact value without ever summing Q_a + R_a + D_a, whose sum can overflow because R_a
+    ///      has no upper bound. Example: N_a = 1,000, Q_a = 300, R_a = 100 and D_a = 150 give 450.
+    function admissibleCapacity(IVaultState vault, Currency currency) internal view returns (uint256) {
+        return _sub0(_sub0(eligibleBacking(vault, currency), reserved(vault, currency)), bufferFloor(vault, currency));
+    }
+
+    /// @dev a - b, or 0 if b > a.
+    function _sub0(uint256 a, uint256 b) private pure returns (uint256) {
+        return a > b ? a - b : 0;
+    }
 
     /// @dev Slot of `mapping[key]` for a mapping declared at `slot`.
     function _mapSlot(bytes32 key, uint256 slot) private pure returns (bytes32) {

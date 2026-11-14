@@ -17,6 +17,9 @@ import {ICuratorAuthorization} from "../src/interfaces/ICuratorAuthorization.sol
 import {CuratorAuthorization} from "../src/CuratorAuthorization.sol";
 import {VaultGovernor} from "../src/governance/VaultGovernor.sol";
 import {DeploySystem} from "./DeploySystem.s.sol";
+import {VaultStateReader} from "../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @title Rehearse
 /// @notice Stage 3 of the Unichain Sepolia rehearsal: the life cycle on the deployed system, one role per stage. TEST

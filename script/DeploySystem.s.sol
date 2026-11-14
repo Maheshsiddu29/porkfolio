@@ -22,6 +22,9 @@ import {HookA_DynamicFee} from "../src/hooks/HookA_DynamicFee.sol";
 import {HookB_BoundedImpact} from "../src/hooks/HookB_BoundedImpact.sol";
 import {ProductionArtifacts} from "../test/utils/ProductionArtifacts.sol";
 import {TestnetAggregator} from "./testnet/TestnetAggregator.sol";
+import {VaultStateReader} from "../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @title DeploySystem
 /// @notice Stage 1 of the Unichain Sepolia rehearsal. Deploys the system, hands the vault to the governor, and queues

@@ -11,9 +11,15 @@ import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVaul
 import {IVaultState} from "../../src/interfaces/IVaultState.sol";
 import {CumulativePricing} from "../../src/hooks/CumulativePricing.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
+using VaultStateReader for IVaultState;
 
 /// @notice Reads the vault state a pricing rule based on real inventory would need, and reports the gas it costs.
-/// @dev Research instrument only. The reads are the vault's existing public getters; nothing here changes the vault.
+/// @dev Research instrument only. The reads are the vault's stored values through `extsload`, decoded by
+///      `VaultStateReader` (two storage words per asset and one for S); nothing here changes the vault.
 contract VaultInventoryReader {
     /// @return gasUsed Gas of the reads alone (between the two `gasleft` calls).
     /// @return n0 backing(c0) - claimableAssets(c0).
@@ -153,7 +159,7 @@ contract HookBRootCauseTest is VaultTestBase {
         _swap(keyB, false, REVERSE_IN, id01);
     }
 
-    /// @notice Gas of the vault reads an inventory-based rule needs (N_0, N_1, S: five getters), cold and warm.
+    /// @notice Gas of the vault reads an inventory-based rule needs (N_0, N_1, S: five storage words), cold and warm.
     ///         Logged for the feasibility estimate; asserts only an upper bound so that a regression is visible.
     function test_RC_gas_vaultInventoryReads() public {
         VaultInventoryReader r = new VaultInventoryReader();
@@ -165,8 +171,7 @@ contract HookBRootCauseTest is VaultTestBase {
         assertEq(n0, VAULT_FUNDING);
         assertEq(n1, VAULT_FUNDING);
         assertGt(s, 0);
-        // 19,549 on the production vault; a larger vault dispatcher (the dynamic-floor proposal measured 20,143) makes
-        // the five reads slightly dearer, so the bound only catches a large regression.
+        // 17,445 cold through `extsload` (five storage words); the bound only catches a large regression.
         assertLt(cold, 25_000);
         assertLt(warm, cold);
     }

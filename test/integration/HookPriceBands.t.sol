@@ -17,6 +17,9 @@ import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice The two production hooks (HookA_DynamicFee, HookB_BoundedImpact) under vault-enforced floors,
 ///         through the real PoolManager, in both directions, on an 18/18 pair (fixture) and a 6/18 USDC/WETH pair.

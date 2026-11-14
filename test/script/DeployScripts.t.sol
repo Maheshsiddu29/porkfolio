@@ -13,6 +13,9 @@ import {VerifyDeployment} from "../../script/VerifyDeployment.s.sol";
 import {Rehearse} from "../../script/Rehearse.s.sol";
 import {TestnetAggregator} from "../../script/testnet/TestnetAggregator.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice The rehearsal scripts run end to end on a local chain against the production PoolManager build: stage 1
 ///         deploys and hands over, the release gates fail before stage 2 (hooks not configured) and pass after it, and

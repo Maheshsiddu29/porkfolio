@@ -10,6 +10,10 @@ import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVaul
 import {VaultRiskBoundary} from "../../src/risk/VaultRiskBoundary.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice What reserved capacity Q_a does and does not promise, when hooks and LP exits compete for one reserve.
 /// @dev Fixture: 1e24 of each asset, 1e24 shares, 1:1 sell floors in static mode. A registered test hook fills at

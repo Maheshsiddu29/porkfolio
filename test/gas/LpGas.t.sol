@@ -5,6 +5,9 @@ import {console2} from "forge-std/console2.sol";
 
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Gas references for LP operations on the real PoolManager. Each test measures exactly one vault call.
 ///         Authoritative numbers come from `forge test --match-contract LpGas --isolate -vvvv` (vault call frame,

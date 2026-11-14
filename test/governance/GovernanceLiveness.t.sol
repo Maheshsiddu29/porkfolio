@@ -11,6 +11,10 @@ import {VaultGovernor} from "../../src/governance/VaultGovernor.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MockRiskAdapter} from "../utils/MockRiskAdapter.sol";
 import {AdminBatch, QueueGriefer} from "../utils/GovernanceActors.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Withdrawal-queue griefing against `VaultGovernor`'s LONG_DELAY queue check, played deterministically
 ///         against the real vault, PoolManager and authorization module.

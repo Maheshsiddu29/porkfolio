@@ -18,6 +18,10 @@ import {VaultRiskBoundary} from "../../src/risk/VaultRiskBoundary.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
 import {MockAggregator} from "../utils/MockAggregator.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Oracle failures as the vault sees them, with the production `PriceRiskAdapter` over mock push feeds in the
 ///         configuration of the Sepolia rehearsal (script/DeploySystem.s.sol): a Chainlink-like push source at

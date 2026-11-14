@@ -10,6 +10,10 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {AuthModeHook} from "../utils/AuthModeHook.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Exposure caps: unused reserved capacity per hook, per curator and vault-wide, as basis points of eligible
 ///         backing E_a = N_a - D_a, checked when an allocation is created.

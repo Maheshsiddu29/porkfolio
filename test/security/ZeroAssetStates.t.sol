@@ -13,6 +13,9 @@ import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVaul
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {AuthModeHook} from "../utils/AuthModeHook.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Zero-asset, depleted and dust states, reached through the real PoolManager.
 ///         A test-only 1:1 hook drains an asset exactly. A zero vault floor cannot be configured, so near-total

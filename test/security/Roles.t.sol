@@ -6,6 +6,10 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Role security: two-step ownership, a guardian that can only REDUCE risk, explicitly
 ///         registered curators, and the guarantee that no emergency action moves LP assets or blocks LP exits.

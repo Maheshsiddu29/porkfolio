@@ -25,6 +25,9 @@ import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
 import {MockRiskAdapter} from "../utils/MockRiskAdapter.sol";
 import {VaultRiskBoundary} from "../../src/risk/VaultRiskBoundary.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Everything the system lets happen to one shared reserve, driven at random: honest and adversarial trades
 ///         through both production hooks and a malicious consumer, two curators, deposits, instant and queued

@@ -12,6 +12,9 @@ import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.
 import {AuthTestBase} from "../utils/AuthTestBase.sol";
 import {Mock1271Wallet} from "../utils/Mock1271Wallet.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @dev Foundry's EIP-712 encoder (Rust, alloy), available as a cheatcode but not declared in this forge-std version.
 interface ITypedDataEncoder {

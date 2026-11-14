@@ -8,6 +8,10 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {BatchSwapRouter} from "../utils/BatchSwapRouter.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Trade splitting: one trade versus the same total input split into several swaps inside ONE transaction
 ///         (one PoolManager unlock, via BatchSwapRouter), from identical starting state. These scenarios pinned the

@@ -21,6 +21,9 @@ import {HookA_DynamicFee} from "../src/hooks/HookA_DynamicFee.sol";
 import {HookB_BoundedImpact} from "../src/hooks/HookB_BoundedImpact.sol";
 import {ProductionArtifacts} from "../test/utils/ProductionArtifacts.sol";
 import {DeploySystem} from "./DeploySystem.s.sol";
+import {VaultStateReader} from "../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @title VerifyDeployment
 /// @notice Read-only release gates for a deployed system. Reverts at the first failing gate and prints PASS for each

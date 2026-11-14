@@ -11,6 +11,9 @@ import {VaultGovernor} from "../../src/governance/VaultGovernor.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
 import {CheckQueuedConflicts} from "../../script/CheckQueuedConflicts.s.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @dev Passes the governor's target check at queue time; its code is replaced before execution in one test.
 contract FakeHook {
@@ -127,10 +130,10 @@ contract GovernorIntegrityTest is VaultTestBase {
                 || h == keccak256("transferOwnership(address)");
             assertEq(gov.delayFor(v, data), long ? 32 days : 3 days, sigs[i]);
         }
-        assertEq(sigs.length, 70, "vault ABI changed: review VaultGovernor's delay classes");
+        assertEq(sigs.length, 48, "vault ABI changed: review VaultGovernor's delay classes");
         assertEq(
             keccak256(joined),
-            0xa9b10ccd4d4dcaf9148f87aa8aba6316f897a65ca858edb08221d3ae3dea52b5,
+            0x193ed0291b4e3c64f88907f35a83485f0874cb1bafc0a407f8bbe1ba2544a3a5,
             "vault ABI changed: review VaultGovernor's delay classes"
         );
     }

@@ -10,6 +10,10 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {AuthModeHook} from "../utils/AuthModeHook.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Curator states: registration, temporary freeze, permanent revocation and the generation counter.
 /// @dev The properties under test, each tied to a requirement:

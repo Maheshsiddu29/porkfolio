@@ -15,6 +15,9 @@ import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVaul
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
 import {ClaimDonor} from "../utils/ClaimDonor.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Vault-enforced minimum execution price, through the REAL PoolManager.
 ///         A registered test hook (`MaliciousConsumerHook`, mode ExactAmounts) lets each test choose the exact

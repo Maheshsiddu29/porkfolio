@@ -6,6 +6,9 @@ import {CuratorAuthorization} from "../../src/CuratorAuthorization.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {ClaimDonor} from "../utils/ClaimDonor.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Controlled first initialization. The asset pair is fixed by the constructor
 ///         (immutable, set in the deployment transaction itself); the initial reserve can only be established by

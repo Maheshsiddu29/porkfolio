@@ -21,6 +21,9 @@ import {VaultRiskBoundary} from "../../src/risk/VaultRiskBoundary.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
 import {MockRiskAdapter} from "../utils/MockRiskAdapter.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Drives the vault with an adversary that owns the market-risk adapter. Every handler call records the
 ///         per-share holdings before and after and flags a violation of T1 (INVENTORY_FLOOR_GUARANTEE.md):

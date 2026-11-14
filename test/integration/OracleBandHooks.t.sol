@@ -25,6 +25,9 @@ import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MockAggregator} from "../utils/MockAggregator.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Both production hooks against the corrected reference uncertainty, end to end: the production adapter over
 ///         mock feeds, the vault, Hook A and Hook B in shared-core mode, the real PoolManager, in the rehearsal's

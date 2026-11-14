@@ -20,6 +20,9 @@ import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {BatchSwapRouter} from "../utils/BatchSwapRouter.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Negative-path and adversarial tests. Every swap goes through the real PoolManager.
 contract VaultSecurityTest is VaultTestBase {

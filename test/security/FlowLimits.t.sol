@@ -15,6 +15,9 @@ import {AuthModeHook} from "../utils/AuthModeHook.sol";
 import {ScriptedHook} from "../utils/ScriptedHook.sol";
 import {MaliciousConsumerHook} from "../utils/MaliciousConsumerHook.sol";
 import {BatchSwapRouter} from "../utils/BatchSwapRouter.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Hierarchical gross-outflow limits (per hook, per curator, vault-wide) on the real PoolManager.
 /// @dev Most tests trade through 1:1, fee-free test hooks (`AuthModeHook`), so the vault's output equals the swap's

@@ -10,6 +10,10 @@ import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVaul
 import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
 import {AuthTestBase} from "../utils/AuthTestBase.sol";
 import {Mock1271Wallet} from "../utils/Mock1271Wallet.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Time rules of signed instructions, ERC-1271 failures and rollback of an activation the vault refuses.
 ///         Runs on the production builds (`VaultTestBase`).

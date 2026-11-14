@@ -27,6 +27,9 @@ import {AuthModeHook} from "../utils/AuthModeHook.sol";
 import {ClaimDonor} from "../utils/ClaimDonor.sol";
 import {HookA_DynamicFee} from "../../src/hooks/HookA_DynamicFee.sol";
 import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice Random action sequences against the real PoolManager: allocations by three curators (direct and EIP-712
 ///         signed, through the authorization module, with fresh, colliding, stale and invalidated nonces and
@@ -548,11 +551,11 @@ contract VaultHandler is Test {
         } catch {
             if (asGuardian) guardianRefusals++;
         }
-        try vault.admissibleCapacity(c0) {}
+        try lens.admissibleCapacity(vault, c0) {}
         catch {
             capacityReverted = true;
         }
-        try vault.admissibleCapacity(c1) {}
+        try lens.admissibleCapacity(vault, c1) {}
         catch {
             capacityReverted = true;
         }

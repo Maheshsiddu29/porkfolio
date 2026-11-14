@@ -8,17 +8,21 @@ import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultGetterHarness} from "../utils/VaultGetterHarness.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 
-/// @notice Differential test of `VaultLens`'s storage decoding against the vault's own getters.
-/// @dev A fuzzed sequence of real operations (deposits, queued redemptions, queue processing, claims, request
-///      cancellation, allocations, swaps through Hook A and Hook B on the real PoolManager, curator cancellation,
-///      expiry release, and owner changes to floors, limits and bounds) runs against the production vault. After
-///      every operation each value the lens reads through `extsload` must equal the vault getter of the same name,
-///      for both assets and a currency outside the pair, every account and scope the sequence touches, and every
-///      allocation and request id up to the next one (the unused next id must decode as all-zero). Operations that
-///      the vault refuses in the state the fuzzer reached are skipped: the point is the variety of reachable states,
-///      not the operations themselves, which other suites test.
+/// @notice Differential test of `VaultLens`'s storage decoding against reads of the vault's state variables by name.
+/// @dev The fixture's vault is `VaultGetterHarness`: the production vault plus test-only getters that read each
+///      internal state variable by name, through the compiler's own storage resolution. A fuzzed sequence of real
+///      operations (deposits, queued redemptions, queue processing, claims, request cancellation, allocations, swaps
+///      through Hook A and Hook B on the real PoolManager, curator cancellation, expiry release, and owner changes to
+///      floors, limits and bounds) runs against it. After every operation each value the lens reads through
+///      `extsload` must equal the by-name read, for both assets and a currency outside the pair, every account and
+///      scope the sequence touches, and every allocation and request id up to the next one (the unused next id must
+///      decode as all-zero). The admission limit is compared with the vault's own internal `_admissible` formula.
+///      Operations that the vault refuses in the state the fuzzer reached are skipped: the point is the variety of
+///      reachable states, not the operations themselves, which other suites test.
 contract VaultLensParityTest is VaultTestBase {
     /// @dev Operation kinds, steps per sequence, and sequences in the non-vacuity test.
     uint256 internal constant OPS = 12;
@@ -28,6 +32,13 @@ contract VaultLensParityTest is VaultTestBase {
     address internal lp1 = makeAddr("lp1");
     uint256[] internal requestIds;
     mapping(uint256 requestId => address lp) internal requester;
+
+    VaultGetterHarness internal ref; // the fixture's vault, with by-name reference getters
+
+    function _newVault() internal override returns (SharedCommitmentVault) {
+        ref = new VaultGetterHarness(manager, owner, c0, c1);
+        return ref;
+    }
 
     function setUp() public override {
         super.setUp();
@@ -77,7 +88,7 @@ contract VaultLensParityTest is VaultTestBase {
         // exits outgrow free inventory and queue.
         uint256 r0 = uint256(keccak256(abi.encode(seed, "open")));
         Currency out = r0 & 1 == 0 ? c0 : c1;
-        uint256 cap = vault.admissibleCapacity(out);
+        uint256 cap = ref.oldAdmissibleCapacity(out);
         _allocate(r0 & 2 == 0 ? keyA : keyB, out, uint128(bound(r0 >> 2, cap * 8 / 10, cap)));
         if (checkParity) _assertParity();
         for (uint256 i; i < STEPS; ++i) {
@@ -97,7 +108,7 @@ contract VaultLensParityTest is VaultTestBase {
         } else if (op == 1) {
             // The seed LP holds most shares, so its exits are the ones that outgrow free inventory and queue.
             address lp = r & 1 == 0 ? lp0 : lp1;
-            uint256 s = vault.sharesOf(lp);
+            uint256 s = ref.oldSharesOf(lp);
             if (s == 0) return false;
             vm.prank(lp);
             try vault.redeem(bound(r >> 1, s / 2 + 1, s), 0, 0, lp, true) returns (
@@ -129,7 +140,7 @@ contract VaultLensParityTest is VaultTestBase {
         } else if (op == 5) {
             PoolKey memory key = r & 1 == 0 ? keyA : keyB;
             Currency out = r & 2 == 0 ? c0 : c1;
-            uint256 cap = vault.admissibleCapacity(out);
+            uint256 cap = ref.oldAdmissibleCapacity(out);
             if (cap < 2) return false;
             ISharedCommitmentVault.AllocationRequest memory req = _request(key, out, uint128(bound(r >> 2, 1, cap)));
             vm.prank(curator);
@@ -139,7 +150,7 @@ contract VaultLensParityTest is VaultTestBase {
         } else if (op == 6) {
             uint256 id = _lastLiveAllocation();
             if (id == 0) return false;
-            ISharedCommitmentVault.Allocation memory a = vault.getAllocation(id);
+            ISharedCommitmentVault.Allocation memory a = ref.oldGetAllocation(id);
             PoolKey memory key = a.consumer == address(hookA) ? keyA : keyB;
             // Selling currencyOut means the trader pays the other asset: zeroForOne when the vault sells asset1.
             return _trySwap(key, a.currencyOut == c1, bound(r, 1e15, 2000 ether), id);
@@ -185,13 +196,13 @@ contract VaultLensParityTest is VaultTestBase {
     }
 
     function _lastAllocation() internal view returns (uint256) {
-        return vault.nextAllocationId() - 1;
+        return ref.oldNextAllocationId() - 1;
     }
 
     /// @dev Newest allocation that is neither closed nor expired; 0 if there is none.
     function _lastLiveAllocation() internal view returns (uint256 id) {
         for (id = _lastAllocation(); id != 0; --id) {
-            ISharedCommitmentVault.Allocation memory a = vault.getAllocation(id);
+            ISharedCommitmentVault.Allocation memory a = ref.oldGetAllocation(id);
             if (!a.released && block.timestamp < a.expiry && a.consumed < a.maxOut) return id;
         }
     }
@@ -225,55 +236,55 @@ contract VaultLensParityTest is VaultTestBase {
         Currency[3] memory cs = [c0, c1, Currency.wrap(address(0xDEAD))];
         address[6] memory accounts = [curator, address(hookA), address(hookB), lp0, lp1, address(0)];
 
-        assertEq(lens.totalShares(vault), vault.totalShares(), "totalShares");
-        assertEq(lens.nextAllocationId(vault), vault.nextAllocationId(), "nextAllocationId");
-        assertEq(lens.nextRequestId(vault), vault.nextRequestId(), "nextRequestId");
-        assertEq(lens.queueHead(vault), vault.queueHead(), "queueHead");
-        assertEq(address(lens.riskAdapter(vault)), address(vault.riskAdapter()), "riskAdapter");
-        assertEq(lens.riskEdgePips(vault), vault.riskEdgePips(), "riskEdgePips");
-        assertEq(lens.maxUncertaintyPips(vault), vault.maxUncertaintyPips(), "maxUncertaintyPips");
+        assertEq(lens.totalShares(vault), ref.oldTotalShares(), "totalShares");
+        assertEq(lens.nextAllocationId(vault), ref.oldNextAllocationId(), "nextAllocationId");
+        assertEq(lens.nextRequestId(vault), ref.oldNextRequestId(), "nextRequestId");
+        assertEq(lens.queueHead(vault), ref.oldQueueHead(), "queueHead");
+        assertEq(address(lens.riskAdapter(vault)), address(ref.oldRiskAdapter()), "riskAdapter");
+        assertEq(lens.riskEdgePips(vault), ref.oldRiskEdgePips(), "riskEdgePips");
+        assertEq(lens.maxUncertaintyPips(vault), ref.oldMaxUncertaintyPips(), "maxUncertaintyPips");
         for (uint256 i; i < 2; ++i) {
-            assertEq(lens.inventoryTargetPerShare(vault, i), vault.inventoryTargetPerShare(i), "target");
-            assertEq(lens.inventoryTolerancePips(vault, i), vault.inventoryTolerancePips(i), "tolerance");
+            assertEq(lens.inventoryTargetPerShare(vault, i), ref.oldInventoryTargetPerShare(i), "target");
+            assertEq(lens.inventoryTolerancePips(vault, i), ref.oldInventoryTolerancePips(i), "tolerance");
         }
 
         for (uint256 i; i < 3; ++i) {
             Currency c = cs[i];
-            assertEq(lens.backing(vault, c), vault.backing(c), "backing");
-            assertEq(lens.reserved(vault, c), vault.reserved(c), "reserved");
-            assertEq(lens.bufferFloor(vault, c), vault.bufferFloor(c), "bufferFloor");
-            assertEq(lens.claimableAssets(vault, c), vault.claimableAssets(c), "claimableAssets");
-            assertEq(lens.admissibleCapacity(vault, c), vault.admissibleCapacity(c), "admissibleCapacity");
+            assertEq(lens.backing(vault, c), ref.oldBacking(c), "backing");
+            assertEq(lens.reserved(vault, c), ref.oldReserved(c), "reserved");
+            assertEq(lens.bufferFloor(vault, c), ref.oldBufferFloor(c), "bufferFloor");
+            assertEq(lens.claimableAssets(vault, c), ref.oldClaimableAssets(c), "claimableAssets");
+            assertEq(lens.admissibleCapacity(vault, c), ref.oldAdmissibleCapacity(c), "admissibleCapacity");
             (uint160 f, bool h) = lens.sellPolicy(vault, c);
-            (uint160 oldF, bool oldH) = vault.sellPolicy(c);
+            (uint160 oldF, bool oldH) = ref.oldSellPolicy(c);
             assertEq(f, oldF, "sellPolicy.minInPerOutX96");
             assertEq(h, oldH, "sellPolicy.halted");
             for (uint256 j; j < 6; ++j) {
                 address a = accounts[j];
-                assertEq(lens.curatorCeiling(vault, a, c), vault.curatorCeiling(a, c), "curatorCeiling");
-                assertEq(lens.curatorReserved(vault, a, c), vault.curatorReserved(a, c), "curatorReserved");
-                assertEq(lens.hookReserved(vault, a, c), vault.hookReserved(a, c), "hookReserved");
+                assertEq(lens.curatorCeiling(vault, a, c), ref.oldCuratorCeiling(a, c), "curatorCeiling");
+                assertEq(lens.curatorReserved(vault, a, c), ref.oldCuratorReserved(a, c), "curatorReserved");
+                assertEq(lens.hookReserved(vault, a, c), ref.oldHookReserved(a, c), "hookReserved");
                 for (uint8 s; s < 3; ++s) {
                     ISharedCommitmentVault.RiskScope scope = ISharedCommitmentVault.RiskScope(s);
                     assertEq(
                         abi.encode(lens.getRiskLimit(vault, scope, a, c)),
-                        abi.encode(vault.getRiskLimit(scope, a, c)),
+                        abi.encode(ref.oldGetRiskLimit(scope, a, c)),
                         "riskLimit"
                     );
                 }
             }
         }
         for (uint256 j; j < 6; ++j) {
-            assertEq(lens.sharesOf(vault, accounts[j]), vault.sharesOf(accounts[j]), "sharesOf");
+            assertEq(lens.sharesOf(vault, accounts[j]), ref.oldSharesOf(accounts[j]), "sharesOf");
         }
 
-        uint256 n = vault.nextAllocationId();
+        uint256 n = ref.oldNextAllocationId();
         for (uint256 id; id <= n; ++id) {
-            assertEq(abi.encode(lens.getAllocation(vault, id)), abi.encode(vault.getAllocation(id)), "allocation");
+            assertEq(abi.encode(lens.getAllocation(vault, id)), abi.encode(ref.oldGetAllocation(id)), "allocation");
         }
-        n = vault.nextRequestId();
+        n = ref.oldNextRequestId();
         for (uint256 id; id <= n; ++id) {
-            assertEq(abi.encode(lens.getRequest(vault, id)), abi.encode(vault.getRequest(id)), "request");
+            assertEq(abi.encode(lens.getRequest(vault, id)), abi.encode(ref.oldGetRequest(id)), "request");
         }
     }
 
@@ -283,20 +294,20 @@ contract VaultLensParityTest is VaultTestBase {
     function test_admissibleCapacity_maxBufferAndQueue() public {
         _depositShares(lp1, 100_000 ether);
         // Reserve almost all of asset0, so the redemption queues on asset0 while asset1 keeps admissible room.
-        _allocate(keyB, c0, uint128(vault.admissibleCapacity(c0) - 10 ether));
+        _allocate(keyB, c0, uint128(ref.oldAdmissibleCapacity(c0) - 10 ether));
         vm.prank(lp1);
         vault.redeem(100_000 ether, 0, 0, lp1, true);
         assertGt(vault.pendingShares(), 0);
-        assertEq(lens.admissibleCapacity(vault, c0), vault.admissibleCapacity(c0));
-        assertEq(lens.admissibleCapacity(vault, c1), vault.admissibleCapacity(c1));
+        assertEq(lens.admissibleCapacity(vault, c0), ref.oldAdmissibleCapacity(c0));
+        assertEq(lens.admissibleCapacity(vault, c1), ref.oldAdmissibleCapacity(c1));
 
         vm.startPrank(owner);
         vault.setBufferFloor(c0, type(uint256).max);
         vault.setBufferFloor(c1, 5 ether);
         vm.stopPrank();
-        assertEq(vault.admissibleCapacity(c0), 0);
+        assertEq(ref.oldAdmissibleCapacity(c0), 0);
         assertEq(lens.admissibleCapacity(vault, c0), 0);
-        assertEq(lens.admissibleCapacity(vault, c1), vault.admissibleCapacity(c1));
+        assertEq(lens.admissibleCapacity(vault, c1), ref.oldAdmissibleCapacity(c1));
         assertGt(lens.admissibleCapacity(vault, c1), 0);
     }
 }

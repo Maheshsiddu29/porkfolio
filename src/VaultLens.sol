@@ -237,7 +237,7 @@ contract VaultLens {
     /// @param currency asset0 or asset1. Any other currency returns 0.
     /// @return Raw units of `currency`.
     function netAssets(IVaultState vault, Currency currency) public view returns (uint256) {
-        return backing(vault, currency) - claimableAssets(vault, currency);
+        return VaultStateReader.netAssets(vault, currency);
     }
 
     /// @notice F_a = B_a - W_a - Q_a: inventory that can be paid out now without breaking a live commitment or
@@ -258,9 +258,7 @@ contract VaultLens {
     /// @param currency Asset to evaluate.
     /// @return Raw units of `currency`, or 0 when nothing is pending.
     function pendingDemand(IVaultState vault, Currency currency) public view returns (uint256) {
-        uint256 p = vault.pendingShares();
-        if (p == 0) return 0;
-        return FullMath.mulDivRoundingUp(p, netAssets(vault, currency), totalShares(vault));
+        return VaultStateReader.pendingDemand(vault, currency);
     }
 
     /// @notice Largest new allocation of `currency` the admission rule accepts right now: N_a - Q_a - R_a - D_a,
@@ -279,7 +277,7 @@ contract VaultLens {
     /// @param currency Asset the allocation would sell.
     /// @return Raw units of `currency`.
     function admissibleCapacity(IVaultState vault, Currency currency) external view returns (uint256) {
-        return _sub0(_sub0(eligibleBacking(vault, currency), reserved(vault, currency)), bufferFloor(vault, currency));
+        return VaultStateReader.admissibleCapacity(vault, currency);
     }
 
     /// @notice Largest number of shares whose in-kind basket free inventory could pay right now.
@@ -417,7 +415,7 @@ contract VaultLens {
     /// @param currency Asset to evaluate.
     /// @return Raw units of `currency`.
     function eligibleBacking(IVaultState vault, Currency currency) public view returns (uint256) {
-        return netAssets(vault, currency) - pendingDemand(vault, currency);
+        return VaultStateReader.eligibleBacking(vault, currency);
     }
 
     /// @notice Gross output already paid under one scope in the current flow window.
@@ -481,14 +479,5 @@ contract VaultLens {
                 : reserved(vault, currency);
         uint256 limit = uint256(l.maxReservedBps) * eligibleBacking(vault, currency) / 10_000;
         return limit > held ? limit - held : 0;
-    }
-
-    // ==================================================================
-    // Internal
-    // ==================================================================
-
-    /// @dev a - b, or 0 if b > a; the vault's `_sub0`.
-    function _sub0(uint256 a, uint256 b) internal pure returns (uint256) {
-        return a > b ? a - b : 0;
     }
 }

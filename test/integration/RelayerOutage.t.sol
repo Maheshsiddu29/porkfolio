@@ -12,6 +12,10 @@ import {PriceRiskAdapter} from "../../src/oracle/PriceRiskAdapter.sol";
 import {BaseCompatibleHook} from "../../src/hooks/BaseCompatibleHook.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {MockAggregator} from "../utils/MockAggregator.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice An optional third-party relayer for the second provider, end to end: the real vault, both production hooks
 ///         and the PoolManager priced by `PriceRiskAdapter` with a fresh tier on the relayed source. The relayer is

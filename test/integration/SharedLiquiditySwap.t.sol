@@ -15,6 +15,10 @@ import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVaul
 import {BaseCompatibleHook} from "../../src/hooks/BaseCompatibleHook.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {BatchSwapRouter} from "../utils/BatchSwapRouter.sol";
+import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+
+using VaultStateReader for SharedCommitmentVault;
 
 /// @notice End-to-end swaps through the real Uniswap v4 PoolManager, consuming shared vault liquidity.
 contract SharedLiquiditySwapTest is VaultTestBase {
