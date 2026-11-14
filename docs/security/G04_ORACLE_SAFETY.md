@@ -1,22 +1,32 @@
 # Porkfolio — G04: Oracle Safety and Fallback
 
-**Status: PASS (local), with one defect open for an owner decision (F-1, §5).** I reconstructed the oracle trust
-boundary from the source. Ten failure scenarios now have deterministic tests through the real adapter, vault and
-PoolManager.
+**Status: PASS (local), awaiting owner review.** This report covers the G04 review and its closeout.
 
-**F-1, the defect.** The vault's asset1 directional floor, and the hooks' asset1 quote at the inventory cap, can sit
-inside the reference band. The amount is the second-order term `u² / (1 − u)` less the edge.
-- **Not exposed in the rehearsal configuration.** With two sources required, `u` stays near 8,200 pips. At the
-  configured 1 bp edge, `u` must exceed 9,950 pips before the gap appears.
-- **Exposed whenever a reading's `u` exceeds 9,950 pips.** The vault itself accepts readings up to 20,000 pips.
-- **Why it is not fixed here.** The fix changes what the reference uncertainty means for both hooks and for the pricing
-  model, so I stopped for review as the brief requires.
-- **Mitigation available now.** The guardian can lower `maxUncertaintyPips` to 9,950, a tightening-only call.
+**The review.**
+- It reconstructed the oracle trust boundary from the source.
+- It reproduced ten failure scenarios with deterministic tests through the real adapter, vault and PoolManager.
+- It found one defect, F-1: the asset1 price floor, and the hooks' asset1 quote at the inventory cap, could sit inside
+  the reference band.
 
-No production contract was changed. `git diff 4dbe6b9 -- src script` is empty.
+**The closeout** made four changes:
+- **F-1 corrected at its source.** The shared reference uncertainty is now multiplicative; §5 has the proof.
+  - The fix is in the adapter, so both hooks and the vault inherit it.
+  - Vault and hook bytecode are unchanged.
+- **Sequencer initialization.** The adapter now refuses an uninitialized or future-dated sequencer status round.
+- **Deployment gates.** They now check feed identity, an independent price, and the fixed-floor fall-back
+  requirements.
+- **Models and specifications.** The Python model, conformance vectors and specifications are updated.
+
+Decisions R-19 … R-23 remain with the owner (§11).
+
+Production contracts changed: `src/oracle/ReferenceBracket.sol` and `src/oracle/PriceRiskAdapter.sol`.
+- Comment-only edits in `IMarketRiskAdapter`, `VaultRiskBoundary` and `InventoryPricing` leave every runtime and init
+  bytecode unchanged (§10.3).
+- Vault EIP-170 headroom is unchanged at 2,136 bytes.
 
 Labels used below:
 - **ENFORCED**: a check in this repository's code.
+- **PROVEN**: holds for every input in the stated domain, with the argument given here.
 - **TESTED**: a deterministic or fuzz test in this repository.
 - **ARGUED**: reasoning from the code, with no dedicated test.
 - **ASSUMED**: a property of an external provider, relayer or operator that no code here checks.
@@ -28,8 +38,7 @@ Labels used below:
 - G03 changed no production code (`git diff f557664 4dbe6b9 -- src` is empty), and G04 relies on G03's admission-floor
   counterexamples (`test/security/ReservationDeliverability.t.sol`). I therefore branched
   `phase-2-g04-oracle-safety` from the G03 tip instead of from `main`.
-- **Effect on review.** The production code reviewed here is byte-identical to `main`. Integrating G04 brings G03's
-  commits with it unless G03 is integrated first.
+- **Effect on review.** Integrating G04 brings G03's commits with it unless G03 is integrated first.
 
 ## 2. Oracle trust boundary
 
@@ -38,10 +47,10 @@ Labels used below:
 | Component | Role | Who can change it | How |
 |---|---|---|---|
 | Push feeds (Chainlink, RedStone; `IAggregatorV3`) | `latestRoundData` answers, one per USD leg | provider (and, for RedStone, anyone submitting signed packages) | external; nothing here can write to a feed |
-| L2 sequencer uptime feed | up/down status and restart time | Chainlink | external |
+| L2 sequencer uptime feed | up/down status and restart time | Chainlink | external; on Unichain not provider-supported (§2.4) |
 | `PriceRiskAdapter` | turns 2 sources × 2 legs into `(priceX96, uncertaintyPips, validUntil, liveSources)` or reverts | nobody: no owner, no setter; every parameter immutable, hashed into `configVersion` | redeploy |
 | `ReferenceBracket` (library inside the adapter) | per-source bracket, intersection, mid and uncertainty | — | redeploy the adapter |
-| `SharedCommitmentVault.riskAdapter` | the one adapter every fill and every core-mode hook reads | owner only (`setRiskAdapter`); the guardian cannot | `VaultGovernor` DELAY (3 d proposed); the vault checks `pair()`, token decimals and one valid reading at installation |
+| `SharedCommitmentVault.riskAdapter` | the one adapter every fill and every core-mode hook reads | owner only (`setRiskAdapter`); the guardian cannot | `VaultGovernor` DELAY (3 d proposed); the vault checks `pair()`, token decimals and one valid reading at installation; deployment gate 7 checks the feeds and an independent price (§6) |
 | `riskEdgePips`, `maxUncertaintyPips` | vault edge `e` and uncertainty bound | owner any way; guardian only raises `e` / lowers the bound | DELAY / immediate for the guardian |
 | `tau_a`, `kappa_a` | inventory floor | owner any way; guardian only tightens | LONG_DELAY (32 d proposed) with the queue check / immediate for the guardian |
 | stored sell floors | static floors, and extra lower bounds in adapter mode | owner opens or lowers; guardian only raises a floor that is **already set** | DELAY / immediate |
@@ -83,7 +92,7 @@ Consequences, TESTED in `test_freshnessIsTheFeedsClaim_replayAndRollback`:
   maximum delay before submission looks age 0, and the fresh tier's `freshMaxAge` understates how old the price
   really is. This must be measured before the fresh tier is enabled (decision R-5, §9).
 
-### 2.4 Freshness rules (ENFORCED, TESTED)
+### 2.4 Freshness and sequencer rules (ENFORCED, TESTED)
 
 | Rule | Code | Boundary |
 |---|---|---|
@@ -93,9 +102,43 @@ Consequences, TESTED in `test_freshnessIsTheFeedsClaim_replayAndRollback`:
 | source live only if both legs are within a tier | `_source` | |
 | `liveSources ≥ minSources` | `currentReference` | else `InsufficientSources` |
 | `validUntil` = earliest time any used leg leaves the tier it was read in | `_source`, `currentReference` | vault refuses `validUntil < now` (inclusive at equality, matching the adapter) |
-| sequencer: answer 0 or 1; down → refuse; up but `now < startedAt + grace` → refuse | `currentReference`, `_read` | `startedAt` in the future also refuses; **`startedAt == 0` is accepted as up** (§5, CE-O6) |
+| sequencer status must be 0 or 1, with `0 < startedAt ≤ now` | `_read` (status branch) | otherwise `FeedUnusable(sequencerFeed)` (**closeout**: `startedAt` 0 or in the future used to read as up) |
+| sequencer down → refuse; up → refuse while `now − startedAt ≤ sequencerGrace` | `currentReference` | **closeout**: refused at exactly the grace, as Chainlink's reference consumer does (`timeSinceUp <= GRACE_PERIOD_TIME`); it was accepted at equality before |
 
-The configured tolerances from `script/DeploySystem.s.sol` (rehearsal) and the Unichain records:
+**Sequencer feed findings.** Chainlink's L2 Sequencer Uptime Feeds page (`docs.chain.link/data-feeds/l2-sequencer-feeds`,
+read 2026-11-13) says three things:
+- **When `startedAt` is 0.** It "returns `0` only on Arbitrum when the Sequencer Uptime contract is not yet initialized";
+  on other L2 chains it "is set to `block.timestamp` on construction and … is never `0`".
+- **Supported networks.** It lists uptime feeds for Arbitrum, Base, Celo, Mantle, MegaETH, Metis, OP, Scroll, Soneium,
+  X Layer and zkSync. **Unichain is not listed, mainnet or Sepolia.**
+- **No new networks.** It says Chainlink "is no longer expanding L2 Sequencer Uptime Feeds to additional networks".
+
+On Unichain mainnet, `0x495639D9914e7D270c5dCC641BfB1d807423F813` exists on-chain. It came from Chainlink's general
+feed directory in Phase 1B-4.1. Read-only at block 63,868,968 (2026-11-13), it answers status 0, `startedAt`
+1,793,291,075, `description()` "L2 Sequencer Uptime Status Feed". I did not invent or assume an address. That contract
+is present and initialized, but it is **not a provider-supported feed**: its maintenance, alerting and status updates
+are not documented commitments. The Sepolia rehearsal configures no sequencer feed.
+
+**Residual risk without a reliable uptime feed:**
+- **What goes undetected.** A sequencer outage and restart are not detected on-chain.
+- **What protects LPs instead.** After a restart, push answers that are still within their staleness limits may lag the
+  market by more than their thresholds until providers push again. Fills in that window are priced from those answers,
+  bounded only by:
+  - the dynamic floor around them;
+  - the staleness limits;
+  - the flow caps;
+  - the inventory floor (O-9).
+  In the bad case the vault sells the inventory room at the stale band, as in scenario 8.
+- **Mitigations:**
+  - the guardian pauses or halts on an announced outage;
+  - operator monitoring of the sequencer;
+  - shorter staleness limits;
+  - a provider-supported uptime source if one becomes available.
+
+Deployment gate 7 requires the reviewed sequencer address, and under mainnet delays an explicit
+`ACCEPT_NO_SEQUENCER_FEED=true` when none is configured (§6).
+
+**Configured tolerances** (`script/DeploySystem.s.sol` rehearsal; Unichain records):
 
 | Parameter | Value |
 |---|---|
@@ -103,37 +146,65 @@ The configured tolerances from `script/DeploySystem.s.sol` (rehearsal) and the U
 | RedStone-like legs | ±5,100 / ±5,100 pips, `maxAge` 12,600 / 23,400 s |
 | RedStone fresh tier | `freshMaxAge` 120 s, ±1,500 pips |
 | Sources required | `minSources` = 2 |
-| Sequencer | grace 3,600 s on Unichain mainnet; the Sepolia rehearsal has no sequencer feed |
+| Sequencer | none on Sepolia; mainnet feed not provider-supported (above) |
 | Vault | `e` = 100 pips, `maxUncertaintyPips` = 20,000, `kappa` = 10,000 pips (1%) |
+| Hooks | base spread 3,000 pips, `minEdge` 200, `maxSpread` 40,000; Hook B markup 1,000 and per-trade bound 20,000 |
 
-### 2.5 Uncertainty
+### 2.5 Uncertainty (definition corrected in the closeout)
 
-`u = max(⌈(high − mid)·1e6 / mid⌉, ⌈(mid − low)·1e6 / mid⌉)`, a half-width measured relative to the mid
-(`ReferenceBracket.midAndUncertainty`).
-- **Two sources required.** The intersection lies inside the narrower bracket, so `u ≤` about 8,250 pips with the
-  configured thresholds. The vault's 20,000 bound **never binds** in the rehearsal configuration; it is a guardian
-  lever.
-- **Guardian use of the bound.** Lowering it to 5,000 refuses push-only readings (about 8,200 pips) and keeps
-  fresh-tier readings (about 3,000 pips).
+For the intersection `[L, H]` of the live sources' brackets (Q64.96, raw currency1 per raw currency0),
+`ReferenceBracket.midAndUncertainty` returns
+
+```
+M = L + floor((H − L) / 2)
+u = max( ceil((H − M) · 1e6 / M),  ceil((M − L) · 1e6 / L) )       pips
+```
+
+**What `u` means.** `u` is the smallest multiplicative half-width with `M / (1 + u) ≤ L` and `M (1 + u) ≥ H`: the range
+`[M / (1 + u), M (1 + u)]` covers the band read as currency1 per currency0 **and** as currency0 per currency1.
+- **What changed.** Before the closeout the second term divided by `M`. That made `u` the half-width relative to the
+  mid, which covers the band in the first reading only (F-1).
+- **Interface.** `IMarketRiskAdapter.Reading.uncertaintyPips` keeps its type and name; only its documented meaning
+  changed. No interface change was needed.
+
+**Effect on readings.** `u` grows by about `u²`:
+
+| Reading | Before | After |
+|---|---|---|
+| Unichain Chainlink + RedStone, push tier (fork, 2026-11-13) | 8,200 | **8,268** |
+| fresh tier (RedStone 15 bps per leg) | 3,000 | 3,010 |
+| one source, RedStone alone, push tier | 10,200 | 10,305 |
+| one source, 96.5 bps per leg (near the vault bound) | 19,298 | 19,678 |
+| Python example, Chainlink 2,048.39 / RedStone 2,050.31, 50 bps | 4,532 | 4,553 |
+
+**Thresholds in deployed configurations.**
+- **No threshold value changed.** The vault's `maxUncertaintyPips` (20,000) and the hooks' `maxSpread` (40,000) are
+  untouched.
+- **Rehearsal configuration.** With two sources required, `u ≤` about 8,270 pips, so the vault bound never binds and
+  normal trading is unaffected.
+- **Near the vault bound.** A configuration whose readings sat close to 20,000 pips can now cross it, because the
+  increase there is about 400 pips.
+- **Hook B's 2% per-trade bound.** It admits `3,000 + u + 1,000 < 20,000`, i.e. `u` below about 16,000. This was true
+  before (19,298 was refused too) and is shown in the matrix (§4).
 
 ### 2.6 Normalization across decimals (ENFORCED, TESTED)
 
 - **The shift.** `e = (feed decimals 1 + token decimals 1) − (feed decimals 0 + token decimals 0)`.
   - Feed decimals are read once at construction.
-  - Token decimals are constructor arguments, checked against `ERC20.decimals()` by `setRiskAdapter`.
+  - Token decimals are constructor arguments, checked against `ERC20.decimals()` by `setRiskAdapter` and by gate 7.
   - `|e| ≤ 30`, else `InvalidConfig`.
 - **Rounding.** Brackets round outward, the mid rounds down, `u` rounds up, the floors round up, and the fill's
   required input rounds up.
-- **Fuzz result.** `testFuzz_normalizedFloorNeverInsideTheBand` checks exactly, with 512-bit cross-multiplication
-  against each source's rational bracket, over random answers, thresholds (≤ 5%), feed and token decimals (0–24),
-  edges (≤ 1%) and one or two sources. Its non-vacuity companion counts 289 of 300 derived cases checked, 11 refused.
-  - **Selling asset0:** always at or above the band's top.
-  - **Selling asset1:** at or above the reciprocal of the band's bottom **whenever `e·(1e6 − u) ≥ u²`**. Outside that
-    condition this is F-1.
+- **Fuzz result.** `testFuzz_normalizedFloorNeverInsideTheBand` checks every fill against each live source's exact
+  rational bracket (512-bit cross-multiplication), over random answers, thresholds (≤ 5%), feed and token decimals
+  (0–24), edges (0–1%) and one or two sources.
+  - Since the closeout it asserts **both directions for every edge, including 0**.
+  - Its non-vacuity companion checks 300 derived cases: 11 refused, asset0 checked 148 times (one source) and 141 times
+    (two), asset1 checked 289 times.
+  - 80 of those asset1 cases lie in the region where the old definition failed (`e·(1e6 − u) < u²`).
 
 What is not checked on-chain:
-- **Leg order.** Which leg is currency0 and which is currency1 (CE-O2).
-- **Asset identity.** That a feed prices the asset its slot claims.
+- **Leg order and feed identity.** Covered by deployment gate 7 (CE-O2).
 - **Feed decimals changing after construction.**
 
 ### 2.7 What each kind of bad data does
@@ -146,9 +217,10 @@ What is not checked on-chain:
 | a **broken** second source when one would suffice (`minSources` = 1) | whole read refused, not dropped | fill refused | `test_unavailableFallback_haltsEvenWhenOneSourceSuffices` |
 | brackets do not intersect | `ReferenceDivergence` | fill refused | `test_divergenceReverts` |
 | intersection low end 0 | `DegenerateBracket` | fill refused | ARGUED (`midAndUncertainty`); skipped cases of the fuzz test |
-| sequencer status not 0/1 | `FeedUnusable` | fill refused | `test_sequencerMalformedAnswers` |
-| sequencer down, or within grace | `SequencerUnavailable` | fill refused | `test_sequencerDownOrInGrace` |
-| reading with `priceX96 = 0`, past `validUntil`, or `u` above the bound (any adapter) | — | `InvalidReference` / `UncertaintyTooHigh` | `test_invalidReadings_refused` |
+| `u` too large for 256 bits (a low end near 0) | FullMath reverts | fill refused | ARGUED (`midAndUncertainty` overflow note) |
+| sequencer status not 0/1; `startedAt` 0 or in the future | `FeedUnusable` | fill refused | `test_sequencer_initializationAndGrace` |
+| sequencer down, or up for no more than the grace | `SequencerUnavailable` | fill refused | `test_sequencer_initializationAndGrace`, `test_sequencerDownOrInGrace` |
+| reading with `priceX96 = 0`, past `validUntil`, or `u` above the bound (any adapter) | — | `InvalidReference` / `UncertaintyTooHigh` | `test_invalidReadings_refused`, `test_atVaultBound_acceptsThenRefusesOnePipLower` |
 | arbitrary price from a malicious or wrong adapter | — | priced at that reference; stops at the inventory floor | `test_maliciousAdapter_stopsAtInventoryFloor`, `test_swappedLegs_passInstallation_boundedByInventoryFloor` |
 
 The vault does not read `liveSources`. Requiring two sources is the adapter's job.
@@ -161,6 +233,7 @@ There is **no fallback price** anywhere: no stored last-good price and no defaul
 2. **Static mode.** The owner removes the adapter (DELAY).
    - Fills then use stored floors only; a direction without a stored floor closes.
    - Inventory floors with a target keep applying. An asset without a target loses all inventory protection (CE-O4).
+   - Deployment gate 13 must pass before this fall-back is queued and again before it is executed (§6).
 3. **No fallback at all.** With `minSources = 2` (configured), trading stops until both sources are live. Recovery
    needs no governance action (`test_relayerOutage_widensThenHaltsOnlyWithTheProvider_recoversByItself`).
 
@@ -176,9 +249,10 @@ There is **no fallback price** anywhere: no stored last-good price and no defaul
 ### 2.10 Enforced guarantees versus assumptions
 
 - **ENFORCED.**
-  - Every adapter-mode fill re-reads the adapter in the same transaction and fails closed on any revert, zero
-    price, expired reading or excessive `u`.
-  - The fill price is at least the maximum of the stored, curator and dynamic floors.
+  - Every adapter-mode fill re-reads the adapter in the same transaction and fails closed on any revert, zero price,
+    expired reading or excessive `u`.
+  - The fill price is at least the maximum of the stored, curator and dynamic floors, and the dynamic floor lies
+    outside every live source's bracket in both directions (§5).
   - The inventory floor is applied in every mode once a target is set.
   - No LP path reads the adapter.
   - The adapter is immutable and its installation is owner-only and timelocked.
@@ -189,9 +263,9 @@ There is **no fallback price** anywhere: no stored last-good price and no defaul
   - `updatedAt` is honest.
   - The two sources fail independently (they do not: both use centralised-exchange data, `CORRELATED_ORACLE_FAILURES.md`
     §1).
-  - The sequencer feed is initialized.
+  - A configured sequencer feed reports outages.
 - **ASSUMED (operators).**
-  - The adapter is built with the right feed in each slot.
+  - The reviewed feed in each slot (now checked by gate 7).
   - The relayer, if any, only adds availability; it cannot set a price.
   - The guardian reacts within the flow-cap window.
 
@@ -204,93 +278,179 @@ All with the production `PriceRiskAdapter` over mock feeds, unless noted.
 | 1 | stale primary | stale source dropped; two required → every fill refused. At the fresh-tier boundary + 1 s the narrow-band fill is refused (`PriceBelowFloor` against the wider push band) | `test_staleSource`; `test_freshTierBoundary_staleNarrowBandCannotAuthorize`; `test_relayerOutage_…` |
 | 2 | unavailable fallback | `minSources` = 1: a stale fallback is dropped; a reverting or zero-answering fallback halts every read (CE-O1) | `test_unavailableFallback_haltsEvenWhenOneSourceSuffices` |
 | 3 | conflicting sources | empty intersection → `ReferenceDivergence`. Within both error bounds (≤ about 1.84%) a disagreement only shifts the mid (CORRELATED_ORACLE_FAILURES.md, scenario 1) | `test_divergenceReverts` |
-| 4 | valid but very uncertain | refused above `maxUncertaintyPips`; below it, quotes widen with `u`. **F-1: above 9,950 pips the asset1 floor is inside the band** | `test_F1_asset1FloorInsideBand_whenUncertaintyExceedsEdgeBound`, `test_invalidReadings_refused` |
-| 5 | wrong direction or decimals | wrong token decimals or a swapped pair: refused at installation. **Swapped legs pass installation** and invert the price; the loss stops at the inventory floor (CE-O2) | `test_setRiskAdapter_validation`, `test_swappedLegs_passInstallation_boundedByInventoryFloor` |
-| 6 | zero, negative, malformed | `FeedUnusable`; sequencer status ∉ {0, 1} likewise; sequencer `startedAt = 0` accepted (CE-O6) | `test_unusableLegReverts`, `test_sequencerMalformedAnswers` |
+| 4 | valid but very uncertain | refused above `maxUncertaintyPips`; below it, quotes widen with `u` and every fill stays outside the band in both directions (F-1 corrected) | `test_F1_asset1FloorCoversBandBottom_aboveOldFailureThreshold`, `test_atVaultBound_…`, the hook matrix |
+| 5 | wrong direction or decimals | wrong token decimals or a swapped pair: refused at installation. **Swapped legs pass installation** and invert the price; the loss stops at the inventory floor; deployment gate 7 refuses them (CE-O2) | `test_setRiskAdapter_validation`, `test_swappedLegs_…`, `test_gates_oracleIdentityAndFixedFloorFallback` |
+| 6 | zero, negative, malformed | `FeedUnusable`, for price legs and for the sequencer feed (status ∉ {0, 1}, `startedAt` 0 or in the future) | `test_unusableLegReverts`, `test_sequencer_initializationAndGrace` |
 | 7 | replayed or expired signed updates | expired → dropped; future-dated → `FeedUnusable`; replay or rollback by the feed → accepted (provider assumption) | `test_freshnessIsTheFeedsClaim_replayAndRollback` |
-| 8 | large move or depeg | feeds 8% behind the market inside their staleness limits: buyers take the inventory room at the stale band's top (about 1.0085 for an asset worth 1.08), and one more raw unit is refused. Loss 716.6 per 10,000 room, below `(δ − band)·room` | `test_jumpTheFeedsMissed_lossStopsAtInventoryRoom`; depeg: `test_Q4_depeg_markToMarketBeyondKappa_whileQ1Q2Hold` |
+| 8 | large move or depeg | feeds 8% behind the market inside their staleness limits: buyers take the inventory room at the stale band's top (about 1.0085 for an asset worth 1.08), and one more raw unit is refused. Loss about 716 per 10,000 of room, below `(δ − band)·room` | `test_jumpTheFeedsMissed_lossStopsAtInventoryRoom`; depeg: `test_Q4_depeg_markToMarketBeyondKappa_whileQ1Q2Hold` |
 | 9 | price update between reservation and execution | the allocation fixes no price: after a move up the reservation-time price is refused; after a move down a lower price is accepted; only the curator floor is fixed | `test_priceMoveBetweenReservationAndExecution`, `test_replaceAdapter_duringActiveAllocation` |
 | 10 | oracle failure during queued withdrawals | fills stop; `Q` stays reserved, so the LP's instant part is limited to `F` and the rest queues; queue, claims, deposits, cancellation and guardian tools work; a guardian release finalizes the queue; trading resumes when a source pushes | `test_outageWithReservation_exitsQueueBehindItUntilReleased`, `test_lpPaths_independentOfAdapter` |
 
-## 4. Execution guarantees (Task 3)
+## 4. Execution guarantees (Task 3) and hook regression
 
 | Property | Status | Evidence |
 |---|---|---|
 | **O-1** Unsafe swaps fail closed: any adapter revert, zero price, expired reading or `u` above the bound refuses the fill and changes nothing | ENFORCED, TESTED | §2.7 |
 | **O-2** Stale data cannot authorize a fill the fresh data would refuse: the tier and `validUntil` are inclusive in both contracts; one second later the wider band applies | ENFORCED, TESTED | `test_freshTierBoundary_…`, `test_freshTier_boundaryIsInclusive` |
-| **O-3** A fallback cannot loosen inventory protection: the inventory floor contains no price and applies in every mode once a target exists; adapter mode refuses an asset without a target | ENFORCED, TESTED, **except CE-O4** (static fall-back with an asset without a target) | `test_inventoryFloor_appliesInStaticMode`, `test_adapterRemoval_assetWithoutTarget_losesInventoryFloor` |
-| **O-4** A fallback to fewer sources keeps each floor beyond the **remaining** sources' band. It can lower the asset0 floor relative to the two-source floor by `e·(mid₂ − mid₁)` plus rounding: 0.28 pip at `e` = 1 bp in the test | TESTED | `test_fallbackToOneSource_staysOutsideRemainingBand` |
-| **O-5** Hook A and Hook B are held to identical vault rules: both call the same `exchange` → `_floorForFill` with the same adapter, edge and inventory floor; each hook's `minEdge ≥ e + 1` | ENFORCED, TESTED | `test_bothHooks_fillOutsideBand`, `test_adapterFailure_stopsBothHooks`, `test_inventoryCap_sharedAcrossHooks`, `test_hookEdge_isVaultEdgePlusOne`, `test_relayerOutage_…` |
+| **O-3** A fallback cannot loosen inventory protection: the inventory floor contains no price and applies in every mode once a target exists; adapter mode refuses an asset without a target. The static fall-back with an asset without a target (CE-O4) is closed by gate 13 at deployment, not by the vault | ENFORCED, TESTED | `test_inventoryFloor_appliesInStaticMode`, `test_adapterRemoval_assetWithoutTarget_losesInventoryFloor`, `test_gates_oracleIdentityAndFixedFloorFallback` |
+| **O-4** A fallback to fewer sources keeps each floor beyond the **remaining** sources' band. Relative to the two-source floor, the asset0 floor loses `e·(mid₂ − mid₁)` and gains from the wider `u`. At the configured 1 bp edge it now rises (about 49 pips in the test); with a 5% edge it falls. The asset1 floor rises | PROVEN (§5), TESTED | `test_fallbackToOneSource_staysOutsideRemainingBand` |
+| **O-5** Hook A and Hook B are held to identical vault rules, and neither quotes inside the vault's floor | ENFORCED, TESTED | hook matrix below; `test_hookEdge_isVaultEdgePlusOne`, `test_inventoryCap_sharedAcrossHooks` |
 | **O-6** Oracle failure never blocks claims or LP withdrawals that free inventory can pay | ENFORCED (no LP path reads the adapter), TESTED | `test_lpPaths_independentOfAdapter`, `invariant_lpPathsIndependentOfAdapter`, `test_outageWithReservation_…` |
-| **O-7** Guardian restrictions survive oracle failure and adapter transitions: pause, halt, raising stored floors, raising `e`, lowering the bound, tightening inventory bounds and early release read no price | ENFORCED, TESTED | `test_haltAndPause_surviveTransitions`, `test_guardianRaisedFloor_survivesInstall`, `test_outageWithReservation_…` |
-| **O-8** Normalization and rounding never put a fill inside the band: asset0 always; **asset1 only when `e·(1e6 − u) ≥ u²`** | TESTED (fuzz, exact), **F-1** | `testFuzz_normalizedFloorNeverInsideTheBand`, `test_normalizedFloor_checksAreExercised` |
+| **O-7** Guardian restrictions survive oracle failure and adapter transitions: pause, halt, raising stored floors, raising `e`, lowering the bound, tightening inventory bounds and early release read no price | ENFORCED, TESTED | `test_haltAndPause_surviveTransitions`, `test_guardianRaisedFloor_survivesInstall`, `test_outageWithReservation_…`, `test_atVaultBound_…` |
+| **O-8** Normalization and rounding never put a fill inside the band, in either direction, for any edge ≥ 0 | PROVEN (§5), TESTED (exact fuzz) | `testFuzz_normalizedFloorNeverInsideTheBand`, `test_normalizedFloor_checksAreExercised` |
 | **O-9** Whatever any price input says, no fill takes `N_a` below `L_a` | ENFORCED, TESTED | `invariant_holdingsAtOrAboveInventoryFloor`, `test_maliciousAdapter_…`, `test_swappedLegs_…`, `test_jumpTheFeedsMissed_…` |
 
-## 5. Findings
+**Hook regression matrix** (`test/integration/OracleBandHooks.t.sol`). It runs the production Hook A and Hook B in
+shared-core mode with the production adapter, vault and PoolManager, in the rehearsal configuration.
 
-### F-1. The asset1 floor can sit inside the reference band (DEFECT, reproduced; fix not applied)
+**Setup:**
+- **Decimals:** two token-decimal pairs, 18/18 at 1:1 and 6/18 at 3,000 USD per 18-decimal token.
+- **Six reference states:**
+  - two sources, push tier: `u` = 8,268;
+  - two sources, fresh tier: 3,010;
+  - Chainlink alone: 8,268;
+  - one source near the old failure point: 10,040 (old definition 9,942);
+  - RedStone alone, above it: 10,305 (old 10,200);
+  - one source near the vault bound: 19,678.
+- **Cells:** both hooks × both directions.
 
-**What.**
-- `u` is the band's half-width relative to the mid, so the band's bottom can be as low as `P(1 − u)`.
-- Selling asset1, the vault must charge at least `1 / low` asset0 per asset1. That is at most
-  `(1/P)(1 + u + u² + …)`.
-- The floor is `F1 = (1/P)(1 + u + e)`.
-- So `F1 ≥ 1/low` is guaranteed only when `e·(1e6 − u) ≥ u²` (pips), i.e. `u ≤ 9,950` for `e` = 100.
-  `VaultRiskBoundary`'s claim "it never trades at a price any live source allows to be at or past the market, plus
-  `e`" holds for asset0 and is false for asset1 above that `u`.
-- The asset0 floor `P(1 + u + e) ≥ high + e·P` is exact.
+**Procedure.** Each cell trades in one direction, a dust-sized trade first and then 0.2% of the input holding at a
+time, until something refuses. For every attempt:
+- if the hook quotes, the vault's own effective floor accepts the quoted input;
+- every fill equals the quote and is outside every live source's exact bracket;
+- no refusal is `PriceBelowFloor`.
 
-**Reproduced.** `test_F1_asset1FloorInsideBand_whenUncertaintyExceedsEdgeBound`:
-- **Setup.** `minSources` = 1, Chainlink stale, RedStone alone in its push tier: `u` = 10,200, accepted under the
-  vault's 20,000 bound.
-- **Result.** The vault sells 1,000 asset1 for 0.0048 asset0 less than the least price RedStone allows (4.8 pips; the
-  formula gives 105 − 100 = 5).
-- **At the vault's own bound.** At `u` = 20,000 the gap is about 308 pips beyond the edge.
+**Results:**
 
-**Also in the hooks (ARGUED).** `InventoryPricing.straddleCap` keeps the ask at the cap edge at `(1/P)(1 + hMin)`
-with `hMin = minEdge + u`. That has the same second-order gap on the asset1-selling side.
-- Inside the cap, hooks charge `baseSpread + u`, which covers `u²` at the configured spreads.
-- Only quotes near the cap edge are affected.
-- The bid side, where the vault sells asset0, is conservative.
+| | 18/18 | 6/18 |
+|---|---|---|
+| fills checked | 121 | 121 |
+| cells ending at the hook's inventory cap (`InventoryLimit`, which binds at or before the vault's 1% floor) | 22 | 22 |
+| cells ending at Hook B's 2% per-trade bound (`TradeImpactExceeded`, only at `u` = 19,678, where Hook B quotes nothing) | 2 | 2 |
+| hook quotes the vault refused on price | 0 | 0 |
 
-**Not exposed in the rehearsal configuration.**
-- With two sources required, `u` stays below about 8,250 pips. This is ARGUED: the intersection lies inside the
-  Chainlink-like bracket, whose half-width at the configured thresholds is about 8,200 pips. Every two-source reading in
-  `OracleFailureExecution.t.sol` is in that range.
-- The inventory floor bounds the loss in every case (O-9).
+- **Every other state:** Hook A and Hook B fill in both directions (6 and 5 fills per direction).
+- **At the vault bound:** `test_atVaultBound_acceptsThenRefusesOnePipLower` shows that with `maxUncertaintyPips` equal
+  to the reading's `u` Hook A fills; one pip lower, the guardian's tightening refuses every swap on both hooks, and
+  nothing moves.
+- **The vault's own floor edge:** the edge of the vault's inventory floor itself is tested with exact amounts in
+  `OracleFailureExecution.t.sol` and `OracleRiskBoundary.t.sol`.
 
-**Options (owner decision R-18):**
+## 5. F-1 and its correction
 
-| Option | Change | Cost | Effect |
+### 5.1 The defect (reproduced first)
+
+**Before the closeout:**
+- `u = max(⌈(H − M)·1e6/M⌉, ⌈(M − L)·1e6/M⌉)`.
+- The vault's asset1 floor is `F1 = ⌈⌈2^192/M⌉·(1e6 + u + e)/1e6⌉`, and the band's top in that direction is `2^192/L`.
+- `(1/M)(1 + u) ≥ 1/L` needs `u ≥ (M − L)/L`, but `u` was only `≥ (M − L)/M`, short by
+  `(M − L)²/(L·M) ≈ u²/(1 − u)`.
+- So `F1` lay outside the band only when `e·(1e6 − u) ≥ u²`, i.e. `u ≤ 9,950` pips at `e` = 100.
+
+**Reproduction:**
+- The pre-closeout `test_F1_asset1FloorInsideBand_whenUncertaintyExceedsEdgeBound` sold 1,000 asset1 for 4.84·10^15 raw
+  asset0 below the least price RedStone allowed. That was RedStone alone, push tier, `u` = 10,200, accepted under the
+  20,000 bound.
+- The current test recomputes that reading from the same bracket and shows the old floor inside the band.
+- The hooks' asset1 ask at the cap edge, `(1/P)(1 + minEdge + u)`, had the same gap.
+
+### 5.2 The correction
+
+One line in `ReferenceBracket.midAndUncertainty`, in the adapter only. The lower term divides by `L` instead of `M`:
+
+```
+u = max( ceil((H − M) · 1e6 / M),  ceil((M − L) · 1e6 / L) )
+```
+
+The vault, the hooks, the lens and every API are unchanged. Both hooks and the vault read `u` from the adapter, so all
+three are corrected together.
+
+**Rejected alternatives:**
+- Widening the vault's asset1 floor alone would push it above the hooks' asset1 quotes at the cap edge, so the vault
+  would refuse them.
+- Raising the edge, or capping `maxUncertaintyPips` at 9,950, would only hide the gap for current fixtures.
+
+### 5.3 Proof that both directional floors lie outside the bracket (PROVEN)
+
+Domain:
+- `0 < L ≤ H`; otherwise `DegenerateBracket` or `ReferenceDivergence`.
+- `M = L + ⌊(H − L)/2⌋`, so `L ≤ M ≤ H`.
+- `e ≥ 0`.
+- All quantities are integers; `u` as above.
+
+**Step 1 (upper term).** `u ≥ ⌈(H − M)·1e6/M⌉ ≥ (H − M)·1e6/M`. Therefore
+
+```
+M·(1e6 + u) ≥ M·1e6 + (H − M)·1e6 = H·1e6                                          (1)
+```
+
+**Step 2 (inverse term).** `u ≥ ⌈(M − L)·1e6/L⌉ ≥ (M − L)·1e6/L`. Therefore
+
+```
+L·(1e6 + u) ≥ L·1e6 + (M − L)·1e6 = M·1e6                                          (2)
+```
+
+**Step 3 (selling asset0).** By (1):
+
+```
+F0 = ⌈M·(1e6 + u + e)/1e6⌉ ≥ M·(1e6 + u)/1e6 + M·e/1e6 ≥ H + M·e/1e6
+```
+
+**Step 4 (selling asset1).** `⌈2^192/M⌉ ≥ 2^192/M`, and by (2), `(1e6 + u)/(1e6·M) ≥ 1/L`. Therefore
+
+```
+F1 = ⌈⌈2^192/M⌉·(1e6 + u + e)/1e6⌉ ≥ 2^192·(1e6 + u)/(1e6·M) + 2^192·e/(1e6·M) ≥ 2^192/L + 2^192·e/(1e6·M)
+```
+
+**Step 5 (the fill).** The vault requires `in ≥ ⌈out·F/2^96⌉ ≥ out·F/2^96`.
+- Each live source `s` has an exact bracket `[l_s, h_s]`.
+- `pairBracket` rounds outward, so `L = max_s ⌊l_s·2^96⌋ ≤ l_{s*}·2^96` for the source `s*` that sets `L`, and
+  `H = min_s ⌈h_s·2^96⌉ ≥ h_{s'}·2^96` for the source `s'` that sets `H`.
+- **Selling asset0:** `in/out ≥ H/2^96 ≥ h_{s'}`, at or above the top of the band every live source allows.
+- **Selling asset1:** `in/out ≥ 2^96/L ≥ 1/l_{s*}`, at or above the reciprocal of the band's bottom.
+
+Both hold for **every** `e ≥ 0`, including 0. The edge then adds `M·e/1e6` (or `2^192·e/(1e6·M)`) beyond the band.
+
+**Step 6 (hooks).**
+- The hooks' band-edge cap keeps the ask at the cap edge at `(1/P)(1 + minEdge + u)` currency0 per currency1. By (2)
+  that is `≥ 1/L + minEdge/P`.
+- The bid at the cap edge is `(1/P)(1 − minEdge − u)` currency0 per currency1. The vault therefore sells asset0 at
+  `≥ P/(1 − u − minEdge) ≥ P(1 + u + minEdge) ≥ H + minEdge·P`, using (1).
+- Hook quotes inside the cap carry `baseSpread > minEdge` on top.
+- `minEdge ≥ e + 1` (`_coreState`), so each hook quote also clears the vault floor. That is ARGUED from the formulas and
+  TESTED by the matrix (§4) and `testFuzz_bandModePassesDynamicFloor`.
+
+**Checked by:**
+- `testFuzz_normalizedFloorNeverInsideTheBand` (exact, 1,000 runs default, 10,000 in CI, both directions, edge 0–1%);
+- `test_uncertainty_covers_bracket_both_directions` (Python, 5,000 random brackets). The old definition fails (2) in
+  more than 100 of them.
+
+## 6. Counterexamples, deployment gates and corrections
+
+| Id | Statement | Test | Status after the closeout |
 |---|---|---|---|
-| **A (recommended)** | Adapter only: measure the downside of `u` from the low end, `⌈(mid − low)·1e6 / low⌉`, so `[P/(1+u), P(1+u)]` covers the band | one line in `ReferenceBracket`; the `IMarketRiskAdapter.uncertaintyPips` definition; the Python model `mid_and_uncertainty` and `shared_core_brackets_v1` vectors; the measured 8,200 pips becomes about 8,268; a new adapter install (DELAY) | fixes the vault floor **and** the hooks; vault and hook bytecode unchanged; EIP-170 unaffected |
-| B | Vault: widen asset1's floor by `u/(1 − u)` | vault bytecode, `vault_risk_v1` vectors, lens | fixes the vault floor only. The hooks' asset1 quote at the cap edge would then fall **below** the vault floor and be refused, so the hooks would also need changing. Not recommended |
-| C | Configuration only: keep `e·(1e6 − u_max) ≥ u_max²`, i.e. `maxUncertaintyPips ≤ 9,950` at `e` = 100 | none in code; the guardian can apply it now (tightening only) | closes the gap for both vault and hooks while it holds; it is a constraint every future `e` / bound change must respect |
-
-C should be applied before any configuration in which `u` can exceed 9,950 pips: `minSources = 1`, wider thresholds,
-or another provider. A is the durable fix.
-
-### Counterexamples to stronger readings (not defects)
-
-| Id | Statement | Test | Assessment |
-|---|---|---|---|
-| CE-O1 | **A broken fallback halts.** With one source required, a reverting or zero-answering second source makes every read revert, although the first alone would suffice. Contradicts ORACLE_RISK_BOUNDARY_SPEC.md §5 ("a leg stale, missing or malformed → its source is dropped") | `test_unavailableFallback_…` | fail-closed, so safe; costs availability only with `minSources` = 1. The configured `minSources` = 2 halts anyway. R-21 |
-| CE-O2 | **Swapped legs pass installation.** An adapter built with leg0 and leg1 exchanged reports `1/P`; `setRiskAdapter` checks only the pair, token decimals and that a reading exists. At a true price of 2 the vault sold its whole asset0 room (10,000) for 5,041.7 asset1 | `test_swappedLegs_…` | bounded by the inventory floor (O-9) and by any stored floor. A deployment check is needed: compare the reading with an independent price before queueing `setRiskAdapter` (§9) |
-| CE-O3 | **No guardian price floor in adapter-only mode.** The rehearsal deploys with no stored floors. The guardian may only raise a stored floor that exists, so against a wrong but valid price its tools are halt and pause. An owner-set sanity floor restores the finer tool | `test_swappedLegs_…` (second half) | R-19 |
-| CE-O4 | **Static fall-back drops protection for an asset without a target.** Adapter mode refuses an asset with `tau = 0`; after `setRiskAdapter(0)` (DELAY, not LONG_DELAY) and with a stored floor, that asset trades with no inventory floor (a 10% sale went through where 1% would be the room) | `test_adapterRemoval_assetWithoutTarget_losesInventoryFloor` | requires owner action and an unset target. The rehearsal sets both targets before any share exists (`DeploySystem`), and VerifyDeployment should check it. R-20 |
-| CE-O5 | **Freshness is the feed's claim.** Replays and rollbacks by a feed are accepted (§2.3) | `test_freshnessIsTheFeedsClaim_…` | provider assumption; RedStone's `updatedAt` semantics must be measured before enabling the fresh tier |
-| CE-O6 | **Sequencer `startedAt = 0` reads as "up since 1970".** The adapter does not treat a zero restart time as an invalid round | `test_sequencerMalformedAnswers` | Unichain's feed is initialized (`startedAt` 1,793,291,075, `ORACLE_VERIFICATION_UNICHAIN.md` §2). A deployment check, or a one-line adapter change if the owner prefers (R-22). I could not retrieve Chainlink's current guidance (the documentation URL returned 404), so I did not treat this as a defect |
-| CE-O7 | **A fallback can lower one floor slightly.** O-4: under one pip at the configured edge | `test_fallbackToOneSource_…` | accepted; the floor stays beyond the remaining band |
+| CE-O1 | **A broken fallback halts.** With one source required, a reverting or zero-answering second source makes every read revert, although the first alone would suffice | `test_unavailableFallback_…` | **Kept and documented** (R-21). The adapter drops a **stale** source under the configured `minSources`; it **never ignores a malformed or reverting** one, because a feed that answers garbage is not known to be merely late. ORACLE_RISK_BOUNDARY_SPEC.md §5 is corrected |
+| CE-O2 | **Swapped legs pass installation.** An adapter built with leg0 and leg1 exchanged reports `1/P`; `setRiskAdapter` checks only the pair, token decimals and that a reading exists. At a true price of 2 the vault sold its whole asset0 room (10,000) for 5,041.7 asset1 | `test_swappedLegs_…`; `test_gates_oracleIdentityAndFixedFloorFallback` | **Deployment gate 7** now requires each of the four legs and the sequencer feed at the reviewed address and slot, token decimals from the tokens, and the reading within a reviewed tolerance of an independently obtained price (`FEED_0…3`, `SEQUENCER_FEED`, `INDEPENDENT_PRICE_X96`, `INDEPENDENT_PRICE_TOLERANCE_PIPS`). Near 1:1 an inverted price passes the price comparison, so the slot check is the one that catches it there |
+| CE-O3 | **No guardian price floor in adapter-only mode.** The rehearsal deploys with no stored floors. The guardian may only raise a stored floor that exists, so against a wrong but valid price its tools are halt and pause | `test_swappedLegs_…` (second half) | Open (R-19). Gate 13 requires stored floors before any fixed-floor fall-back |
+| CE-O4 | **Static fall-back drops protection for an asset without a target.** After `setRiskAdapter(0)` (DELAY) and with a stored floor, an asset with `tau = 0` trades with no inventory floor | `test_adapterRemoval_assetWithoutTarget_losesInventoryFloor` | **Gate 13** (`fixedFloorFallback()`) requires both inventory targets and both stored floors before `setRiskAdapter(address(0))` is queued and again before it is executed; tested refusing and passing. A vault-side check remains R-20 |
+| CE-O5 | **Freshness is the feed's claim.** Replays and rollbacks by a feed are accepted (§2.3) | `test_freshnessIsTheFeedsClaim_…` | provider assumption; RedStone's `updatedAt` semantics must be measured before the fresh tier is enabled |
+| CE-O6 | **Sequencer `startedAt = 0` read as "up since 1970".** | `test_sequencer_initializationAndGrace` | **Fixed** in the adapter (§2.4) |
+| CE-O7 | **A fallback can move one floor either way.** O-4 | `test_fallbackToOneSource_…` | accepted; each floor stays beyond the remaining band |
 | CE-O8 | **An unexecutable reservation still withholds inventory.** During an outage `Q` is not reduced, so LP instant exits are limited to `F = N − Q` until the allocation is released or expires (≤ 30 days) | `test_outageWithReservation_…` | by design (G03 G-11); matters for fees on reserved capacity (§8) |
 
-### Correction to an earlier document
+**Corrections to earlier documents.** Specifications are corrected in place; historical reports get a dated note at
+the top and their measurements are left as recorded.
+- `ORACLE_RISK_BOUNDARY_SPEC.md`: corrections 6–8; the `u` definition in §2 and §4; the §5 row on missing or malformed
+  legs.
+- `SHARED_ECONOMIC_CORE_SPEC.md` §4: the band is `[P/(1+u), P(1+u)]`.
+- `ORACLE_VERIFICATION_UNICHAIN.md` and `ORACLE_RELAYER.md`: correction notes, 8,200 → 8,268 and 3,000 → 3,010;
+  Unichain's uptime feed is not provider-supported.
+- `src/` NatSpec: `IMarketRiskAdapter.Reading.uncertaintyPips`, `VaultRiskBoundary` rule 2 and `InventoryPricing`
+  band-edge mode describe the multiplicative definition (comment-only; bytecode unchanged).
+- The synthetic results in `simulations/mm/results/` (attack bounds, κ calibration, fill rates) used the earlier `u`.
+  The difference is about `u²` (0.7 bp at 8,200 pips). They were not regenerated.
 
-- **The spec says one thing, the code another.** `ORACLE_RISK_BOUNDARY_SPEC.md` §5 says a stale, missing or malformed
-  leg drops its source. The code drops a **stale** source only; a missing or malformed leg reverts the whole read
-  (CE-O1). The adapter's own NatSpec states the code's behaviour correctly.
-- **The rehearsal's tolerances.** `maxUncertaintyPips` = 20,000 does not bind with the configured adapter (§2.5).
-
-## 6. Safety invariants
+## 7. Safety invariants
 
 The invariants that hold under every oracle input, with the evidence for each:
 1. **`N_a ≥ min(N_a before the fill, L_a)` after every fill, in every mode with a target.** ENFORCED;
@@ -301,10 +461,12 @@ The invariants that hold under every oracle input, with the evidence for each:
 4. **No LP or claim path depends on the oracle.** ENFORCED; `invariant_lpPathsIndependentOfAdapter`.
 5. **The adapter, hook and vault read one configuration in one transaction.** ENFORCED; `test_coreInputs_matchGetters`,
    `test_quotesFollowTheVaultsAdapter`.
-6. **The asset0 floor is beyond every live source's top.** TESTED (exact fuzz).
-7. **The asset1 floor is beyond the band's bottom when `e·(1e6 − u) ≥ u²`.** TESTED (exact fuzz); F-1 otherwise.
+6. **Both directional floors are beyond every live source's bracket, for every edge ≥ 0.** PROVEN (§5.3); TESTED (exact
+   fuzz, hook matrix).
 
-## 7. Exact LP protection limits
+## 8. LP protection limits and future commitments
+
+### 8.1 LP protection is in inventory units, not value
 
 These are inventory-unit guarantees, not value guarantees (G03 G-9, G-10; `INVENTORY_FLOOR_GUARANTEE.md`).
 
@@ -312,19 +474,14 @@ These are inventory-unit guarantees, not value guarantees (G03 G-9, G-10; `INVEN
 that much of, whatever the oracle says.
 
 What it does not promise:
-- **Value loss is not bounded by `kappa`.** Loss as a fraction of value can exceed `kappa`
-  (`test_Q1_holds_butLossFractionExceedsKappa_whenGainsLiftHoldings`).
-- **Cumulative realized loss is unbounded** (`test_Q3_cumulativeRealizedLoss_exceedsKappaOfStartingValue`).
-- **A depeg** marks the held units down with no limit (`test_Q4_…`).
-- **The value at risk from a wrong price** is up to `Σ_a (N_a − L_a)·p_a` at the true prices, per re-centring. With
-  `kappa` = 1% and the asset worth 1.08, the test lost 716.6 per 10,000 of room.
+- **Value loss is not bounded by `kappa`.** Loss as a fraction of value can exceed `kappa`.
+- **Cumulative realized loss is unbounded.**
+- **A depeg** marks the held units down with no limit.
+- **The value at risk from a wrong price** is up to `Σ_a (N_a − L_a)·p_a` at the true prices, per re-centring.
 
-The price checks (dynamic floor, edge, uncertainty bound) bound the price of each fill only to the extent the
-providers' assumptions hold (§2.10). The inventory floor is the only bound that does not depend on them.
+The price checks bound each fill's price only to the extent the providers' assumptions hold (§2.10).
 
-## 8. Implications for future commitments (Task 4)
-
-### 8.1 Four guarantees a reservation might mean
+### 8.2 Four guarantees a reservation might mean
 
 | Guarantee | Today | Why |
 |---|---|---|
@@ -333,9 +490,7 @@ providers' assumptions hold (§2.10). The inventory floor is the only bound that
 | **Execution only while price conditions hold** | **yes, but no price is fixed** | every fill needs a valid reading and pays at least the dynamic floor at execution time; the reservation fixes only the curator floor (scenario 9) |
 | **A bounded quantity of guaranteed executable output** | **no: 0 in the worst case** | executable output = `min(remaining, N_a − L_a, flow caps, exposure)` at execution time, and `N_a − L_a` is shared by every allocation and shrinks with other hooks' fills and with LP exits (G03 CE-1, CE-2); an outage makes it 0 for its duration |
 
-These are not equivalent. Only the first two hold unconditionally, and neither is an execution guarantee.
-
-### 8.2 What a commitment engine must enforce
+### 8.3 What a commitment engine must enforce
 
 **At admission:**
 1. The existing rule `q ≤ N − Q − R − D` and the exposure caps.
@@ -343,101 +498,117 @@ These are not equivalent. Only the first two hold unconditionally, and neither i
    On its own this is not enough, because LP exits shrink `N_a − L_a` (G03 CE-2). Either:
    - commitments reserve their own room that exits respect (a vault change); or
    - commitments are defined as capacity, with fees charged only on what was executable (design note §2.10, D-6).
-3. **A valid reading at admission**, if the commitment is priced: refuse admission when `currentReference` reverts, so
-   a hook does not pay for capacity it cannot use from the start.
+3. **A valid reading at admission**, if the commitment is priced.
 4. **A curator floor stated explicitly.** It is the only price a reservation fixes.
-5. **Bonded fees that do not accrue on capacity the vault itself refuses to execute.**
-   - An outage is not recorded on-chain, so this needs either:
-     - a permissionless "unavailable" checkpoint that calls the adapter and records failure intervals with their
-       uncertainty; or
-     - accepting that hooks pay for oracle downtime and pricing that into the rate.
-   - Owner decision R-23.
+5. **A rule for fees during oracle outages (R-23).**
 
-**At execution (all already enforced by `exchange`):**
-- a valid reading, the max of the three floors, the inventory floor, flow caps, expiry, quota, pause and halt;
-- **plus** F-1 resolved, or the C constraint, before any commitment is priced off the reference band.
+**At execution:** everything `exchange` already enforces. With the corrected `u`, the band the vault refuses is the
+whole bracket in both directions.
 
 **What the engine must not promise:** a price, a quantity above `N_a − L_a`, or execution through an oracle outage.
 
-## 9. Deployment risks
+## 9. Remaining oracle risks and deployment blockers
 
-1. **F-1** until option A or C is in force (§5).
-2. **Leg order and feed identity** cannot be checked on-chain (CE-O2). Before queueing `setRiskAdapter`, compare
-   `currentReference()` with an independent price and record the result with `configVersion`.
-3. **RedStone `updatedAt` semantics** must be measured before enabling the fresh tier (§2.3).
-4. **Sequencer feed.** It must be configured on mainnet (the Sepolia rehearsal has none) and initialized (CE-O6).
-5. **Stored sanity floors.** Without them, the guardian's only responses to a wrong-but-valid price are halt and pause
-   (CE-O3).
-6. **Both inventory targets set** before an adapter is removed or installed. Add this to VerifyDeployment (CE-O4).
-7. **The two sources share upstream data.** A common-mode error inside both brackets is undetected and bounded only by
+None of these can be removed within G04.
+1. **No provider-supported sequencer uptime feed on Unichain** (§2.4). A deployment must either:
+   - accept and record the residual risk (`ACCEPT_NO_SEQUENCER_FEED`); or
+   - use the existing but unsupported feed with monitoring of its own.
+2. **RedStone `updatedAt` semantics** are not measured; this blocks enabling the fresh tier (§2.3).
+3. **The two sources share upstream data.** A common-mode error inside both brackets is undetected and bounded only by
    the inventory floor (`CORRELATED_ORACLE_FAILURES.md`, scenario 3).
-8. **Adapter replacement is DELAY, not LONG_DELAY**, and re-prices every live allocation at once
+4. **Stored sanity floors** are absent in the rehearsal configuration. The guardian's response to a wrong-but-valid
+   price is halt and pause (CE-O3, R-19).
+5. **Adapter replacement is DELAY, not LONG_DELAY**, and re-prices every live allocation at once
    (`test_replaceAdapter_duringActiveAllocation`).
-9. **Fork evidence is from 2026-11-10.** No fork test was rerun in G04 (§10.3).
+6. **Gate 7's independent price** is only as good as the source the operator takes it from. At pairs near 1:1 it
+   cannot detect an inversion, so the slot check must not be skipped.
+7. **Synthetic results** in `simulations/mm/results/` predate the corrected `u` (§6).
 
 ## 10. Validation
 
-### 10.1 Commands and results
+### 10.1 Commands and results (closeout)
 
 | Command | Result |
 |---|---|
-| `forge fmt --check` | clean |
-| `git diff 4dbe6b9 -- src script` | empty |
-| `forge test --match-contract "OracleFailureModesTest\|OracleFailureExecutionTest" -vv` | 6 + 7 passed |
-| `forge test` (default profile) | see §10.4 |
-| `FOUNDRY_PROFILE=ci forge test --match-contract "OracleFailure\|PriceRiskAdapter\|OracleRiskBoundary\|VaultRiskBoundary\|SharedCoreHooks\|RelayerOutage\|HookPriceBands\|InventoryProtectionBounds\|ReservationDeliverability"` | see §10.4 |
-| `FOUNDRY_PROFILE=ci forge test --match-contract "OracleRiskInvariants\|InventoryProtectionInvariants\|VaultInvariants"` | see §10.4 |
-| `python3 test/invariant/coverage.py` | see §10.4 |
+| `forge fmt --check`; `forge build` | clean |
+| `forge test` | 669 passed, 0 failed, 8 skipped (fork tests, no RPC); 66 suites |
+| `FOUNDRY_PROFILE=ci forge test --match-contract "OracleFailure\|OracleBandHooks\|PriceRiskAdapter\|OracleRiskBoundary\|VaultRiskBoundary\|SharedCoreHooks\|SharedCoreVectors\|SharedCoreProperties\|RelayerOutage\|HookPriceBands\|InventoryProtectionBounds\|ReservationDeliverability\|DeployScripts\|PricingAdversarial\|PricePolicy"` | 136 passed, 0 failed (17 suites) |
+| `FOUNDRY_PROFILE=ci forge test --match-contract "OracleRiskInvariants\|InventoryProtectionInvariants\|VaultInvariants"` | 3 + 6 + 35 passed; every invariant 128 runs × 16,384 calls, 0 reverts |
+| `python3 test/invariant/coverage.py` (64 seeds, depth 128) | every gate passed |
+| `cd simulations/mm && python3 -m unittest test_core test_risk test_floor_guarantee test_mm` | 47 passed |
+| `python3 simulations/mm/vectors_core.py && python3 simulations/mm/vectors_csv.py` | regenerated: only the 61 bracket cases' uncertainty column changed (`shared_core_v1.json`, `shared_core_brackets_v1.csv`); a second run leaves the files unchanged; `SharedCoreVectors` passes against them |
+| `UNICHAIN_RPC_URL=https://mainnet.unichain.org forge test --match-contract UnichainOraclesForkTest -vv` (public RPC, read-only) | 5 passed; corrected adapter on real feeds: `u` = 8,268 pips, 2 live sources, `currentReference` 75,875 gas cold / 23,935 warm |
+| `UNICHAIN_RPC_URL=https://mainnet.unichain.org forge test --match-contract UnichainIntegratedSwap -vv` | 3 passed (shared-core swap gas, static-mode gas, quotes beyond the band on real feeds) |
+| `cast call 0x4956…F813 "latestRoundData()…"`, `description()` (public RPC) | status 0, `startedAt` 1,793,291,075, "L2 Sequencer Uptime Status Feed", block 63,868,968 |
 
 ### 10.2 Mutation checks of the new tests
 
 | Mutant | Killed by |
 |---|---|
-| `VaultRiskBoundary.dynamicFloor` without `+ uncertainty` | fuzz test, non-vacuity test, fallback test, F-1 test (two-source half), jump test |
-| `PriceRiskAdapter._tier` fresh boundary `<=` → `<` | `test_freshTierBoundary_staleNarrowBandCannotAuthorize` (and the existing `test_freshTier_boundaryIsInclusive`) |
+| `VaultRiskBoundary.dynamicFloor` without `+ uncertainty` (review) | fuzz test, non-vacuity test, fallback test, F-1 test (two-source half), jump test |
+| `PriceRiskAdapter._tier` fresh boundary `<=` → `<` (review) | `test_freshTierBoundary_staleNarrowBandCannotAuthorize`, `test_freshTier_boundaryIsInclusive` |
+| `midAndUncertainty` lower term divided by `mid` (the pre-closeout code; run after the closeout and restored) | `test_F1_…`, `testFuzz_normalizedFloorNeverInsideTheBand` (asset1 sold inside the band), `test_normalizedFloor_checksAreExercised`, `test_fallbackToOneSource_…`, `SharedCoreVectors.test_vectors_brackets` (row 0: 8,000 ≠ 8,065); the Python model's `test_uncertainty_covers_bracket_both_directions` checks the same property. **Not killed by the hook matrix**: the hooks' 30 bps base spread covers the `u²` gap at the quotes the matrix reaches, so the matrix shows compatibility, not the floor's exact edge |
 
-Both mutants were applied to a working copy and restored; `git status` showed no change to `src/` afterwards.
+### 10.3 Bytecode, size and gas
 
-### 10.3 Deliberately not run
+| Artifact (production build) | Before G04 | After | Change |
+|---|---|---|---|
+| `PriceRiskAdapter` runtime | 5,552 B | 5,581 B | +29 B (F-1: −2 B; sequencer checks: +31 B) |
+| `PriceRiskAdapter.currentReference`, warm, two sources + sequencer (mock feeds) | 12,955 gas | 13,031 gas | +76 gas (F-1: −6; sequencer: +82) |
+| `SharedCommitmentVault` runtime | 22,440 B, headroom 2,136 B | unchanged (same runtime and init hash) | 0 |
+| `HookA_DynamicFee`, `HookB_BoundedImpact`, `VaultLens`, `CuratorAuthorization`, `VaultGovernor` | — | runtime and init hashes unchanged | 0 |
+
+The comment-only `src/` edits were checked by hashing every production artifact's runtime and init bytecode before
+and after; all are identical.
+
+### 10.4 Deliberately not run
 
 | Check | Why |
 |---|---|
-| deep suite (`test/deep.sh`), full mutation campaign, Slither | no production contract changed |
-| contract sizes, gas benchmarks | no production bytecode changed; EIP-170 headroom unchanged |
-| fork tests (`test/fork/`) | the affected behaviour was reproduced with the production adapter over mock feeds; the real-feed facts used (decimals, thresholds, sequencer `startedAt`) are from the 2026-11-10 fork records. Measuring RedStone's `updatedAt` semantics needs a fork run and is listed as a deployment step (§9) |
-
-### 10.4 Results
-
-| Run | Result |
-|---|---|
-| `forge test` | 665 passed, 0 failed, 8 skipped (fork tests, no RPC); 65 suites, 22.0 s |
-| CI profile, oracle and inventory suites (11 suites incl. the two new ones and G03's `ReservationDeliverability`) | 82 passed, 0 failed; the new fuzz test at 10,000 runs |
-| CI profile, `OracleRiskInvariants` / `InventoryProtectionInvariants` / `VaultInvariants` | 3 + 6 + 35 passed; every invariant 128 runs × 16,384 calls, 0 reverts |
-| `python3 test/invariant/coverage.py` (64 seeds, depth 128) | every gate passed (vault, oracle, inventory, liveness) |
-| non-vacuity of the new fuzz test (`test_normalizedFloor_checksAreExercised`, 300 derived cases) | 11 refused; asset0 checked 148 (one source) / 141 (two); asset1 checked 217, outside F-1's condition 72 |
+| deep suite (`test/deep.sh`), full mutation campaign, Slither | not requested; the change is confined to the adapter's two functions, covered by targeted, fuzz, invariant, vector and fork runs |
+| benchmarks (`test/bench/`) | vault and hook bytecode unchanged; adapter gas measured directly |
+| `UNICHAIN_SEPOLIA` fork | no Sepolia oracle feeds are used (the rehearsal deploys TEST feeds) |
+| re-running the synthetic simulations | out of scope (§6) |
 
 ## 11. Owner decisions
 
-Numbered after G03's R-17.
+Numbered after G03's R-17. The wording below is the original, unchanged. The closeout's recommendation and status
+follow each item.
+
 - **R-18.** F-1: option A (recommended), B or C; apply C now if any configuration can exceed 9,950 pips.
+  - **Status:** resolved by the closeout instruction. Option A is implemented (§5); C is no longer needed.
 - **R-19.** Stored sanity floors at deployment (recommended), or accept halt and pause as the guardian's only response
   to a wrong-but-valid price.
 - **R-20.** Static fall-back: require both inventory targets before `setRiskAdapter(0)` executes (a vault check), or
   rely on deployment verification (recommended for now).
+  - **Status:** the deployment verification exists now (gate 13).
 - **R-21.** A broken source with `minSources = 1`: keep halting (current), or drop the source as the spec says.
 - **R-22.** Sequencer `startedAt = 0`: a deployment check (current recommendation), or a one-line adapter refusal.
+  - **Status:** resolved by the closeout instruction. The adapter refuses it (§2.4); gate 7 checks the configured feed.
 - **R-23.** Commitment fees during oracle outages (§8.2, item 5).
+  - **Note:** after the closeout restructuring, that item is §8.3, item 5.
+
+Recommendations and security consequences for R-19 … R-23 are in the completion report and repeated here.
+
+| Decision | Recommendation | Security consequence |
+|---|---|---|
+| R-19 | **Set stored sanity floors at deployment**, wide enough not to bind in normal markets (e.g. about 10% below the reference in each direction, consistent under D14), and require them in gate 9 for mainnet | With them, the guardian can raise a floor within one block against a wrong-but-valid price, and the static fall-back has floors; without them its only tools are halt and pause, which stop all trading in that direction. A floor set too tight stops trading in fast markets; it binds only at the floor, so it cannot loosen anything |
+| R-20 | **Keep gate 13 (deployment verification) for now**; add the vault check only if the vault is changed for another reason | Gate 13 depends on operators running it before queueing and executing; a mis-step leaves an asset without an inventory floor after the fall-back. A vault check would be unconditional but costs vault bytes (2,136 B headroom) and a re-review of the vault |
+| R-21 | **Keep halting** on a broken source | Fail-closed: a feed returning garbage or reverting is not known to be merely late, and dropping it would let one compromised feed silently reduce the sources to one. Cost: with `minSources = 1`, one broken feed halts trading although the other would suffice; with the configured `minSources = 2` the behaviour is the same either way |
+| R-22 | **Done**; keep the adapter refusal and the gate 7 sequencer check | An uninitialized uptime round can no longer read as "up since 1970"; on chains without a supported feed the residual risk in §2.4 remains and must be accepted explicitly |
+| R-23 | **Hooks pay for reserved capacity through outages; do not suspend fees on-chain** in the first version, and state it in the commitment terms | An on-chain outage record would need a permissionless checkpoint that proves continuous failure, which a view call cannot; suspending fees without it invites griefing (a caller timing a failing read). Paying through outages makes outage risk a cost the hook prices, and keeps LP fee accounting deterministic |
 
 ## 12. Result
 
-**G04: PASS (local).**
-- **Reconstructed and tested.** The oracle trust boundary, freshness rules, fallbacks and the ten failure scenarios
-  are reconstructed from the code and covered by deterministic tests.
-- **Fail-closed behaviour holds.** Oracle failure never blocks LP exits or claims, and guardian tools work throughout.
-- **One defect, F-1.** It is reproduced, bounded, and not exposed in the rehearsal configuration. Its fix changes the
-  pricing definition shared by the adapter, hooks and model, so it is left for the owner (R-18), with a guardian-level
-  mitigation available now.
-- **No production code changed.**
+**G04: PASS (local), awaiting owner review.**
+- **The oracle trust boundary** is documented: freshness rules, fallbacks and ten failure scenarios, each with
+  deterministic tests.
+- **F-1 is corrected** at the shared reference, with a proof that both directional floors lie outside every live
+  source's bracket for every edge. It is tested by an exact fuzz, a Hook A / Hook B matrix over two decimal pairs and
+  six reference states, regenerated conformance vectors and real-feed fork runs.
+- **The sequencer feed** can no longer be read as up when uninitialized.
+- **Deployment gates** check feed identity, an independent price and the fixed-floor fall-back.
+- **Still open:** R-19 … R-23 and the blockers in §9 are the owner's decisions.
 
 ## 13. Commits
 
