@@ -106,4 +106,15 @@ interface IVaultState is ISharedCommitmentVault {
     /// @param requestId Request to read.
     /// @return The request record.
     function getRequest(uint256 requestId) external view returns (WithdrawalRequest memory);
+
+    /// @notice Raw 32-byte word at persistent storage slot `slot` of the vault.
+    /// @dev The generic read that v4's PoolManager also offers (`IExtsload.extsload(bytes32)`, same selector).
+    ///      `VaultLens` decodes the vault's stored accounting with it; where each variable lives follows Solidity's
+    ///      storage-layout rules for the vault's declaration order and is pinned by
+    ///      `test/unit/VaultStorageLayout.t.sol`. Reads persistent storage only, so the transient reentrancy lock is
+    ///      not visible. No access control: it exposes nothing that `eth_getStorageAt` does not already expose, and
+    ///      it writes nothing.
+    /// @param slot Storage slot to read.
+    /// @return value The stored word; zero for a slot never written.
+    function extsload(bytes32 slot) external view returns (bytes32 value);
 }

@@ -110,10 +110,10 @@ import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
 ///
 /// Read-only helpers. This contract serves its stored records (public getters, `getAllocation`, `getRequest`), the
 /// admission limit `admissibleCapacity`, and `coreInputs`, the values a hook prices from in shared-core mode in one
-/// call. Previews, request status, N_a, F_a, D_a, deliverable shares and an
-/// allocation's effective floor are computed by `VaultLens`, a separate stateless contract that reads the getters
-/// declared in `IVaultState`. Nothing in this contract calls the lens; every check here uses its own internal copy
-/// of those formulas.
+/// call, and `extsload`, which returns any raw storage word. Previews, request status, N_a, F_a, D_a, deliverable
+/// shares and an allocation's effective floor are computed by `VaultLens`, a separate stateless contract that
+/// decodes this contract's storage through `extsload`; the storage layout is therefore part of the read interface.
+/// Nothing in this contract calls the lens; every check here uses its own internal copy of those formulas.
 ///
 /// Authorization module. New allocations are created only through `reserveFor`, which only `authModule` may call.
 /// The module (`CuratorAuthorization`) verifies the curator's EIP-712 signature, or that the curator itself is
@@ -1351,6 +1351,13 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
                 _netAssets(asset1),
                 totalShares
             );
+    }
+
+    /// @inheritdoc IVaultState
+    function extsload(bytes32 slot) external view returns (bytes32 value) {
+        assembly ("memory-safe") {
+            value := sload(slot)
+        }
     }
 
     /// @notice Stored state of an allocation. Returns an all-zero struct for an unknown id.
