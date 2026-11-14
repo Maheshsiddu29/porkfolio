@@ -499,6 +499,43 @@ contract GovernanceLivenessTest is VaultTestBase {
         assertEq(vm.getBlockTimestamp(), eta);
     }
 
+    /// @notice G02 L-2 with the expiry ring (V-8): once the guardian stops new commitments, every existing one ends
+    ///         within MAX_HORIZON, and a LONG_DELAY change queued at the lever executes at its eta through a batch that
+    ///         releases nothing: its own processQueue sweeps the expired commitments out of Q_0 (in O(1), since every
+    ///         recorded bucket has ended) and finalizes the queue. Fuzzed over the commitment schedule: up to six
+    ///         commitments of random size and horizon at random times, with LPs queuing behind them.
+    function testFuzz_L2_executesWithoutReleaseOnceCommitmentsStop(uint256 seed) public {
+        _depositShares(lpA, 1000 ether);
+        uint256 n = 1 + seed % 6;
+        for (uint256 k; k < n; ++k) {
+            uint256 r = uint256(keccak256(abi.encode(seed, k)));
+            vm.warp(vm.getBlockTimestamp() + r % 2 days);
+            uint256 cap = vault.admissibleCapacity(c0);
+            if (cap > 1 ether) {
+                ISharedCommitmentVault.AllocationRequest memory q =
+                    _request(keyA, c0, uint128(1 ether + (r >> 32) % (cap - 1 ether)));
+                q.expiry = _hourAligned(vm.getBlockTimestamp() + 1 hours + (r >> 96) % 30 days);
+                // The hook's exposure cap can refuse it (its total keeps expired capacity until a close).
+                vm.prank(curator);
+                try auth.activateDirect(q) {} catch {}
+            }
+            if ((r >> 160) % 2 == 0 && vault.sharesOf(lpA) != 0) _redeem(lpA, vault.sharesOf(lpA), true);
+        }
+        (,,, uint256 rid) = _redeem(lp0, vault.sharesOf(lp0) / 3, true);
+        // The lever: no new commitment on asset0 from now on.
+        vm.prank(guardian);
+        vault.setBufferFloor(c0, type(uint256).max);
+        uint256 eta = _queueGov(loosen);
+        vm.warp(eta);
+        assertEq(lens.liveReserved(vault, c0), 0, "every commitment made before the lever has ended");
+        (bool ok, bytes memory err) = _tryExecute(loosen, false);
+        if (!ok) emit log_named_bytes("revert", err);
+        assertTrue(ok, "executes with no release");
+        assertEq(vault.pendingShares(), 0);
+        assertEq(vault.reserved(c0), 0);
+        if (rid != 0) assertEq(vault.getRequest(rid).sharesPending, 0);
+    }
+
     /// @notice The original operation survives a lever only if the lever comes early enough: every commitment made
     ///         before it must expire inside the window, i.e. lever time + MAX_HORIZON <= eta + GRACE. With 32 / 7 / 30
     ///         days that is 9 days after queuing. Expiries are hour boundaries, so the bound is safe but not tight: the

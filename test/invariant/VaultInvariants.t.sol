@@ -28,6 +28,8 @@ import {ClaimDonor} from "../utils/ClaimDonor.sol";
 import {HookA_DynamicFee} from "../../src/hooks/HookA_DynamicFee.sol";
 import {HookB_BoundedImpact} from "../../src/hooks/HookB_BoundedImpact.sol";
 import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
+import {VaultRiskBoundary} from "../../src/risk/VaultRiskBoundary.sol";
+import {ExpiryRing} from "../model/ExpiryRing.sol";
 
 using VaultStateReader for SharedCommitmentVault;
 
@@ -166,6 +168,24 @@ contract VaultHandler is Test {
     uint256 public pricingSwapsOk;
     uint256 public pricingReverts;
     uint256 public reconfigurationsOk;
+
+    // Commitment ledger (C02). A ghost copy of each asset's expiry ring, kept with the G05 reference library
+    // (`test/model/ExpiryRing.sol`) and fed the same operations as the vault: a successful reservation sweeps and
+    // adds, a successful fill or close removes, a successful redemption or queue call sweeps both assets. The vault's
+    // stored Q_a must equal the ghost total after every call (V-3, V-4: no bucket subtracted twice or missed).
+    mapping(Currency => ExpiryRing.Ring) internal ghostRing;
+    mapping(Currency => uint256) public ghostQ;
+    /// Output each allocation has paid, from measured swap deltas (V-6).
+    mapping(uint256 => uint256) public ghostConsumed;
+    bool public admissionBoundBroken; // V-5 / V-9: right after an admission, Q > N - R - D, Q > N - L or F < R + D
+    bool public filledAfterExpiry; // V-7: a fill succeeded at or after its allocation's expiry
+    bool public fillLoweredDeliverable; // V-10: a fill lowered the number of shares that can exit instantly
+    bool public consumptionMismatch; // V-6: an allocation's `consumed` moved by other than its own measured output
+    uint256 public expirySweeps; // sweeps (any sweeping call) that took expired capacity out of Q_a
+    uint256 public expiredReleases; // releases at or after expiry
+    uint256 public releasesAfterSweep; // closes whose capacity a sweep or an eviction had already taken out of Q_a
+    uint256 public roomRefusals; // reservations refused that N - Q - R - D alone would have admitted
+    uint256 public targetChangesOk;
 
     constructor(
         SharedCommitmentVault vault_,
@@ -580,6 +600,98 @@ contract VaultHandler is Test {
         vm.warp(block.timestamp + bound(dt, 1, 3 days));
     }
 
+    /// @notice A rare long quiet period (3 to 35 days), so that sweeps fall far behind, slots are reused after
+    ///         wrap-around and every recorded bucket can end between two calls.
+    function longWarp(uint256 dt) external {
+        vm.warp(block.timestamp + bound(dt, 3 days, 35 days));
+    }
+
+    /// @notice The owner sets the inventory targets (one call in three; otherwise clears them), so that room-aware
+    ///         admission is live in part of each run. Targets stay at most 80% of the current holding per share and
+    ///         tolerances at least 10%, which leaves fills room to trade. With targets set, a commitment cannot take
+    ///         free inventory below the floor, so `queueBehindCommitment` rarely queues; clearing two calls in three
+    ///         keeps the queue paths as active as before the room rule (coverage gate `queuedOk`).
+    function setInventoryTarget(uint256 seed) external {
+        uint256 s = vault.totalShares();
+        uint256[2] memory t;
+        if (seed % 3 == 0) {
+            for (uint256 i; i < 2; ++i) {
+                Currency c = i == 0 ? c0 : c1;
+                uint256 h = FullMath.mulDiv(vault.backing(c) - vault.claimableAssets(c), 1e18, s);
+                t[i] = h * bound(seed >> (8 + 32 * i), 3000, 8000) / 10_000;
+            }
+        }
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint24 k = uint24(bound(seed >> 80, 100_000, 1_000_000));
+        vm.prank(owner);
+        try vault.setInventoryBounds(t[0], t[1], k, k) {
+            targetChangesOk++;
+            if (t[0] != 0) _tryOverRoom(seed >> 120);
+        } catch {}
+    }
+
+    /// @dev Right after targets are set: a reservation one unit above the room that N - Q - R - D alone would admit.
+    ///      The vault must refuse it (counted in `roomRefusals`); if it were admitted, `_allocate` flags
+    ///      `admissionViolated`.
+    function _tryOverRoom(uint256 seed) internal {
+        Currency out = seed % 2 == 0 ? c0 : c1;
+        uint256 admissible = vault.admissibleCapacity(out);
+        uint256 e = lens.eligibleBacking(vault, out);
+        uint256 q = lens.sweptReserved(vault, out);
+        uint256 r = vault.bufferFloor(out);
+        if (e <= q || e - q <= r || admissible + 1 > e - q - r || admissible + 1 > 1_500_000 ether) return;
+        _allocate(curators[0], (seed >> 1) % 2 == 0 ? keyA : keyB, out, admissible + 1, 1 days);
+    }
+
+    function _vnow() internal view returns (uint256) {
+        return vm.getBlockTimestamp(); // via-IR may reuse a block.timestamp read from before a warp
+    }
+
+    function _ghostSweep(Currency c) internal {
+        uint256 before = ghostQ[c];
+        ghostQ[c] = ExpiryRing.sweep(ghostRing[c], before, _vnow() / 1 hours, 32, 720);
+        if (ghostQ[c] < before) expirySweeps++;
+    }
+
+    function _ghostAdd(Currency c, uint256 expiry, uint256 amount) internal {
+        _ghostSweep(c);
+        ghostQ[c] = ExpiryRing.add(ghostRing[c], ghostQ[c], expiry / 1 hours, amount, 720);
+    }
+
+    function _ghostRemove(Currency c, uint256 expiry, uint256 amount) internal {
+        ghostQ[c] = ExpiryRing.remove(ghostRing[c], ghostQ[c], expiry / 1 hours, amount, 720);
+    }
+
+    function ghostRingHeader(Currency c) external view returns (uint256 swept, uint256 maxBucket) {
+        return (ghostRing[c].swept, ghostRing[c].maxBucket);
+    }
+
+    /// @dev V-5 and V-9, right after a successful admission in `out`: Q <= N - R - D (R compared without adding, it
+    ///      may be huge), Q <= N - L when a target is set, and free inventory F = N - Q >= R + D.
+    function _checkAdmissionBounds(Currency out) internal {
+        uint256 n = vault.backing(out) - vault.claimableAssets(out);
+        uint256 q = vault.reserved(out);
+        uint256 d = lens.pendingDemand(vault, out);
+        uint256 r = vault.bufferFloor(out);
+        if (q + d > n || n - q - d < r) admissionBoundBroken = true;
+        uint256 i = out == c1 ? 1 : 0;
+        uint256 tau = vault.inventoryTargetPerShare(i);
+        if (tau != 0) {
+            uint256 l = VaultRiskBoundary.inventoryFloor(vault.totalShares(), tau, vault.inventoryTolerancePips(i));
+            if (q + l > n) admissionBoundBroken = true;
+        }
+    }
+
+    /// @dev True when a refusal of `maxOut` in `out` came from the room rule: the first rule alone, on the Q the
+    ///      reservation's sweep would see, admits it.
+    function _refusedByRoom(Currency out, uint256 maxOut, bytes memory err) internal view returns (bool) {
+        if (bytes4(err) != ISharedCommitmentVault.InsufficientBacking.selector) return false;
+        uint256 e = lens.eligibleBacking(vault, out);
+        uint256 q = lens.sweptReserved(vault, out);
+        uint256 r = vault.bufferFloor(out);
+        return e > q && e - q > r && maxOut <= e - q - r;
+    }
+
     function release(uint256 idSeed, bool asOwner) external {
         if (allocationIds.length == 0) return;
         uint256 id = allocationIds[idSeed % allocationIds.length];
@@ -768,6 +880,8 @@ contract VaultHandler is Test {
         ) {
             ghostBacking[c0] -= a0;
             ghostBacking[c1] -= a1;
+            _ghostSweep(c0);
+            _ghostSweep(c1);
             if (instant != 0) instantOk++;
             if (requestId != 0) queuedOk++;
             // Inline queue processing may have finalized earlier requests: record them.
@@ -801,6 +915,8 @@ contract VaultHandler is Test {
         (uint256 head, uint256 end, uint256[] memory pend, uint256[2][] memory cl) = _queueSnapshot();
         Snap memory p = _take();
         uint256 done = vault.processQueue(steps);
+        _ghostSweep(c0);
+        _ghostSweep(c1);
         _recordFinalizations(head, end, pend, cl);
         if (done != 0) finalizedOk++;
         if (vault.backing(c0) != p.b0 || vault.backing(c1) != p.b1) balanceMismatch = true;
@@ -865,6 +981,9 @@ contract VaultHandler is Test {
         (uint64 tag,) = lens.expiryBucket(vault, a.currencyOut, bucket % 720);
         uint256 expectedDrop = bucket > swept && tag == bucket ? unused : 0;
         if (q - vault.reserved(a.currencyOut) != expectedDrop) closeMismatch = true;
+        if (expectedDrop == 0) releasesAfterSweep++;
+        if (_vnow() >= a.expiry) expiredReleases++;
+        _ghostRemove(a.currencyOut, a.expiry, unused);
         if (cr - vault.curatorReserved(a.curator, a.currencyOut) != unused) closeMismatch = true;
         if (!vault.getAllocation(id).released) closeMismatch = true;
         ghostClosed[id] = true;
@@ -1040,6 +1159,8 @@ contract VaultHandler is Test {
             _checkExposure(address(key.hooks), who, out);
             if (vault.backing(c0) != p.b0 || vault.backing(c1) != p.b1) balanceMismatch = true;
             _checkWUnchanged(p);
+            _ghostAdd(out, a.expiry, a.maxOut);
+            _checkAdmissionBounds(out);
         } catch (bytes memory err) {
             signedRefusals++;
             if (timed) timedRefusals++;
@@ -1370,7 +1491,11 @@ contract VaultHandler is Test {
             _checkExposure(address(key.hooks), who, out);
             if (vault.backing(c0) != p.b0 || vault.backing(c1) != p.b1) balanceMismatch = true;
             _checkWUnchanged(p);
-        } catch {}
+            _ghostAdd(out, req.expiry, maxOut);
+            _checkAdmissionBounds(out);
+        } catch (bytes memory err) {
+            if (_refusedByRoom(out, maxOut, err)) roomRefusals++;
+        }
     }
 
     /// @dev Curator floor used by the handler: 1:1, or the live vault floor if that is stricter.
@@ -1381,6 +1506,7 @@ contract VaultHandler is Test {
 
     function _swap(PoolKey memory key, bool zeroForOne, uint256 amountIn, uint256 id) internal returns (bool ok) {
         MockERC20(Currency.unwrap(zeroForOne ? c0 : c1)).mint(trader, amountIn);
+        uint256[2] memory fillBefore = [vault.getAllocation(id).consumed, lens.deliverableShares(vault)];
         address allocCurator = vault.getAllocation(id).curator;
         bool restricted = vault.getCurator(allocCurator).restriction != ISharedCommitmentVault.CuratorRestriction.None;
         Currency cout = zeroForOne ? c1 : c0;
@@ -1415,6 +1541,8 @@ contract VaultHandler is Test {
             _afterPricedSwap(key, zeroForOne, amountIn, uint256(int256(outDelta)));
             if (restricted) restrictedConsumption = true;
             if (ghostClosed[id]) closeMismatch = true; // a closed allocation was consumed
+            // forge-lint: disable-next-line(unsafe-typecast)
+            _afterFill(id, uint256(int256(outDelta)), fillBefore);
             _checkEffectiveFloor(p, zeroForOne, feff);
             _checkBalancesFollowBacking(p);
             _checkWUnchanged(p);
@@ -1422,6 +1550,18 @@ contract VaultHandler is Test {
             if (restricted) restrictedSwapsRejected++;
             if (_isFlowRefusal(err)) flowRefusals++;
         }
+    }
+
+    /// @dev Commitment-ledger checks of one successful fill of `out` (the measured output) against allocation `id`:
+    ///      V-6, its `consumed` rose by exactly `out` and the ghost follows it; V-7, it was before the expiry; V-10, the
+    ///      instant-exit capacity did not fall. Mirrors the removal into the ghost ring.
+    function _afterFill(uint256 id, uint256 out, uint256[2] memory before) internal {
+        ISharedCommitmentVault.Allocation memory a = vault.getAllocation(id);
+        if (a.consumed - before[0] != out) consumptionMismatch = true;
+        ghostConsumed[id] += out;
+        if (_vnow() >= a.expiry) filledAfterExpiry = true;
+        if (lens.deliverableShares(vault) < before[1]) fillLoweredDeliverable = true;
+        _ghostRemove(a.currencyOut, a.expiry, out);
     }
 
     /// @dev INV-P1 on MEASURED ERC-6909 deltas: dIn * 2^96 >= dOut * F_eff, compared in 512 bits. Measuring the
@@ -1575,7 +1715,7 @@ contract VaultInvariantsTest is VaultTestBase {
         // Weights: value-moving actions (swaps, LP flows, queue processing, claims) are about a third of all calls.
         // With every action at weight one or two, a depth-128 run reached about three swap calls, and a third of
         // runs ended without a single successful swap (G01 baseline, docs/security/G01_BASELINE.md).
-        bytes4[] memory selectors = new bytes4[](54);
+        bytes4[] memory selectors = new bytes4[](56);
         selectors[0] = VaultHandler.allocate.selector;
         selectors[1] = VaultHandler.swap.selector;
         selectors[2] = VaultHandler.warp.selector;
@@ -1630,6 +1770,8 @@ contract VaultInvariantsTest is VaultTestBase {
         selectors[51] = VaultHandler.claim.selector;
         selectors[52] = VaultHandler.deposit.selector;
         selectors[53] = VaultHandler.ownerResume.selector; // so that a guardian halt does not freeze a direction for good
+        selectors[54] = VaultHandler.setInventoryTarget.selector; // room-aware admission live (C02)
+        selectors[55] = VaultHandler.longWarp.selector; // sweeps far behind, wrap-around, everything expired (C02)
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -1702,6 +1844,50 @@ contract VaultInvariantsTest is VaultTestBase {
     }
 
     /// Hooks never retain claims; no operator rights over the vault; PoolManager holds the ERC-20 behind them.
+    /// V-3 / V-4: the vault's stored Q_a and ring header equal the ghost ring, which the G05 reference library built
+    /// from the same successful operations. Any subtraction made twice, missed, or made at the wrong bucket shows up
+    /// as a difference.
+    function invariant_ringMatchesGhostModel() public view {
+        for (uint256 k; k < 2; ++k) {
+            Currency c = k == 0 ? c0 : c1;
+            assertEq(vault.reserved(c), handler.ghostQ(c), "stored Q != ghost ring total");
+            (uint64 sw, uint64 mb) = lens.expiryRing(vault, c);
+            (uint256 gsw, uint256 gmb) = handler.ghostRingHeader(c);
+            assertEq(sw, gsw, "swept != ghost");
+            assertEq(mb, gmb, "maxBucket != ghost");
+        }
+    }
+
+    /// V-4: every live allocation's bucket is still in its slot and not swept, so its capacity is counted and a fill
+    /// can remove it; no slot holding live capacity was ever overwritten.
+    function invariant_liveBucketsResident() public view {
+        uint256 n = handler.allocationCount();
+        for (uint256 i; i < n; ++i) {
+            ISharedCommitmentVault.Allocation memory a = vault.getAllocation(handler.allocationIds(i));
+            if (a.released || vm.getBlockTimestamp() >= a.expiry) continue;
+            uint256 b = a.expiry / 1 hours;
+            (uint64 sw,) = lens.expiryRing(vault, a.currencyOut);
+            (uint64 tag, uint128 amount) = lens.expiryBucket(vault, a.currencyOut, b % 720);
+            assertGt(b, sw, "live bucket already swept");
+            assertEq(tag, b, "live bucket evicted");
+            assertGe(amount, a.maxOut - a.consumed, "bucket below one of its live remainders");
+        }
+    }
+
+    /// V-5, V-6, V-7, V-9, V-10 (checked at the moment of each action, recorded as sticky flags), and V-6's ghost:
+    /// every allocation's `consumed` equals the sum of its own measured outputs.
+    function invariant_commitmentLedgerRules() public view {
+        assertFalse(handler.admissionBoundBroken(), "V-5/V-9: admission left Q above a bound or F below R + D");
+        assertFalse(handler.consumptionMismatch(), "V-6: consumed moved by other than the fill's own output");
+        assertFalse(handler.filledAfterExpiry(), "V-7: a fill at or after expiry");
+        assertFalse(handler.fillLoweredDeliverable(), "V-10: a fill lowered deliverable shares");
+        uint256 n = handler.allocationCount();
+        for (uint256 i; i < n; ++i) {
+            uint256 id = handler.allocationIds(i);
+            assertEq(vault.getAllocation(id).consumed, handler.ghostConsumed(id), "V-6: consumed != ghost");
+        }
+    }
+
     function invariant_custodyAndSolvency() public view {
         _assertAccountingConsistentWith(handler.ghostDonated(c0), handler.ghostDonated(c1));
     }
@@ -2047,6 +2233,11 @@ contract VaultInvariantsTest is VaultTestBase {
         console2.log("COV finalizedOk", handler.finalizedOk());
         console2.log("COV claimsOk", handler.claimsOk());
         console2.log("COV releasesOk", handler.releasesOk() + handler.allocationCancelsOk());
+        console2.log("COV expirySweeps", handler.expirySweeps());
+        console2.log("COV expiredReleases", handler.expiredReleases());
+        console2.log("COV releasesAfterSweep", handler.releasesAfterSweep());
+        console2.log("COV roomRefusals", handler.roomRefusals());
+        console2.log("COV targetChangesOk", handler.targetChangesOk());
         console2.log("signed ok/refused/stale:", handler.signedOk(), handler.signedRefusals(), handler.staleRefusals());
         console2.log(
             "invalidations/moduleInstalls/moduleDisables:",
@@ -2275,6 +2466,36 @@ contract VaultInvariantsTest is VaultTestBase {
         invariant_flowHierarchyConsistent();
         invariant_exposureAndHookReserved();
         invariant_reservedIsExactAndBacked();
+    }
+
+    /// @notice The commitment-ledger branches are reachable and their checks live: an expiry recognized by a sweep
+    ///         (no release), a release after expiry whose capacity a sweep already removed, a reservation refused by
+    ///         the room rule after the owner sets targets, a long quiet period, and every ledger invariant.
+    uint256 internal constant SEED_TARGETS = 1 | 8000 << 8 | 8000 << 40 | 100_000 << 80;
+
+    function test_handler_commitmentLedgerProgress() public {
+        assertTrue(SEED_TARGETS % 3 == 0, "a seed that sets targets");
+        handler.allocate(0, 10_000 ether, 2 hours); // hookA, token0 out, 2 h
+        handler.allocate(3, 20_000 ether, 1 days); // hookB, token1 out, 1 day
+        handler.swap(0, 100 ether);
+        handler.warp(3 hours);
+        handler.process(1); // sweeps: the 2-hour allocation's bucket has ended
+        assertGt(handler.expirySweeps(), 0, "expiry recognized without a release");
+        handler.release(0, false); // a stranger releases it after expiry
+        assertEq(handler.releasesAfterSweep(), 1, "the sweep had already taken it out of Q");
+        assertEq(handler.expiredReleases(), 1);
+        handler.setInventoryTarget(SEED_TARGETS); // targets set (seed % 3 == 0)
+        assertEq(handler.targetChangesOk(), 1);
+        handler.allocate(1 | 1 << 4, 1_500_000 ether, 1 days); // more than the room, within N - Q - R - D
+        assertGt(handler.roomRefusals(), 0, "the room rule refused it");
+        handler.longWarp(35 days);
+        handler.redeem(1, 1000 ether, false); // sweeps both assets after everything has ended
+        invariant_ringMatchesGhostModel();
+        invariant_liveBucketsResident();
+        invariant_commitmentLedgerRules();
+        invariant_reservedIsExactAndBacked();
+        invariant_exposureAndHookReserved();
+        invariant_equationsFromRawSources();
     }
 
     /// @notice The authorization actions make progress and their checks are live: a signed activation, a stale one, a

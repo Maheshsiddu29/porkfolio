@@ -87,6 +87,7 @@ contract GovernanceLivenessHandler is Test {
     uint256 public longExecuted;
     uint256 public longBlocked;
     uint256 public restrictedExecutions; // L2 cases: executions the property required
+    uint256 public restrictedWithoutRelease; // of those, executed by a batch that released nothing (V-8)
     uint256 public expiredOps; // changes canceled after their window closed
     uint256 public preEtaRotations; // `rotateBeforeEta` calls that rotated
     uint256 public execAttempts; // `govExecute` calls that reached `execute`
@@ -396,13 +397,17 @@ contract GovernanceLivenessHandler is Test {
             return;
         }
         bool required = restricted && restrictedAt + vault.MAX_HORIZON() <= _now();
-        _releaseExpired();
+        // Half the attempts release nothing: with the expiry ring, expired commitments leave Q at the batch's own
+        // processQueue sweep, so L2 must hold without any release (V-8).
+        bool releases = offsetSeed & 1 == 0;
+        if (releases) _releaseExpired();
         _drainQueue();
         ++execAttempts;
         vm.prank(govAdmin);
         try gov.execute(address(vault), op) {
             ++longExecuted;
             if (required) ++restrictedExecutions;
+            if (required && !releases) ++restrictedWithoutRelease;
             if (vault.pendingShares() != 0) ++longWhilePending;
             if (_now() < opQueuedAt + gov.LONG_DELAY() || _now() > opQueuedAt + gov.LONG_DELAY() + gov.GRACE()) {
                 ++delayViolations;
@@ -420,7 +425,7 @@ contract GovernanceLivenessHandler is Test {
 
     function warp(uint256 secondsSeed) external step {
         vm.warp(_now() + bound(secondsSeed, 1 hours, 10 days));
-        _releaseExpired();
+        if (secondsSeed & 1 == 0) _releaseExpired(); // anyone may; half the time nobody does
     }
 }
 
@@ -537,6 +542,7 @@ contract GovernanceLivenessInvariantsTest is VaultTestBase {
         console2.log("COV longExecuted", handler.longExecuted());
         console2.log("COV longBlocked", handler.longBlocked());
         console2.log("COV restrictedExecutions", handler.restrictedExecutions());
+        console2.log("COV restrictedWithoutRelease", handler.restrictedWithoutRelease());
         console2.log("COV expiredOps", handler.expiredOps());
         console2.log("COV preEtaRotations", handler.preEtaRotations());
         console2.log("COV execAttempts", handler.execAttempts());

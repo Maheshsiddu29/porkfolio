@@ -41,6 +41,15 @@ CAMPAIGNS = {
             "finalizedOk": 0.80,  # 0.42 (0.38-0.55)
             "claimsOk": 0.85,  # 0.45 (0.45-0.58)
             "releasesOk": 0.35,  # 0.08 (0.08-0.16)
+            # Set in C02 (docs/implementation/C02_COMMITMENT_LEDGER.md section 10.6), same method; range over bases
+            # 13, 101, 4001, 65537.
+            "expirySweeps": 0.50,  # 0.14 (0.14-0.25)
+            "expiredReleases": 0.55,  # 0.23 (0.23-0.31)
+            "releasesAfterSweep": 0.70,  # 0.28 (0.28-0.44)
+            "targetChangesOk": 0.30,  # 0.11 (0.05-0.12)
+            # 0.86 (0.83-0.88): a room refusal needs targets set in the run. Four standard deviations would gate
+            # nothing; 0.98 fails only when at most one run in 64 reaches it.
+            "roomRefusals": 0.98,
         },
     ),
     "oracle": (
@@ -85,6 +94,9 @@ CAMPAIGNS = {
             # 0.80 (0.69-0.80). Four standard deviations above 0.80 is 1.0, which would gate nothing; 0.98 (3.6 sigma)
             # fails only when at most one run in 64 reaches a blocked LONG_DELAY attempt.
             "longBlocked": 0.98,
+            # Set in C02: an L2-required execution by a batch that released nothing. 0.69 (0.69-0.84); gated like
+            # longBlocked.
+            "restrictedWithoutRelease": 0.98,
         },
     ),
 }

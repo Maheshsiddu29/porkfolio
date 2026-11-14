@@ -344,6 +344,102 @@ contract ProductionArtifactGasTest is Test {
     }
 
     // ------------------------------------------------------------------
+    // Expiry ring (C02)
+    // ------------------------------------------------------------------
+
+    /// @dev A 1,000-token allocation of asset1 on Hook A expiring at the end of bucket `bucket` (hours since 1970).
+    function _reserveIn(uint256 bucket) internal returns (uint256) {
+        ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, 1000 ether);
+        req.expiry = uint64(bucket * 1 hours);
+        req.deadline = uint64(block.timestamp);
+        vm.prank(curator);
+        return auth.activateDirect(req);
+    }
+
+    function _benchReserve(string memory label, uint256 bucket) internal {
+        ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, 1000 ether);
+        req.expiry = uint64(bucket * 1 hours);
+        req.deadline = uint64(block.timestamp);
+        vm.prank(curator);
+        uint256 g = gasleft();
+        auth.activateDirect(req);
+        console2.log(string.concat("BENCH ring reserve ", label, ":"), g - gasleft());
+    }
+
+    function _benchSweep(string memory label) internal {
+        uint256 g = gasleft();
+        vault.processQueue(0);
+        console2.log(string.concat("BENCH ring processQueue(0) ", label, ":"), g - gasleft());
+    }
+
+    /// @notice Reservation creation by a curator that already holds one, into: the bucket another allocation uses;
+    ///         a slot index never written before; a slot reused after wrap-around (it held an ended, swept bucket);
+    ///         and after a quiet period, so that the reservation's own sweep walks 32 populated buckets first.
+    function test_bench_ring_reserve() public {
+        uint256 c = block.timestamp / 1 hours;
+        _reserveIn(c + 24);
+        _reserveIn(c + 700); // keeps Q_1 non-zero and maxBucket ahead in every case below
+        uint256 snap = vm.snapshotState();
+        _benchReserve("same bucket", c + 24);
+        vm.revertToState(snap);
+        _benchReserve("fresh slot", c + 25);
+        vm.revertToState(snap);
+        vm.warp((c + 24) * 1 hours + 1);
+        vault.processQueue(0); // the walk reaches bucket c + 24, which is swept; its slot keeps the stale tag
+        _benchReserve("reused slot (wrap-around)", c + 24 + 720);
+        vm.revertToState(snap);
+        for (uint256 i = 1; i <= 32; ++i) {
+            _reserveIn(c + i);
+        }
+        _reserveIn(c + 720); // keeps maxBucket ahead, so the sweep walks
+        vm.warp((c + 32) * 1 hours);
+        _benchReserve("after a quiet period (sweep walks 32 populated buckets)", c + 700);
+    }
+
+    /// @notice `processQueue(0)`, which only sweeps both assets: nothing ended since the last sweep; one ended bucket;
+    ///         32 ended, populated buckets (the cap); every recorded bucket ended (the O(1) branch).
+    function test_bench_ring_sweep() public {
+        uint256 c = block.timestamp / 1 hours;
+        for (uint256 i = 1; i <= 32; ++i) {
+            _reserveIn(c + i);
+        }
+        _reserveIn(c + 720);
+        vault.processQueue(0); // asset0's ring header is written once here, as in steady state
+        uint256 snap = vm.snapshotState();
+        _benchSweep("nothing ended");
+        vm.revertToState(snap);
+        vm.warp((c + 1) * 1 hours);
+        _benchSweep("one bucket ended");
+        vm.revertToState(snap);
+        vm.warp((c + 32) * 1 hours);
+        _benchSweep("32 populated buckets ended (cap)");
+        vm.revertToState(snap);
+        vm.warp((c + 720) * 1 hours);
+        _benchSweep("everything ended (O(1))");
+    }
+
+    /// @notice Release of an expired allocation whose capacity a sweep already took out of Q: only the curator's and
+    ///         the hook's totals change. And an instant redemption whose own sweep recognizes the expiry of all
+    ///         reserved asset1.
+    function test_bench_ring_releaseAfterSweep_and_redeemAfterExpiry() public {
+        uint256 c = block.timestamp / 1 hours;
+        uint256 id = _reserveIn(c + 2);
+        _allocate(curator, keyB, c1, uint128(VAULT_FUNDING - 1000 ether)); // the rest of asset1, expiring in a day
+        uint256 snap = vm.snapshotState();
+        vm.warp((c + 2) * 1 hours);
+        vault.processQueue(0);
+        uint256 g = gasleft();
+        vault.release(id);
+        console2.log("BENCH ring release after its bucket was swept:", g - gasleft());
+        vm.revertToState(snap);
+        vm.warp(block.timestamp + 2 days);
+        vm.prank(lp0);
+        g = gasleft();
+        vault.redeem(1000 ether, 0, 0, lp0, false);
+        console2.log("BENCH ring redeem instant, sweep recognizes every expiry (O(1)):", g - gasleft());
+    }
+
+    // ------------------------------------------------------------------
     // Curator lifecycle
     // ------------------------------------------------------------------
 
