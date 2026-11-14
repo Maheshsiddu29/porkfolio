@@ -18,8 +18,12 @@ import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 ///      2. Directional floor (`dynamicFloors`). With reference mid `P` (raw currency1 per raw currency0, Q64.96),
 ///         uncertainty `u` and edge `e` (pips), the vault sells asset1 only for at least
 ///         `F1 = ceil(ceil(2^192 / P) * (1e6 + u + e) / 1e6)` raw asset0 per raw asset1 (Q64.96), and sells asset0
-///         only for at least `F0 = ceil(P * (1e6 + u + e) / 1e6)` raw asset1 per raw asset0. So it never trades at a
-///         price any live source allows to be at or past the market, plus `e`. `F0 * F1 >= 2^192 (1 + (u + e) / 1e6)^2`:
+///         only for at least `F0 = ceil(P * (1e6 + u + e) / 1e6)` raw asset1 per raw asset0. The adapter's `u` covers
+///         every allowed price `p` multiplicatively, `P / (1 + u) <= p <= P (1 + u)` (`IMarketRiskAdapter`), so
+///         `F0 >= P (1 + u) + e P >= max p + e P` and `F1 >= (1 / P)(1 + u) + e / P >= 1 / min p + e / P`: the vault
+///         never trades at a price any live source allows to be at or past the market, plus `e` of the mid, in
+///         either direction. (A `u` measured from the mid alone covers only the first: G04 finding F-1.)
+///         `F0 * F1 >= 2^192 (1 + (u + e) / 1e6)^2`:
 ///         at every reference the pair satisfies the directional-consistency rule by construction, with no price set
 ///         by anyone.
 ///

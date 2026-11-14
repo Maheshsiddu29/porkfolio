@@ -514,12 +514,12 @@ def bracket_reference(sources: list[BracketSource], now: int, min_sources: int =
     Each live source says the market is in [lo_s, hi_s] = [floor(p (PIPS - d) / PIPS), ceil(p (PIPS + d) / PIPS)].
     The market is in every bracket at once, so in L = max lo_s, H = min hi_s. If L > H the sources contradict each
     other beyond their own error bounds: at least one is wrong or not live, and the reference is refused. Otherwise
-    M = floor((L + H) / 2) and u = max(ceil((H - M) PIPS / M), ceil((M - L) PIPS / M)), so M (1 +- u) covers [L, H]:
-    quotes with half-spread >= u straddle every price the sources allow.
+    M = floor((L + H) / 2) and u = max(ceil((H - M) PIPS / M), ceil((M - L) PIPS / L)), so [M / (1 + u), M (1 + u)]
+    covers [L, H]: quotes with half-spread >= u straddle every price the sources allow, read in either direction.
 
     Example: p_1 = 2,048.39 and p_2 = 2,050.31 (the Unichain Chainlink and RedStone ETH/USD readings of 2026-11-10),
     both d = 50 bps: brackets [2,038.15, 2,058.63] and [2,040.06, 2,060.56]; L = 2,040.06, H = 2,058.63, M = 2,049.35,
-    u = 4,532 pips (45.3 bps). Two sources 1.1% apart with d = 50 bps each: refused.
+    u = 4,553 pips (45.5 bps; 4,532 measured from M alone). Two sources 1.1% apart with d = 50 bps each: refused.
 
     Refusals: SequencerDown, SequencerGracePeriod, ReferenceUnavailable (no answer or a future timestamp),
     InsufficientSources (fewer than `min_sources` fresh), ReferenceDivergence (empty intersection)."""
@@ -548,13 +548,16 @@ def bracket_reference(sources: list[BracketSource], now: int, min_sources: int =
 
 
 def mid_and_uncertainty(lo: int, hi: int) -> tuple[int, int]:
-    """`ReferenceBracket.midAndUncertainty`: centre of [lo, hi] and its half-width in pips of the centre, rounded up."""
+    """`ReferenceBracket.midAndUncertainty`: centre m of [lo, hi] and the smallest multiplicative half-width u (pips,
+    rounded up) with m / (1 + u) <= lo and m (1 + u) >= hi, so [m / (1 + u), m (1 + u)] covers [lo, hi] read in either
+    direction. The lower term divides by lo, not m: measured from m, (1 / m)(1 + u) would fall short of 1 / lo by about
+    u^2 / (1 - u) (G04 finding F-1)."""
     if lo > hi:
         raise Revert("ReferenceDivergence", lo, hi)
     if lo == 0:
         raise Revert("DegenerateBracket")
     m = lo + (hi - lo) // 2
-    return m, max(mul_div_up(hi - m, PIPS, m), mul_div_up(m - lo, PIPS, m))
+    return m, max(mul_div_up(hi - m, PIPS, m), mul_div_up(m - lo, PIPS, lo))
 
 
 def pair_bracket(a0: int, a1: int, d0: int, d1: int, e: int) -> tuple[int, int]:

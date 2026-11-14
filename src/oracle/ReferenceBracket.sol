@@ -10,9 +10,10 @@ import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 /// @dev Why brackets. A push feed with deviation threshold `d` writes a new answer when the market moves more than
 ///      `d` from its last answer, so while the feed is live the market is within `[p(1 - d), p(1 + d)]` of its last
 ///      answer `p`. Several independent feeds are all true at once, so the market is in the intersection of their
-///      brackets. The intersection gives the mid `M` (its centre) and the uncertainty `u` (its half-width relative to
-///      `M`). If the intersection is empty, the feeds contradict their own error bounds: one is wrong or not live, and
-///      the reference is refused. The threshold is a configuration of the feed, not a measurement; the adapter adds a
+///      brackets. The intersection `[L, H]` gives the mid `M` (its centre) and the uncertainty `u`, the smallest
+///      multiplicative half-width with `M / (1 + u) <= L` and `M (1 + u) >= H`, so that the range `[M / (1 + u),
+///      M (1 + u)]` covers the intersection seen from either asset (see `midAndUncertainty`). If the intersection is
+///      empty, the feeds contradict their own error bounds: one is wrong or not live, and the reference is refused. The threshold is a configuration of the feed, not a measurement; the adapter adds a
 ///      margin for publication latency.
 ///
 ///      A pool price is a ratio of two USD legs. For one source with leg answers `a0` (currency0/USD) and `a1`
@@ -80,23 +81,38 @@ library ReferenceBracket {
     }
 
     /// @notice Mid and uncertainty of the intersection `[low, high]` of the live sources' brackets.
-    /// @dev Reverts with `ReferenceDivergence` if `low > high` and with `DegenerateBracket` if `low` is 0. `mid = floor((low + high) / 2)` and
-    ///      `u = max(ceil((high - mid) * 1e6 / mid), ceil((mid - low) * 1e6 / mid))`, so `mid * (1 +- u)` covers the
-    ///      whole intersection: a quote whose half-spread is at least `u` straddles every market price the sources
-    ///      allow.
+    /// @dev Reverts with `ReferenceDivergence` if `low > high` and with `DegenerateBracket` if `low` is 0.
+    ///
+    ///        mid = floor((low + high) / 2)
+    ///        u   = max(ceil((high - mid) * 1e6 / mid), ceil((mid - low) * 1e6 / low))
+    ///
+    ///      Why each term. A price can be read in both directions: raw currency1 per raw currency0 (`p`) and its
+    ///      reciprocal. Consumers widen `mid` by `(1 + u)` in the first direction and `1 / mid` by `(1 + u)` in the
+    ///      second (the vault's floors `mid (1 + u + e)` and `(1 / mid)(1 + u + e)`; the hooks' band-edge cap). Covering
+    ///      the intersection therefore needs both
+    ///        mid (1e6 + u) >= high * 1e6           <=  u >= (high - mid) * 1e6 / mid   (first term)
+    ///        (1 / mid)(1e6 + u) >= 1e6 / low        <=  u >= (mid - low) * 1e6 / low    (second term)
+    ///      Each term is rounded up, so each inequality holds exactly in integers. The second term divides by `low`,
+    ///      not `mid`: measured from the mid, `mid (1 - u) <= low` would hold, but `(1 / mid)(1 + u)` is then below
+    ///      `1 / low` by about `u^2 / (1 - u)`, and a consumer pricing the reciprocal could quote inside the band.
+    ///      Because `mid - low <= high - mid + 1` and `low < mid`, the second term is the larger one except for
+    ///      rounding; it exceeds `(high - low) / (2 mid)` by about its square: at a half-width of 8,200 pips, by 68.
+    ///
+    ///      Overflow: `(mid - low) * 1e6` and `(high - mid) * 1e6` are 512-bit products in FullMath. A `low` so small
+    ///      that `u` would not fit in 256 bits reverts there (a refusal); every consumer refuses far smaller values.
     ///
     ///      Example (Unichain ETH/USD, 2026-11-10): Chainlink 2,048.39 and RedStone 2,050.31, both 50 bps: the
-    ///      intersection is [2,040.06, 2,058.63], mid 2,049.35, `u` = 4,532 pips.
+    ///      intersection is [2,040.06, 2,058.63], mid 2,049.35, `u` = 4,553 pips (the mid-relative half-width is 4,532).
     /// @param low Largest low end over the live sources, Q64.96.
     /// @param high Smallest high end over the live sources, Q64.96.
     /// @return mid Reference mid, Q64.96.
-    /// @return uncertainty Half-width relative to the mid, pips, rounded up.
+    /// @return uncertainty Multiplicative half-width covering `[low, high]` in both directions, pips, rounded up.
     function midAndUncertainty(uint256 low, uint256 high) internal pure returns (uint256 mid, uint256 uncertainty) {
         if (low > high) revert ReferenceDivergence(low, high);
         if (low == 0) revert DegenerateBracket();
         mid = low + (high - low) / 2;
         uint256 up = FullMath.mulDivRoundingUp(high - mid, PIPS, mid);
-        uint256 down = FullMath.mulDivRoundingUp(mid - low, PIPS, mid);
+        uint256 down = FullMath.mulDivRoundingUp(mid - low, PIPS, low);
         uncertainty = up > down ? up : down;
     }
 }

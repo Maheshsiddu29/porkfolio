@@ -29,8 +29,10 @@ import {CumulativePricing} from "../hooks/CumulativePricing.sol";
 ///      `minEdge`, whatever the state. Consequences: floors pivoted at `P` accept every quote; a closed cycle of trades
 ///      at a fixed `P` loses at least `2 * minEdge` of its volume; a hook that adds its own fee on top of `h` keeps
 ///      the property. In band-edge mode (`Config.bandEdge`) the same holds with the edge measured from the whole
-///      uncertainty band `P * (1 +- uncertainty)` instead of from `P`, which is what a vault that independently refuses
-///      prices inside that band needs. The vault's own edge must then stay strictly inside `minEdge`: with equal edges
+///      uncertainty band `[P / (1 + uncertainty), P * (1 + uncertainty)]` instead of from `P`, which is what a vault
+///      that independently refuses prices inside that band needs. The ask covers the band's low end only because the
+///      reference's uncertainty is multiplicative (`IMarketRiskAdapter.Reading.uncertaintyPips`): the ask at the cap
+///      edge is `(1 / P)(1 + minEdge + uncertainty)` currency0 per currency1, at least `1 / (P / (1 + uncertainty))`. The vault's own edge must then stay strictly inside `minEdge`: with equal edges
 ///      only the vault floor's rounding is left as margin, and that rounding can refuse a quote.
 ///
 ///      Trust. The functions are pure and check nothing about the caller. The reference price and the vault state
@@ -58,7 +60,8 @@ library InventoryPricing {
     /// @param minEdge Smallest distance between any quote and the reference, pips.
     /// @param maxSpread Largest accepted half-spread (base plus uncertainty), pips. Below 1,000,000.
     /// @param maxDeviation Risk cap on `|I|`, pips of `T_1`.
-    /// @param bandEdge True: every quote stays `minEdge` beyond the whole uncertainty band `P * (1 +- uncertainty)`,
+    /// @param bandEdge True: every quote stays `minEdge` beyond the whole uncertainty band
+    ///        `[P / (1 + uncertainty), P * (1 + uncertainty)]`,
     ///        not only beyond `P` (the cap is computed for an edge of `minEdge + uncertainty`). Required wherever the
     ///        vault independently refuses prices inside the band. False reproduces the earlier mid-only behaviour.
     struct Config {

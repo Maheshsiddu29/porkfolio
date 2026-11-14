@@ -142,18 +142,28 @@ contract OracleFailureExecutionTest is VaultTestBase {
     }
 
     // ------------------------------------------------------------------
-    // F-1. Scenario 4 (valid but very uncertain) and 1 (stale primary): the asset1 floor inside the band
+    // F-1. Scenario 4 (valid but very uncertain) and 1 (stale primary): the asset1 floor and the band's bottom
     // ------------------------------------------------------------------
 
-    /// @notice Reproduces F-1 through `exchange`. With one source required, Chainlink stale and RedStone alone in its
-    ///         push tier, the reading is valid with u = 10,200 pips, under the vault's 20,000 bound. RedStone allows
-    ///         asset0 to be worth as little as 0.9949 / 1.0051 asset1, i.e. asset1 to be worth up to 1.0051 / 0.9949
-    ///         asset0. The vault's asset1 floor is (1 / P)(1 + u + e), and because u is measured from the mid it is
-    ///         below 1 / low by about u^2 / (1 - u) = 105 pips, more than the 100-pip edge: the vault sells asset1
-    ///         for less than a price RedStone still allows. The guardian closes the gap at once by lowering the
-    ///         bound to 9,950 pips, the largest u with e (1e6 - u) >= u^2. With two sources required (the rehearsal
-    ///         configuration) u stays near 8,200 and the floor is outside the band.
-    function test_F1_asset1FloorInsideBand_whenUncertaintyExceedsEdgeBound() public {
+    /// @dev The uncertainty the adapter reported before the G04 correction: both terms measured from the mid.
+    function _midRelativeU(uint256 low, uint256 high) internal pure returns (uint256 mid, uint256 u) {
+        mid = low + (high - low) / 2;
+        uint256 up = FullMath.mulDivRoundingUp(high - mid, 1e6, mid);
+        uint256 down = FullMath.mulDivRoundingUp(mid - low, 1e6, mid);
+        u = up > down ? up : down;
+    }
+
+    /// @notice F-1 and its correction, through `exchange`. With one source required, Chainlink stale and RedStone
+    ///         alone in its push tier, RedStone allows asset0 to be worth as little as 0.9949 / 1.0051 asset1, i.e.
+    ///         asset1 up to 1.0051 / 0.9949 asset0. The vault's asset1 floor is (1 / P)(1 + u + e).
+    ///         - Before the correction the adapter measured u from the mid (10,200 pips here). That floor is below
+    ///           1 / low by about u^2 / (1 - u) = 105 pips, more than the 100-pip edge: the original counterexample,
+    ///           recomputed here from the same bracket. The vault now refuses that input.
+    ///         - The corrected adapter measures the lower term from the low end (10,305 pips). Its floor is at or
+    ///           above 1 / low, and the fill at its minimum succeeds.
+    ///         The vault's 20,000 bound accepts both readings; the edge is unchanged. With two sources required (the
+    ///         rehearsal configuration) Chainlink's narrower bracket sets u near 8,265 and the floor is outside too.
+    function test_F1_asset1FloorCoversBandBottom_aboveOldFailureThreshold() public {
         PriceRiskAdapter one = _adapter(cl0, cl1, rs0, rs1, 1);
         vm.warp(T0 + 88_200);
         _push(1e8, 1e8, T0 - 600, vm.getBlockTimestamp() - 600); // Chainlink stale; RedStone in its push tier
@@ -161,26 +171,37 @@ contract OracleFailureExecutionTest is VaultTestBase {
         vault.setRiskAdapter(one);
         IMarketRiskAdapter.Reading memory r = one.currentReference();
         assertEq(r.liveSources, 1);
-        assertGt(r.uncertaintyPips, 9950);
         assertLe(r.uncertaintyPips, MAX_U, "accepted by the vault");
-        console2.log("u, pips (RedStone alone)", r.uncertaintyPips);
+
+        (uint256 low, uint256 high) = ReferenceBracket.pairBracket(1e8, 1e8, 5100, 5100, 0);
+        (uint256 mid, uint256 uOld) = _midRelativeU(low, high);
+        assertEq(mid, r.priceX96);
+        assertEq(uOld, 10_200, "the pre-correction reading");
+        assertGt(r.uncertaintyPips, uOld);
+        assertGt(uOld * uOld, uint256(EDGE) * (1e6 - uOld), "above the old failure threshold");
+        console2.log("u, pips (RedStone alone): before / after the correction", uOld, r.uncertaintyPips);
 
         uint256 out = 1000 ether;
         uint256 id = _allocM(c1, uint128(out * 3), 1);
+        uint256 oldMinIn = FullMath.mulDivRoundingUp(out, VaultRiskBoundary.dynamicFloor(mid, uOld, EDGE, true), Q96);
+        assertLt(oldMinIn * 994_900, out * 1_005_100, "old floor: asset1 sold below 1 / RedStone's bottom");
         uint256 minIn = _minIn(c1, out);
-        assertLt(minIn * 994_900, out * 1_005_100, "asset1 sold below 1 / RedStone's bottom");
-        console2.log("asset0 short of RedStone's bound, raw", out * 1_005_100 / 994_900 - minIn);
-        _trade(id, c1, minIn, out);
-
-        vm.prank(guardian);
-        vault.setRiskBounds(EDGE, 9950);
+        assertGe(minIn * 994_900, out * 1_005_100, "corrected floor: at or above 1 / RedStone's bottom");
+        console2.log("asset0 in for 1,000 asset1: old / corrected", oldMinIn, minIn);
         _tradeExpect(
             id,
             c1,
-            minIn,
+            oldMinIn,
             out,
-            abi.encodeWithSelector(VaultRiskBoundary.UncertaintyTooHigh.selector, r.uncertaintyPips, 9950)
+            abi.encodeWithSelector(ISharedCommitmentVault.PriceBelowFloor.selector, oldMinIn, minIn)
         );
+        _trade(id, c1, minIn, out);
+
+        // The asset0 direction was never affected and stays at or above RedStone's top.
+        uint256 id0 = _allocM(c0, uint128(out), 1);
+        uint256 minIn0 = _minIn(c0, out);
+        assertGe(minIn0 * 994_900, out * 1_005_100, "asset0 at or above RedStone's top");
+        _trade(id0, c0, minIn0, out);
 
         // Two sources required, both live: Chainlink's narrower bracket is the band; the floor is outside it.
         _push(1e8, 1e8, vm.getBlockTimestamp() - 600, vm.getBlockTimestamp() - 600);

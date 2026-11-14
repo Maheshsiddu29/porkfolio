@@ -153,9 +153,10 @@ contract OracleFailureModesTest is Test {
     /// @notice When a source goes stale and the adapter (with `minSources = 1`) prices from the other alone, the band
     ///         widens to that source's bracket. Each directional floor stays at or beyond the top (or bottom) of every
     ///         price the remaining source allows. It is not true that each floor only rises: the edge `e` is applied
-    ///         to the mid, and when the remaining bracket's mid is lower the asset0 floor falls by about
-    ///         `e * (mid_2 - mid_1)`. With the configured 1 bp edge this is below one pip; with a 5% edge it is
-    ///         clearly visible. The asset1 floor rises.
+    ///         to the mid, and when the remaining bracket's mid is lower the asset0 floor loses about
+    ///         `e * (mid_2 - mid_1)`, while the wider bracket's larger `u` raises it. At the configured 1 bp edge the
+    ///         asset0 floor rises (by about 49 pips here; before the G04 correction of `u` it fell by 0.28 pip); with
+    ///         a 5% edge it falls. The asset1 floor rises.
     function test_fallbackToOneSource_staysOutsideRemainingBand() public {
         MockAggregator a0 = new MockAggregator(8);
         MockAggregator a1 = new MockAggregator(8);
@@ -195,9 +196,7 @@ contract OracleFailureModesTest is Test {
             console2.log("edge pips", edge);
             console2.log("asset0 floor Q96: one source / two", f0One, f0Two);
             if (edge == 100) {
-                // Below one pip of the floor either way.
-                uint256 d = f0Two > f0One ? f0Two - f0One : f0One - f0Two;
-                assertLt(d * 1e6, f0Two, "asset0 floor moves by less than one pip at the configured edge");
+                assertGt(f0One, f0Two, "at the configured edge the asset0 floor rises");
             } else {
                 assertLt(f0One, f0Two, "with a 5% edge the asset0 floor visibly falls");
             }
@@ -258,18 +257,14 @@ contract OracleFailureModesTest is Test {
     }
 
     /// @notice For random answers, thresholds, feed and token decimals, the input the vault requires for any output,
-    ///         measured exactly against every live source's bracket:
-    ///         - selling asset0, it is always at or above the lowest of the sources' tops: no combination of decimal
-    ///           shift, bracket rounding, mid/uncertainty rounding, floor rounding and the final
-    ///           `ceil(amountOut * floor / 2^96)` puts the price inside the band;
-    ///         - selling asset1, the same holds only when the edge covers the second-order gap,
-    ///           `e * (1e6 - u) >= u^2` (pips). `u` is the band's half-width relative to the mid, so the band's bottom
-    ///           can be as low as `P (1 - u)`, whose reciprocal is `(1 / P)(1 + u + u^2 + ...)`, while the floor is
-    ///           `(1 / P)(1 + u + e)`. Below that edge the floor can sit inside the band (G04 report §5, F-1); the
-    ///           counterexample this fuzz test first found is reproduced through the vault in
-    ///           `OracleFailureExecution.t.sol`.
-    ///         Readings the adapter refuses (degenerate or contradictory brackets) and floors that overflow (refused
-    ///         by the vault) are skipped; both are refusals.
+    ///         measured exactly against every live source's bracket, is never inside the band: selling asset0 it is at
+    ///         or above the lowest of the sources' tops; selling asset1 at or above the reciprocal of the highest
+    ///         bottom. So no combination of decimal shift, bracket rounding, mid/uncertainty rounding, floor rounding
+    ///         and the final `ceil(amountOut * floor / 2^96)` puts a fill inside the band, in either direction and for
+    ///         any edge including zero. Before the G04 correction the asset1 half held only when
+    ///         `e * (1e6 - u) >= u^2` (finding F-1); the companion test counts how many cases the old uncertainty
+    ///         would have failed. Readings the adapter refuses (degenerate or contradictory brackets) and floors
+    ///         that overflow (refused by the vault) are skipped; both are refusals.
     function testFuzz_normalizedFloorNeverInsideTheBand(
         uint256[2] memory answers,
         uint256[4] memory devs,
@@ -284,7 +279,8 @@ contract OracleFailureModesTest is Test {
     }
 
     /// @notice Non-vacuity of the fuzz test above: over 300 derived cases, each kind of exact check runs often
-    ///         (asset0 with one and two sources, asset1 inside its proven condition) and refusals stay a minority.
+    ///         (asset0 with one and two sources, asset1, and asset1 cases the pre-correction uncertainty would have
+    ///         failed) and refusals stay a minority.
     function test_normalizedFloor_checksAreExercised() public {
         uint256[5] memory hits;
         for (uint256 i; i < 300; ++i) {
@@ -301,19 +297,20 @@ contract OracleFailureModesTest is Test {
                 hits[k] += c[k];
             }
         }
-        // [refused, asset0 one source, asset0 two sources, asset1 checked, asset1 outside the proven condition]
+        // [refused, asset0 one source, asset0 two sources, asset1 checked, asset1 outside the pre-correction bound]
         console2.log("refused / asset0 one / asset0 two", hits[0], hits[1], hits[2]);
-        console2.log("asset1 checked / asset1 outside F-1 bound", hits[3], hits[4]);
+        console2.log("asset1 checked / of which outside the pre-correction bound", hits[3], hits[4]);
         assertLt(hits[0], 60, "refusals");
         assertGt(hits[1], 60, "asset0, one source");
         assertGt(hits[2], 60, "asset0, two sources");
-        assertGt(hits[3], 100, "asset1 within e (1e6 - u) >= u^2");
-        assertGt(hits[4], 10, "asset1 outside the condition also occurs");
+        assertGt(hits[3], 200, "asset1 checked");
+        assertGt(hits[4], 10, "asset1 cases outside the pre-correction bound occur and are checked");
     }
 
     /// @dev Builds source A from two feeds with fuzzed decimals and answers, and source B from A's answers moved by up
     ///      to 2% per leg (so the two usually overlap), with the vault's 18-or-other token decimals. Returns counts:
-    ///      [refused, asset0 checked with one source, with two, asset1 checked, asset1 skipped as outside F-1's bound].
+    ///      [refused, asset0 checked with one source, with two, asset1 checked, asset1 cases with
+    ///      `e (1e6 - u) < u^2`, which only the corrected uncertainty covers].
     function _checkBand(
         uint256[2] memory answers,
         uint256[4] memory devs,
@@ -372,10 +369,7 @@ contract OracleFailureModesTest is Test {
         uint256 u = r.uncertaintyPips;
         for (uint256 k; k < 2; ++k) {
             bool sell1 = k == 1;
-            if (sell1 && (u >= 1e6 || edge * (1e6 - u) < u * u)) {
-                c[4] += 1; // F-1: not covered by the edge
-                continue;
-            }
+            if (sell1 && (u >= 1e6 || edge * (1e6 - u) < u * u)) c[4] += 1; // the region F-1 affected
             uint256 inAmt;
             try this.requiredIn(r.priceX96, u, edge, sell1, amountOut) returns (uint256 x) {
                 inAmt = x;

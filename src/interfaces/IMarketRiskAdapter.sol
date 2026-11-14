@@ -10,7 +10,11 @@ pragma solidity 0.8.26;
 interface IMarketRiskAdapter {
     /// @notice A validated reference.
     /// @param priceX96 Mid, raw currency1 per raw currency0, Q64.96.
-    /// @param uncertaintyPips Half-width of the price range every live source allows, relative to the mid, pips.
+    /// @param uncertaintyPips Smallest `u` (pips, rounded up) with `priceX96 / (1 + u) <= p <= priceX96 * (1 + u)` for
+    ///        every price `p` the live sources allow: a multiplicative half-width, so widening the mid by `(1 + u)`
+    ///        covers the range read as currency1 per currency0, and widening `1 / priceX96` by `(1 + u)` covers it
+    ///        read as currency0 per currency1. A half-width measured from the mid alone is not enough for the second
+    ///        reading (it falls short by about `u^2`).
     /// @param validUntil Earliest time a source used here passes its staleness limit, seconds.
     /// @param liveSources Number of sources that contributed.
     struct Reading {

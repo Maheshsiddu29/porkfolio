@@ -34,6 +34,8 @@ from model import (  # noqa: E402
     depth_per_share_for,
     hook_a_quote,
     hook_b_quote,
+    mid_and_uncertainty,
+    mul_div_up,
 )
 
 E18 = 10**18
@@ -358,7 +360,7 @@ class BracketReference(unittest.TestCase):
         src = [BracketSource(int(2048.39 * Q96), 100, 5_000, 90_000), BracketSource(int(2050.31 * Q96), 100, 5_000,
                                                                                          90_000)]
         r = bracket_reference(src, 200)
-        self.assertEqual(r.uncertainty, 4_532)
+        self.assertEqual(r.uncertainty, 4_553)  # 4,532 before G04 F-1 (lower term measured from the mid)
         self.assertAlmostEqual(r.price_x96 / Q96, 2049.345, places=2)
 
     def test_refusals(self):
@@ -395,6 +397,23 @@ class BracketReference(unittest.TestCase):
             r = bracket_reference(srcs, 1)
             self.assertLessEqual(r.price_x96 * (PIPS - r.uncertainty), m * PIPS)
             self.assertGreaterEqual(r.price_x96 * (PIPS + r.uncertainty), m * PIPS)
+            # Read in the other direction: M / (1 + u) <= m, i.e. (1 / M)(1 + u) >= 1 / m (G04 F-1).
+            self.assertLessEqual(r.price_x96 * PIPS, m * (PIPS + r.uncertainty))
+
+    def test_uncertainty_covers_bracket_both_directions(self):
+        """For any bracket, M (1 + u) >= H and M <= L (1 + u), exactly in integers. The second fails for the earlier
+        mid-relative definition once the bracket is wide enough (G04 F-1)."""
+        rng = random.Random(2004)
+        old_fails = 0
+        for _ in range(5_000):
+            lo = rng.randint(1, 2**160)
+            hi = lo + rng.randint(0, lo // rng.choice([10, 100, 1_000, 10**6]) + 1)
+            m, u = mid_and_uncertainty(lo, hi)
+            self.assertGreaterEqual(m * (PIPS + u), hi * PIPS)
+            self.assertLessEqual(m * PIPS, lo * (PIPS + u))
+            u_old = max(mul_div_up(hi - m, PIPS, m), mul_div_up(m - lo, PIPS, m))
+            old_fails += m * PIPS > lo * (PIPS + u_old)
+        self.assertGreater(old_fails, 100)
 
 
 if __name__ == "__main__":

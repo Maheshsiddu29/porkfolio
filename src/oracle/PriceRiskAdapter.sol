@@ -16,7 +16,7 @@ import {ReferenceBracket} from "./ReferenceBracket.sol";
 ///      Sources. Each source prices the pair from two USD legs (currency0/USD and currency1/USD) of one provider. A
 ///      source is live when both legs answered a positive price, no later than now, within their staleness limits.
 ///      Each live source contributes the bracket `ReferenceBracket.pairBracket` computes; the reference is the centre
-///      of the intersection and the uncertainty its half-width. A leg that answers zero, a negative price, a future
+///      of the intersection and the uncertainty its multiplicative half-width (`ReferenceBracket.midAndUncertainty`). A leg that answers zero, a negative price, a future
 ///      timestamp, or reverts, makes the whole read revert with `FeedUnusable` (fail closed). A leg that is only older
 ///      than its limit makes its source not live; if fewer than `minSources` sources are live the read reverts.
 ///
