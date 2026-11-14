@@ -1,5 +1,12 @@
 # Porkfolio — Oracle Verification on Unichain (Phase 1B-4.1)
 
+> **Correction (G04, 2026-11-13).** The measurements below are unchanged.
+> - **Uncertainty.** The uncertainty here (8,200 pips) uses the pre-G04 definition, measured from the mid on both
+>   sides. The corrected adapter measures the lower side from the bracket's low end (`docs/security/G04_ORACLE_SAFETY.md`
+>   §5, F-1) and reported 8,268 pips on a Unichain fork on 2026-11-13.
+> - **Sequencer feed.** The uptime feed `0x4956…F813` came from Chainlink's feed directory. It is not on Chainlink's L2
+>   Sequencer Uptime Feeds page, which no longer adds networks; see G04 §2.4.
+
 **Status: VERIFIED where stated (read-only).** All on-chain values were read on 2026-11-10 from the public Unichain
 mainnet RPC (`https://mainnet.unichain.org`, chain id 130; block about 63,611,362, timestamp about 1,794,359,743),
 using `cast call` and a local Foundry fork. Nothing was broadcast, no key was used, and no paid or authenticated API

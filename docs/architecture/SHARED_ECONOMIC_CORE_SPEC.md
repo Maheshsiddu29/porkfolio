@@ -88,7 +88,10 @@ straddle still holds per hook, so cycles still lose; what a mismatch breaks is c
 ## 4. Band-edge mode (new)
 
 `Config.bandEdge = true` computes the cap for an edge of `minEdge + u` instead of `minEdge`, so every quote stays
-`minEdge` beyond the whole band `P * (1 +- u)`, not just beyond `P`. The skew room is unchanged, because both `h` and
+`minEdge` beyond the whole band `[P / (1 + u), P (1 + u)]`, not just beyond `P`. That band covers every price the
+sources allow only because `u` is multiplicative (`ReferenceBracket.midAndUncertainty` since G04): the ask at the cap
+edge is `(1/P)(1 + minEdge + u)` currency0 per currency1, which must be at least `1 / L`. With the pre-G04 `u`, measured
+from the mid on both sides, it fell short by about `u²` (G04 finding F-1). The skew room is unchanged, because both `h` and
 the edge grow by `u`, and the cap no longer grows with uncertainty. This mode is required by the vault-side dynamic
 floor, which refuses any price inside the band. `bandEdge = false` reproduces Phase 1B-4 exactly: its 212 vectors pass
 unchanged against the Solidity.

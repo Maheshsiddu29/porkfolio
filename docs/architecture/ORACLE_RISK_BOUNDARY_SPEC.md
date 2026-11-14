@@ -15,6 +15,16 @@ and the code follows the corrected version:
 5. The bound is `sum (h_a − l_a)^+ p_a` per share against the LP's entry basket, **not** "`kappa` of vault value"
    (§3 below overstates it).
 
+**G04 corrections (2026-11-13, `docs/security/G04_ORACLE_SAFETY.md`).** The code follows these; the text below is
+updated where it states the definition:
+6. **`u` is a multiplicative half-width**, `u = max(⌈(H − M)·1e6 / M⌉, ⌈(M − L)·1e6 / L⌉)` for the intersection
+   `[L, H]` and mid `M`. The lower term was measured from `M` before G04 (finding F-1), which let the asset1 floor sit
+   inside the band by about `u² / (1 − u)` minus the edge. The band the vault refuses is `[P / (1 + u), P (1 + u)]`.
+   Readings grow by about `u²`: the Unichain push-only reading is 8,268 pips (8,200 before).
+7. **A missing or malformed leg reverts the whole read**; only a stale leg drops its source (§5).
+8. **The sequencer check** refuses a status round with `startedAt` zero or in the future, and refuses while
+   `now − startedAt ≤ grace` (it accepted at equality before).
+
 Code:
 - `src/SharedCommitmentVault.sol`: `_floorForFill`, `_reading`, `setRiskAdapter`, `setRiskBounds`,
   `setInventoryBounds`;
@@ -61,8 +71,12 @@ Every step rounds up (toward the vault). PROVEN: `F0 * F1 >= 2^192 * (w / 1e6)^2
 is D14-consistent by construction (`testFuzz_floorsConsistent`, `test_floors_are_d14_consistent_at_every_reference`).
 TESTED: every price inside `P (1 +- (u + e))` is refused (`test_floors_refuse_every_price_inside_the_band`).
 
-Example: `P = 2^96`, `u` = 4,532 pips, `e` = 0: selling 1,000 raw units of either asset needs at least
-`ceil(1,004.532)` = 1,005 raw units in.
+Directional coverage (PROVEN, G04): with `u` multiplicative, `F0 ≥ P(1 + u) + eP ≥ H + eP` and
+`F1 ≥ (2^192 / P)(1 + u) + e·2^192/P ≥ 2^192 / L + e·2^192/P`, so each direction refuses every price the sources allow
+(`testFuzz_normalizedFloorNeverInsideTheBand`, exact, both directions, any edge including 0).
+
+Example: `P = 2^96`, `u` = 4,553 pips (4,532 with the pre-G04 definition), `e` = 0: selling 1,000 raw units of either
+asset needs at least `ceil(1,004.553)` = 1,005 raw units in.
 
 **Inventory floor** (R4; `VaultRiskBoundary.inventoryFloor`, `checkInventory`):
 
@@ -121,9 +135,12 @@ market data rules; spreads, depths and fees stay in the hooks; the vault holds o
    independence; governance must (§5 of `CORRELATED_ORACLE_FAILURES.md`: the two Chainlink USDC/USD proxies are one
    source).
 4. **Agreement**: the sources' deviation brackets (threshold plus 1 bp latency margin per leg, both legs stacked for a
-   cross pair) must intersect; the reference is the intersection's centre and `u` its half-width (`ReferenceBracket`).
-5. **Sequencer**: Chainlink L2 sequencer uptime feed (Unichain `0x4956…F813`) up, and at least one hour since its last
-   restart.
+   cross pair) must intersect; the reference is the intersection's centre and `u` its multiplicative half-width
+   (`ReferenceBracket.midAndUncertainty`: the larger of `(H − M)/M` and `(M − L)/L`, each rounded up).
+5. **Sequencer**: an L2 sequencer uptime feed up, with a non-zero `startedAt` not in the future, and more than one hour
+   since its last restart. On Unichain the feed `0x4956…F813` exists on-chain (status 0, `startedAt` 1,793,291,075 on
+   2026-11-13) but is **not** on Chainlink's list of supported uptime feeds, and Chainlink no longer adds networks
+   (G04 report §2.4).
 6. **Decimals**: read from each feed at construction; token decimals and the pair are constructor arguments checked
    against the vault at installation.
 7. **Signed updates** (if ever added): the verifying contract's signer set, a maximum age measured against
@@ -134,7 +151,8 @@ market data rules; spreads, depths and fees stay in the hooks; the vault holds o
 
 | Situation | Result |
 |---|---|
-| a leg stale, missing or malformed | its source is dropped; with fewer than 2 live sources every fill is refused |
+| a leg stale | its source is dropped; with fewer than `minSources` live sources every fill is refused |
+| a leg missing (reverts, short return) or malformed (zero, negative, ≥ 2^128, zero or future timestamp) | the whole read reverts (`FeedUnusable`), even if the other source alone would satisfy `minSources` (corrected in G04; this row previously said the source is dropped) |
 | sources contradict (empty intersection) | every fill refused (`ReferenceDivergence`) |
 | sources agree but the band is wide | fills refused above `maxUncertaintyPips`; below it, quotes widen with `u` |
 | sequencer down / just restarted | every fill refused |

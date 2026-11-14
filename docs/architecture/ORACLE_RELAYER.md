@@ -1,5 +1,10 @@
 # Porkfolio — Optional credentialed relayer for RedStone (Phase 1B-4.4)
 
+> **Correction (G04, 2026-11-13).** The uncertainties below use the pre-G04 definition (measured from the mid on both
+> sides). With the corrected multiplicative definition (`docs/security/G04_ORACLE_SAFETY.md` §5, F-1) the push-only
+> reading is 8,268 pips instead of 8,200 and the fresh-tier reading 3,010 instead of 3,000. The trader-cost figures in
+> §4 were measured with the earlier values.
+
 **Status:**
 - The fresh tier is **IMPLEMENTED** in `PriceRiskAdapter` and **TESTED** locally (mock feeds; real vault, hooks and
   PoolManager).
