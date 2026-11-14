@@ -12,7 +12,7 @@ approval (CLAUDE.md rule 2).
 |---|---|---|---|
 | `DeploySystem.s.sol` | 1 | deployer | deploys the system from production artifacts through the CREATE2 factory, initializes both pools, configures, seeds and nominates the governor; if the deployer is also the (test) admin, accepts and queues the hook configuration |
 | `ExecuteQueued.s.sol` | 2 | governor admin | executes the queued hook configuration after DELAY |
-| `VerifyDeployment.s.sol` | after each stage | anyone (read-only) | release gates 1–11; reverts at the first failure. `--sig "nominee()"`: gate 12, before queuing and before executing an ownership hand-over |
+| `VerifyDeployment.s.sol` | after each stage | anyone (read-only) | release gates 1–11; reverts at the first failure. `--sig "nominee()"`: gate 12, before queuing and before executing an ownership hand-over. `--sig "fixedFloorFallback()"`: gate 13, before queuing and before executing `setRiskAdapter(address(0))` |
 | `CheckQueuedConflicts.s.sol` | after every guardian action, before every `execute` | anyone (read-only) | reads every `Queued` event, simulates each still-queued vault call from the guardian's address and reverts if any loosens the current state or is owner-only (G02 report §13) |
 | `Rehearse.s.sol` | 3 | per stage (see the file) | `router`, `lp`, `activate`, `swap`, `exit`, `emergency`, `recover` |
 | `testnet/TestnetAggregator.sol` | — | — | **TEST ONLY** owner-set USD feed; never for mainnet |
@@ -48,7 +48,11 @@ These are **test parameters, not a proposed mainnet configuration**:
 | `TOKEN0` … `HOOK_B` | stages 2–3 | addresses printed by stage 1 |
 | `*_KEY`, `ROUTER`, `ALLOCATION_A/B` | stage 3 | ephemeral test keys and outputs of earlier stages |
 | `MAINNET_DELAYS`, `ADAPTER_CONFIG_VERSION`, `EXPECT_HOOKS_CONFIGURED` | verify | gate strictness |
+| `FEED_0` … `FEED_3` | verify (required) | the reviewed feed of each adapter slot: source 0 leg 0 (currency0/USD), source 0 leg 1 (currency1/USD), source 1 leg 0, source 1 leg 1 |
+| `INDEPENDENT_PRICE_X96`, `INDEPENDENT_PRICE_TOLERANCE_PIPS` | verify | a price (raw currency1 per raw currency0, Q64.96) taken from a source outside the adapter at verification time (required), and the accepted gap (default 20,000 pips) |
+| `SEQUENCER_FEED`, `ACCEPT_NO_SEQUENCER_FEED` | verify | the reviewed uptime feed (default none); with `MAINNET_DELAYS=true` and no feed, `ACCEPT_NO_SEQUENCER_FEED=true` records that the residual risk was reviewed (G04 report §2.4) |
 | `VAULT`, `NOMINEE`, `NOMINEE_ADMIN` | gate 12 | the vault, the proposed new owner and its expected admin |
+| `VAULT` | gate 13 | the vault about to leave adapter mode |
 | `GOVERNOR`, `FROM_BLOCK` | conflict check | the governor and its deployment block |
 
 ## Commands (simulation only; add `--broadcast` only with written approval)
@@ -83,8 +87,13 @@ forge script script/Rehearse.s.sol --sig "run(string)" lp --rpc-url $UNICHAIN_SE
 - **Gate 5:** both hooks are owned by the governor, bound to the vault and PoolManager, registered, and carry exactly
   their permission bits.
 - **Gate 6:** the authorization module is installed and bound.
-- **Gate 7:** the adapter is installed, prices the pair, answers live, and its `configVersion` is recorded and later
-  pinned.
+- **Gate 7:** the adapter is installed, prices the pair with each token's own decimals, answers live, and its
+  `configVersion` is recorded and later pinned.
+  - Each of its four legs, and its sequencer feed, is at the reviewed address in the reviewed slot. Two legs in each
+    other's slot pass every on-chain check and invert the price (G04 CE-O2).
+  - Under `MAINNET_DELAYS=true`, no sequencer feed is accepted only with `ACCEPT_NO_SEQUENCER_FEED=true`.
+  - Its reading is within `INDEPENDENT_PRICE_TOLERANCE_PIPS` of `INDEPENDENT_PRICE_X96`. Near 1:1 an inverted price
+    passes this comparison, which is why the slot check exists.
 - **Gate 8:** every deployed runtime code equals the local production build (immutables masked), with production
   compiler settings. *Explicit release gate: deployed bytecode verification.*
 - **Gate 9:** κ, edge, uncertainty bound, inventory targets, risk limits and the curator; the vault-scope exposure cap
@@ -95,6 +104,10 @@ forge script script/Rehearse.s.sol --sig "run(string)" lp --rpc-url $UNICHAIN_SE
 - **Gate 12** (ownership hand-over only, `--sig "nominee()"`): the nominee is a production `VaultGovernor` for this
   vault and the expected admin, with the delay minimums of gate 3. Execute the nomination and the nominee's
   `acceptVaultOwnership` in one transaction when both governors share the admin; then gate 1 must pass again.
+- **Gate 13** (fall-back to fixed floors only, `--sig "fixedFloorFallback()"`): both inventory targets and both stored
+  sell floors are set. Run it before queuing `setRiskAdapter(address(0))` and again before executing it. Without the
+  adapter, a direction with no stored floor closes, and an asset with no target trades with no inventory floor
+  (G04 CE-O4).
 
 **After every guardian action and before every `execute`:** `CheckQueuedConflicts` must pass, or each change it lists
 must be canceled or re-approved in writing.

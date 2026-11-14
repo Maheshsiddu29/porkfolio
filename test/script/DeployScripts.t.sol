@@ -54,6 +54,18 @@ contract DeployScriptsTest is Test {
         vm.setEnv("GOVERNOR", vm.toString(d.governor));
         vm.setEnv("HOOK_A", vm.toString(d.hookA));
         vm.setEnv("HOOK_B", vm.toString(d.hookB));
+        for (uint256 i; i < 4; ++i) {
+            vm.setEnv(string.concat("FEED_", vm.toString(i)), vm.toString(d.feeds[i]));
+        }
+        // The TEST feeds post 1.0 for both tokens; a real deployment takes this from a source outside the adapter.
+        vm.setEnv("INDEPENDENT_PRICE_X96", vm.toString(uint256(2 ** 96)));
+    }
+
+    /// @dev The oracle expectations of gate 7 that match a rehearsal deployment.
+    function _oracleExpect(DeploySystem.Deployment memory d, VerifyDeployment.Expect memory e) internal pure {
+        e.feeds = d.feeds;
+        e.independentPriceX96 = 2 ** 96;
+        e.independentTolerancePips = 20_000;
     }
 
     /// @dev The TEST feeds age; their operator (the deployer) re-posts 1.0 so the adapter stays live.
@@ -109,6 +121,7 @@ contract DeployScriptsTest is Test {
         (e.poolManager, e.admin, e.guardian, e.curator) = (c.poolManager, c.admin, c.guardian, c.curator);
         (e.kappaPips, e.edgePips, e.maxUncertaintyPips) = (c.kappaPips, c.edgePips, c.maxUncertaintyPips);
         (e.exposureBps, e.bufferFloor) = (c.exposureBps, c.bufferFloor);
+        _oracleExpect(d, e);
         VerifyDeployment verify = new VerifyDeployment();
         vm.expectRevert(bytes("gate 1: vault.owner() != governor"));
         verify.check(ds, d, e);
@@ -131,6 +144,8 @@ contract DeployScriptsTest is Test {
         (c.poolManager, c.admin, c.guardian, c.curator, true);
         (e.kappaPips, e.edgePips, e.maxUncertaintyPips) = (c.kappaPips, c.edgePips, c.maxUncertaintyPips);
         (e.exposureBps, e.bufferFloor) = (c.exposureBps, c.bufferFloor);
+        _oracleExpect(d, e);
+        e.acceptNoSequencer = true; // the Sepolia rehearsal has no uptime feed (G04 report §2.4)
     }
 
     /// @notice Deployment policies as gates. The seed never exists without an inventory target or a buffer floor: both
@@ -163,6 +178,57 @@ contract DeployScriptsTest is Test {
         c.bufferFloor = 0;
         vm.expectRevert(bytes("DeploySystem: buffer floor must be non-zero"));
         ds.validate(c);
+    }
+
+    /// @notice Gate 7's oracle identity checks and gate 13. A deployment whose adapter has two legs in each other's
+    ///         slot, a sequencer feed other than the reviewed one, no sequencer feed without an acknowledgement under
+    ///         mainnet delays, or a reading off the independent price by more than the tolerance is refused. Gate 13
+    ///         refuses a fall-back to fixed floors while a stored floor or an inventory target is unset, and passes
+    ///         once both are set.
+    function test_gates_oracleIdentityAndFixedFloorFallback() public {
+        (DeploySystem.Deployment memory d, VerifyDeployment.Expect memory e) = _mainnetLike();
+        vm.etch(e.admin, hex"00");
+        VerifyDeployment verify = new VerifyDeployment();
+        verify.check(ds, d, e);
+
+        // `check` is a view: each case changes one expectation and restores it (memory is not part of a snapshot).
+        (e.feeds[0], e.feeds[1]) = (e.feeds[1], e.feeds[0]);
+        vm.expectRevert(bytes("gate 7: feed identity"));
+        verify.check(ds, d, e);
+        (e.feeds[0], e.feeds[1]) = (e.feeds[1], e.feeds[0]);
+
+        e.sequencerFeed = makeAddr("uptimeFeed");
+        vm.expectRevert(bytes("gate 7: sequencer feed"));
+        verify.check(ds, d, e);
+        e.sequencerFeed = address(0);
+
+        e.acceptNoSequencer = false;
+        vm.expectRevert(bytes("gate 7: no sequencer feed"));
+        verify.check(ds, d, e);
+        e.acceptNoSequencer = true;
+
+        e.independentPriceX96 = uint256(2 ** 96) * 103 / 100; // 3% away, tolerance 2%
+        vm.expectRevert(bytes("gate 7: reading differs from the independent price"));
+        verify.check(ds, d, e);
+        e.independentPriceX96 = 0;
+        vm.expectRevert(bytes("gate 7: no independent price"));
+        verify.check(ds, d, e);
+        e.independentPriceX96 = 2 ** 96;
+        verify.check(ds, d, e);
+
+        // Gate 13: the rehearsal sets inventory targets but no stored floors.
+        vm.expectRevert(bytes("gate 13: stored sell floors"));
+        verify.checkFixedFloorFallback(d.vault);
+        SharedCommitmentVault v = SharedCommitmentVault(d.vault);
+        vm.startPrank(d.governor); // the vault's owner, standing in for two executed governor calls
+        v.setSellFloor(v.asset0(), uint160(uint256(2 ** 96) * 9 / 10));
+        v.setSellFloor(v.asset1(), uint160(uint256(2 ** 96) * 10 / 9 + 1));
+        vm.stopPrank();
+        verify.checkFixedFloorFallback(d.vault);
+        vm.prank(d.governor);
+        v.setInventoryBounds(1e18, 0, e.kappaPips, e.kappaPips);
+        vm.expectRevert(bytes("gate 13: inventory targets"));
+        verify.checkFixedFloorFallback(d.vault);
     }
 
     /// @notice Gate 12 accepts as nominee only a production `VaultGovernor` for this vault, administered by the expected

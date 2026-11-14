@@ -8,10 +8,12 @@ import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {ERC20} from "solmate/src/tokens/ERC20.sol";
 
 import {SharedCommitmentVault} from "../src/SharedCommitmentVault.sol";
 import {ISharedCommitmentVault} from "../src/interfaces/ISharedCommitmentVault.sol";
 import {IMarketRiskAdapter} from "../src/interfaces/IMarketRiskAdapter.sol";
+import {PriceRiskAdapter} from "../src/oracle/PriceRiskAdapter.sol";
 import {VaultGovernor} from "../src/governance/VaultGovernor.sol";
 import {CuratorAuthorization} from "../src/CuratorAuthorization.sol";
 import {BaseCompatibleHook} from "../src/hooks/BaseCompatibleHook.sol";
@@ -34,8 +36,11 @@ import {DeploySystem} from "./DeploySystem.s.sol";
 ///      5. each hook owned by the governor, bound to this vault and PoolManager, registered, and at an address with
 ///         exactly its permission bits;
 ///      6. the authorization module installed and bound to this vault;
-///      7. the adapter installed, pricing exactly the vault's pair and decimals, answering now, and (if given)
-///         carrying the reviewed `configVersion`;
+///      7. the adapter installed, pricing exactly the vault's pair with each token's own decimals, answering now, and
+///         (if given) carrying the reviewed `configVersion`; each of its four legs and its sequencer feed at the
+///         reviewed address, in the reviewed slot (a swapped pair of legs passes every on-chain check and inverts the
+///         price: G04 CE-O2); no sequencer feed on a mainnet-delay deployment only with an explicit acknowledgement;
+///         and its reading within the reviewed tolerance of an independently obtained price;
 ///      8. every deployed runtime code equal to the local production build, immutables masked, with production
 ///         compiler settings;
 ///      9. risk parameters: inventory targets set, tolerance, edge, uncertainty bound and risk limits as reviewed;
@@ -46,7 +51,11 @@ import {DeploySystem} from "./DeploySystem.s.sol";
 ///      10. both pools initialized;
 ///      11. (after stage 2) both hooks configured;
 ///      12. (`nominee()`, before queuing and before executing an ownership hand-over) the nominee is a production
-///          `VaultGovernor` bound to this vault and the expected admin, with the same delay minimums as gate 3.
+///          `VaultGovernor` bound to this vault and the expected admin, with the same delay minimums as gate 3;
+///      13. (`fixedFloorFallback()`, before queuing `setRiskAdapter(address(0))` and again before executing it) both
+///          inventory targets and both stored sell floors are set. Without the adapter a direction with no stored floor
+///          closes, and an asset with no target trades with no inventory floor at all (G04 CE-O4); in adapter mode
+///          the guardian can raise a stored floor only if one exists (G04 CE-O3).
 contract VerifyDeployment is Script {
     using StateLibrary for IPoolManager;
 
@@ -67,25 +76,36 @@ contract VerifyDeployment is Script {
         bool hooksConfigured;
         uint16 exposureBps; // reviewed vault-scope maxReservedBps, both assets
         uint256 bufferFloor; // reviewed buffer floor, raw units, both assets
+        address[4] feeds; // reviewed legs: source 0 leg 0, leg 1; source 1 leg 0, leg 1 (leg 0 prices currency0)
+        address sequencerFeed; // reviewed sequencer uptime feed, or zero for none
+        bool acceptNoSequencer; // required with mainnet delays when sequencerFeed is zero
+        uint256 independentPriceX96; // raw currency1 per raw currency0, Q64.96, from a source outside the adapter
+        uint24 independentTolerancePips; // largest accepted |reading - independent| / independent
     }
 
     function run() external {
         DeploySystem ds = new DeploySystem();
         DeploySystem.Deployment memory d = ds.deploymentFromEnv();
-        Expect memory e = Expect({
-            poolManager: vm.envAddress("POOL_MANAGER"),
-            admin: vm.envAddress("GOV_ADMIN"),
-            guardian: vm.envAddress("GUARDIAN"),
-            curator: vm.envAddress("CURATOR"),
-            mainnetDelays: vm.envOr("MAINNET_DELAYS", false),
-            kappaPips: uint24(vm.envOr("KAPPA_PIPS", uint256(10_000))),
-            edgePips: uint24(vm.envOr("EDGE_PIPS", uint256(100))),
-            maxUncertaintyPips: uint24(vm.envOr("MAX_UNCERTAINTY_PIPS", uint256(20_000))),
-            adapterVersion: vm.envOr("ADAPTER_CONFIG_VERSION", bytes32(0)),
-            hooksConfigured: vm.envOr("EXPECT_HOOKS_CONFIGURED", false),
-            exposureBps: uint16(vm.envOr("EXPOSURE_BPS", uint256(5000))),
-            bufferFloor: vm.envOr("BUFFER_FLOOR", vm.envOr("SEED_AMOUNT", uint256(1_000_000 ether)) / 10)
-        });
+        Expect memory e;
+        e.poolManager = vm.envAddress("POOL_MANAGER");
+        e.admin = vm.envAddress("GOV_ADMIN");
+        e.guardian = vm.envAddress("GUARDIAN");
+        e.curator = vm.envAddress("CURATOR");
+        e.mainnetDelays = vm.envOr("MAINNET_DELAYS", false);
+        e.kappaPips = uint24(vm.envOr("KAPPA_PIPS", uint256(10_000)));
+        e.edgePips = uint24(vm.envOr("EDGE_PIPS", uint256(100)));
+        e.maxUncertaintyPips = uint24(vm.envOr("MAX_UNCERTAINTY_PIPS", uint256(20_000)));
+        e.adapterVersion = vm.envOr("ADAPTER_CONFIG_VERSION", bytes32(0));
+        e.hooksConfigured = vm.envOr("EXPECT_HOOKS_CONFIGURED", false);
+        e.exposureBps = uint16(vm.envOr("EXPOSURE_BPS", uint256(5000)));
+        e.bufferFloor = vm.envOr("BUFFER_FLOOR", vm.envOr("SEED_AMOUNT", uint256(1_000_000 ether)) / 10);
+        for (uint256 i; i < 4; ++i) {
+            e.feeds[i] = vm.envAddress(string.concat("FEED_", vm.toString(i)));
+        }
+        e.sequencerFeed = vm.envOr("SEQUENCER_FEED", address(0));
+        e.acceptNoSequencer = vm.envOr("ACCEPT_NO_SEQUENCER_FEED", false);
+        e.independentPriceX96 = vm.envUint("INDEPENDENT_PRICE_X96");
+        e.independentTolerancePips = uint24(vm.envOr("INDEPENDENT_PRICE_TOLERANCE_PIPS", uint256(20_000)));
         check(ds, d, e);
     }
 
@@ -97,6 +117,22 @@ contract VerifyDeployment is Script {
             vm.envAddress("NOMINEE_ADMIN"),
             vm.envOr("MAINNET_DELAYS", false)
         );
+    }
+
+    /// @notice Gate 13, before a fall-back to fixed-floor mode. Environment: VAULT.
+    function fixedFloorFallback() external view {
+        checkFixedFloorFallback(vm.envAddress("VAULT"));
+    }
+
+    /// @notice Reverts unless both inventory targets and both stored sell floors are set on `vault`.
+    function checkFixedFloorFallback(address vault) public view {
+        SharedCommitmentVault v = SharedCommitmentVault(vault);
+        require(v.inventoryTargetPerShare(0) != 0 && v.inventoryTargetPerShare(1) != 0, "gate 13: inventory targets");
+        (uint160 f0,) = v.sellPolicy(v.asset0());
+        (uint160 f1,) = v.sellPolicy(v.asset1());
+        require(f0 != 0 && f1 != 0, "gate 13: stored sell floors");
+        console2.log("PASS 13 inventory targets and stored floors set; fixed-floor fall-back keeps both");
+        console2.log("stored floors Q96 (asset0 out, asset1 out):", f0, f1);
     }
 
     /// @notice Reverts unless `nominee` is a production `VaultGovernor` for `vault` administered by `admin`, with the
@@ -180,11 +216,41 @@ contract VerifyDeployment is Script {
         require(address(v.riskAdapter()) == d.adapter, "gate 7: adapter not installed");
         (address c0, address c1, uint8 d0, uint8 d1) = a.pair();
         require(c0 == Currency.unwrap(v.asset0()) && c1 == Currency.unwrap(v.asset1()), "gate 7: adapter pair");
-        require(d0 == 18 && d1 == 18, "gate 7: adapter decimals (TEST tokens are 18/18)");
+        require(d0 == ERC20(c0).decimals() && d1 == ERC20(c1).decimals(), "gate 7: adapter decimals");
         a.currentReference(); // reverts if the sources are not live
         if (e.adapterVersion != bytes32(0)) require(a.configVersion() == e.adapterVersion, "gate 7: configVersion");
-        console2.log("PASS 7 adapter installed, pair checked, live; configVersion:");
+        _feedIdentity(PriceRiskAdapter(d.adapter), e);
+        _independentPrice(a, e);
+        console2.log("PASS 7 adapter installed, pair, decimals, feeds and sequencer as reviewed, live; configVersion:");
         console2.logBytes32(a.configVersion());
+    }
+
+    /// @dev Gate 7: each leg and the sequencer feed at the reviewed address and slot.
+    function _feedIdentity(PriceRiskAdapter a, Expect memory e) internal view {
+        (PriceRiskAdapter.Source memory s0, PriceRiskAdapter.Source memory s1) = a.sources();
+        require(
+            address(s0.leg0) == e.feeds[0] && address(s0.leg1) == e.feeds[1] && address(s1.leg0) == e.feeds[2]
+                && address(s1.leg1) == e.feeds[3],
+            "gate 7: feed identity"
+        );
+        address seq = address(a.sequencerFeed());
+        require(seq == e.sequencerFeed, "gate 7: sequencer feed");
+        if (seq == address(0) && e.mainnetDelays) require(e.acceptNoSequencer, "gate 7: no sequencer feed");
+    }
+
+    /// @dev Gate 7: the reading within the reviewed tolerance of a price obtained outside the adapter.
+    function _independentPrice(IMarketRiskAdapter a, Expect memory e) internal view {
+        require(e.independentPriceX96 != 0, "gate 7: no independent price");
+        IMarketRiskAdapter.Reading memory r = a.currentReference();
+        uint256 gap = r.priceX96 > e.independentPriceX96
+            ? r.priceX96 - e.independentPriceX96
+            : e.independentPriceX96 - r.priceX96;
+        require(
+            gap <= FullMath.mulDiv(e.independentPriceX96, e.independentTolerancePips, 1e6),
+            "gate 7: reading differs from the independent price"
+        );
+        console2.log("reading vs independent price (Q96):", r.priceX96, e.independentPriceX96);
+        console2.log("reading uncertainty (pips):", r.uncertaintyPips);
     }
 
     function _code(DeploySystem.Deployment memory d) internal view {
