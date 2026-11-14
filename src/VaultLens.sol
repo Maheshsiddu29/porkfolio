@@ -309,7 +309,8 @@ contract VaultLens {
 
     /// @notice Largest new allocation of `currency` the admission rules accept right now: the smaller of
     ///         N_a - Q_a - R_a - D_a and, when the asset has an inventory target, the room above the inventory floor
-    ///         left by existing commitments, N_a - L_a - Q_a; 0 if either is negative.
+    ///         left by existing commitments, N_a - L_a - Q_a; 0 if either is negative, and 0 in adapter mode when
+    ///         the asset has no inventory target (the vault then refuses with `InventoryBoundsNotConfigured`).
     /// @dev Same as the vault's `_admissible(currency, _eligibleBacking(currency))`, the limit `reserveFor`
     ///      enforces, with Q_a after `reserveFor`'s sweep (`sweptReserved`). Example: N_a = 1,000, Q_a = 300, R_a = 100 and D_a = 150 give 450 without a target, and 50
     ///      with L_a = 650. This does not include the curator's own ceiling or the exposure caps, which `reserveFor`
@@ -424,7 +425,8 @@ contract VaultLens {
 
     /// @notice How much of `currency` fills may still pay out before the inventory floor binds: N_a - L_a, or 0.
     /// @dev L_a = ceil(S * tau_a * (1e6 - kappa_a) / (1e18 * 1e6)), the vault's own formula. Returns N_a when no target
-    ///      is set for the asset (no inventory floor; in adapter mode the vault then refuses fills of it entirely).
+    ///      is set for the asset (no inventory floor; in adapter mode the vault then refuses fills and new
+    ///      allocations of it entirely).
     ///      Other limits (allocation quota, flow caps) may bind first.
     /// @param vault Vault to read.
     /// @param currency asset0 or asset1.

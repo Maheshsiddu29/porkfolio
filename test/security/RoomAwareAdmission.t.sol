@@ -163,31 +163,165 @@ contract RoomAwareAdmissionTest is VaultTestBase {
         _assertEquations();
     }
 
-    /// @notice Adapter mode with no target for the sold asset: admission applies no room rule (there is no floor) and
-    ///         admits the reservation, but every fill of it is refused, because in adapter mode an asset without a
-    ///         target cannot be sold. A configuration error, not a loss: the capacity stays reserved and unsellable
-    ///         until it is released. With a target set the room rule applies as in static mode.
-    function test_adapterMode_zeroTarget_admittedButNeverFillable() public {
+    // ------------------------------------------------------------------ adapter mode
+
+    function _installAdapter() internal {
         MockRiskAdapter adapter = new MockRiskAdapter(address(token0), address(token1), 18, 18, keccak256("room"));
-        adapter.set(FixedPoint96.Q96, 1000, type(uint256).max);
+        adapter.set(FixedPoint96.Q96, 1000, type(uint256).max); // P = 1, u = 0.1%
         vm.startPrank(owner);
-        vault.setRiskBounds(100, 5000);
+        vault.setRiskBounds(100, 5000); // e = 0.01%: a fill pays at least ceil(1.0011 * out)
         vault.setRiskAdapter(IMarketRiskAdapter(address(adapter)));
-        vault.setInventoryBounds(0, 1e18, 50_000, 50_000); // target only on asset1
         vm.stopPrank();
+    }
 
-        uint256 id0 = _allocate(keyM, c0, 600_000 ether); // no room rule for asset0
-        assertEq(vault.reserved(c0), 600_000 ether);
-        mal.configure(MaliciousConsumerHook.Attack.ExactAmounts, id0, 1 ether);
-        _expectSwapRevert(
-            address(mal), abi.encodeWithSelector(ISharedCommitmentVault.InventoryBoundsNotConfigured.selector)
+    /// @dev Everything a successful admission of `c` by `curator` through `mal` writes, for a request built now by
+    ///      `_request` with nonce `nonce`: Q_a, the allocation counter, the curator and hook totals, the ring header and
+    ///      the request's ring slot, and the module's nonce bit.
+    function _admissionState(Currency c, uint256 nonce) internal view returns (bytes32) {
+        (uint64 swept, uint64 maxBucket) = vault.expiryRing(c);
+        uint256 bucket = _hourAligned(block.timestamp + 1 days) / 1 hours;
+        (uint64 slotBucket, uint128 slotAmount) = vault.expiryBucket(c, bucket % 720);
+        return keccak256(
+            abi.encode(
+                vault.reserved(c),
+                vault.nextAllocationId(),
+                vault.curatorReserved(curator, c),
+                vault.hookReserved(address(mal), c),
+                swept,
+                maxBucket,
+                slotBucket,
+                slotAmount,
+                auth.isNonceUsed(curator, nonce)
+            )
         );
-        _swapRaw(keyM, false, -int256(2 ether), "");
+    }
 
-        assertEq(vault.admissibleCapacity(c1), 50_000 ether, "asset1: the room");
-        _expectRefused(c1, 50_000 ether + 1, 50_000 ether);
-        uint256 id1 = _allocate(keyM, c1, 50_000 ether);
-        _fill(id1, c1, 50_000 ether, 52_000 ether);
+    /// @dev Expects `reserveFor` to refuse `q` of `c` with `reason` and checks that the attempt changed none of the
+    ///      state an admission writes.
+    function _expectRefusedNoState(Currency c, uint256 q, bytes memory reason) internal {
+        bytes32 before = _admissionState(c, nextNonce);
+        ISharedCommitmentVault.AllocationRequest memory r = _request(keyM, c, uint128(q));
+        vm.prank(curator);
+        vm.expectRevert(reason);
+        auth.activateDirect(r);
+        assertEq(_admissionState(c, r.nonce), before, "a refused admission changed state");
+    }
+
+    function _unconfigured() internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(ISharedCommitmentVault.InventoryBoundsNotConfigured.selector);
+    }
+
+    /// @notice Adapter mode refuses a reservation of an asset without an inventory target, in either direction, with
+    ///         the error fills of that asset give (`InventoryBoundsNotConfigured`), so no structurally unexecutable
+    ///         capacity is admitted. The reader reports 0 admissible. The other asset, which has a target, is
+    ///         unaffected, and a refused attempt changes no state.
+    function test_adapterMode_zeroTarget_refusedAtAdmission_bothAssets() public {
+        _installAdapter();
+        vm.prank(owner);
+        vault.setInventoryBounds(0, 1e18, 50_000, 50_000); // target on asset1 only
+        assertEq(vault.admissibleCapacity(c0), 0, "reader: nothing admissible in asset0");
+        assertEq(lens.admissibleCapacity(vault, c0), 0, "lens: nothing admissible in asset0");
+        _expectRefusedNoState(c0, 1, _unconfigured());
+        _expectRefusedNoState(c0, 600_000 ether, _unconfigured());
+        uint256 id1 = _allocate(keyM, c1, 50_000 ether); // asset1: its room, as in static mode
+        _fill(id1, c1, 50_000 ether, 50_100 ether);
+
+        vm.prank(owner);
+        vault.setInventoryBounds(1e18, 0, 50_000, 50_000); // the mirror case: target on asset0 only
+        assertEq(vault.admissibleCapacity(c1), 0, "reader: nothing admissible in asset1");
+        _expectRefusedNoState(c1, 1, _unconfigured());
+        uint256 room0 = vault.backing(c0) - _floor(0);
+        assertEq(vault.admissibleCapacity(c0), room0, "asset0: the room");
+        uint256 id0 = _allocate(keyM, c0, uint128(room0));
+        _fill(id0, c0, room0, room0 + room0 / 500);
+        assertEq(vault.backing(c0), _floor(0), "asset0 sold to its floor exactly");
+        _assertEquations();
+    }
+
+    /// @notice The refusal happens after `reserveFor`'s sweep of the ring, and the revert undoes that sweep too: an
+    ///         expired, unswept bucket stays in the stored Q. Removing the adapter returns the vault to static mode,
+    ///         where the static rule for an asset without a target (no room rule) applies unchanged.
+    function test_adapterMode_zeroTarget_refusalRollsBackTheSweep_staticRuleUnchanged() public {
+        uint256 expired = _allocate(keyM, c0, 100_000 ether); // static mode, no target: admitted
+        vm.warp(_hourAligned(block.timestamp + 1 days) + 1);
+        assertEq(vault.reserved(c0), 100_000 ether, "stored Q: not yet swept");
+        _installAdapter();
+        _expectRefusedNoState(c0, 1, _unconfigured());
+        assertEq(vault.reserved(c0), 100_000 ether, "the sweep inside the refused call was rolled back");
+
+        vm.prank(owner);
+        vault.setRiskAdapter(IMarketRiskAdapter(address(0)));
+        uint256 n = vault.backing(c0);
+        assertEq(vault.admissibleCapacity(c0), n, "static mode, tau = 0: N - Q - R - D with Q swept");
+        // N - 100,000: the hook's own total still counts the expired allocation until it is released (F-3).
+        _allocate(keyM, c0, uint128(n - 100_000 ether));
+        assertEq(vault.reserved(c0), n - 100_000 ether, "the expired bucket left Q in the same call");
+        vm.prank(owner);
+        vault.release(expired);
+        assertEq(vault.reserved(c0), n - 100_000 ether, "releasing a swept allocation leaves Q unchanged");
+        _assertEquations();
+    }
+
+    /// @notice With targets set, adapter mode applies exactly the static room rule: the room left after an earlier
+    ///         reservation is admitted, one more unit is refused (with no state change), and the admitted amount
+    ///         fills to the last unit at the adapter's price, in both asset directions with different targets.
+    function test_adapterMode_targetsSet_exactBoundaryBothAssets() public {
+        _installAdapter();
+        vm.prank(owner);
+        vault.setInventoryBounds(1e18, 0.9e18, 50_000, 20_000);
+        for (uint256 k; k < 2; ++k) {
+            Currency c = k == 0 ? c0 : c1;
+            uint256 roomBefore = vault.backing(c) - _floor(k);
+            _allocate(keyA, c, 10_000 ether);
+            uint256 left = roomBefore - 10_000 ether;
+            assertEq(vault.admissibleCapacity(c), left, "reader limit");
+            assertEq(_expectedLimit(c), left, "independent limit");
+            _expectRefusedNoState(
+                c, left + 1, abi.encodeWithSelector(ISharedCommitmentVault.InsufficientBacking.selector, left + 1, left)
+            );
+            uint256 id = _allocate(keyM, c, uint128(left));
+            _expectRefusedNoState(
+                c, 1, abi.encodeWithSelector(ISharedCommitmentVault.InsufficientBacking.selector, 1, 0)
+            );
+            _fill(id, c, left, left + left / 500);
+            assertEq(lens.inventoryRoom(vault, c), 10_000 ether, "only the first reservation's room is left");
+        }
+        _assertEquations();
+    }
+
+    /// @notice In adapter mode, over random targets (zero one time in four), tolerances, earlier reservations and
+    ///         assets: an asset without a target admits nothing and refuses with `InventoryBoundsNotConfigured`;
+    ///         with a target the reader's limit equals the independent formula, exactly that amount is admitted and
+    ///         every admitted unit fills at the adapter's price (nothing admitted is unexecutable at admission).
+    function testFuzz_adapterMode_everythingAdmittedIsFillable(
+        uint256 tauBps,
+        uint256 kappa,
+        uint256 prior,
+        uint256 ask,
+        bool sellAsset1
+    ) public {
+        _installAdapter();
+        Currency c = sellAsset1 ? c1 : c0;
+        uint256 i = sellAsset1 ? 1 : 0;
+        tauBps = tauBps % 4 == 0 ? 0 : bound(tauBps, 1, 15_000);
+        uint256 tau = FullMath.mulDiv(vault.backing(c), 1e18, vault.totalShares()) * tauBps / 10_000;
+        kappa = bound(kappa, 0, 1e6);
+        vm.prank(owner);
+        vault.setInventoryBounds(i == 0 ? tau : 1e18, i == 1 ? tau : 1e18, uint24(kappa), uint24(kappa));
+
+        if (tau == 0) {
+            assertEq(vault.admissibleCapacity(c), 0, "no target: nothing admissible");
+            _expectRefusedNoState(c, bound(ask, 1, vault.backing(c)), _unconfigured());
+            return;
+        }
+        uint256 first = vault.admissibleCapacity(c) * bound(prior, 0, 100) / 100;
+        if (first != 0) _allocate(keyA, c, uint128(first));
+        uint256 limit = _expectedLimit(c);
+        assertEq(vault.admissibleCapacity(c), limit, "reader != independent limit");
+        if (limit == 0) return;
+        uint256 id = _allocate(keyM, c, uint128(limit));
+        _fill(id, c, limit, limit + limit / 500 + 1);
+        assertEq(vault.reserved(c), first, "the whole admitted amount was sold");
         _assertEquations();
     }
 

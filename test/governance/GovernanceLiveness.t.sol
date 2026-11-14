@@ -603,12 +603,16 @@ contract GovernanceLivenessTest is VaultTestBase {
     }
 
     /// @notice An oracle outage stops fills but neither LP exits nor governance: with the adapter reverting, the
-    ///         queued LP is finalized and claims, and the LONG_DELAY change executes once the commitment is released.
+    ///         queued LP is finalized and claims, and the LONG_DELAY change executes once the commitment has expired
+    ///         (the batch also releases it).
+    ///         In adapter mode an asset needs a target to be reserved at all, so asset0 gets one with a tolerance of
+    ///         100% (L_0 = 0): still no inventory floor, as in the rest of this file.
     function test_oracleFailure_doesNotHoldTheQueueOrGovernance() public {
         MockRiskAdapter adapter = new MockRiskAdapter(address(token0), address(token1), 18, 18, keccak256("g02"));
         adapter.set(FixedPoint96.Q96, 1000, type(uint256).max);
         vm.startPrank(address(gov)); // configuration shortcut; the governor's delays are not under test here
         vault.setRiskBounds(100, 5000);
+        vault.setInventoryBounds(tau, tau, 1e6, 50_000);
         vault.setRiskAdapter(IMarketRiskAdapter(address(adapter)));
         vm.stopPrank();
 

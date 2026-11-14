@@ -379,8 +379,9 @@ contract InventoryProtectionHandler is Test {
         } catch {}
     }
 
-    /// @dev `_allocate` with both inventory targets lifted for the admission only (tolerances kept) and restored right
-    ///      after; `out = type(uint256).max` asks for the whole admissible amount while they are lifted. The owner is
+    /// @dev `_allocate` with both inventory floors lifted for the admission only (tolerances 1e6, so L = 0; targets
+    ///      kept, since in adapter mode an asset without a target cannot be reserved) and restored right after;
+    ///      `out = type(uint256).max` asks for the whole admissible amount while they are lifted. The owner is
     ///      the governor; calling the vault as the governor is a configuration shortcut that skips its delay, used only
     ///      here and never for a loosening that persists.
     function _allocateWithoutFloor(uint256 curatorIdx, PoolKey memory key, Currency c, uint256 out, uint256 hours_)
@@ -392,7 +393,7 @@ contract InventoryProtectionHandler is Test {
         uint24 k0 = vault.inventoryTolerancePips(0);
         uint24 k1 = vault.inventoryTolerancePips(1);
         vm.prank(address(gov));
-        vault.setInventoryBounds(0, 0, k0, k1);
+        vault.setInventoryBounds(tau0, tau1, 1e6, 1e6);
         if (out == type(uint256).max) out = vault.admissibleCapacity(c);
         id = _allocate(curatorIdx, key, c, out, hours_);
         vm.prank(address(gov));

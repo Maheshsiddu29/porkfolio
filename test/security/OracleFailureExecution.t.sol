@@ -425,23 +425,26 @@ contract OracleFailureExecutionTest is VaultTestBase {
     // ------------------------------------------------------------------
 
     /// @notice The static fall-back keeps every inventory floor that has a target. An asset with no target is
-    ///         refused in adapter mode, but after the owner removes the adapter (DELAY under the governor, not
-    ///         LONG_DELAY) and a stored floor exists, it trades with no inventory floor at all. Not silent (owner
-    ///         call, event, timelock), but a loosening of inventory protection that the selector-based delay does
-    ///         not give the long notice an inventory-bound change gets.
+    ///         refused in adapter mode (at admission, so nothing of it can be reserved), but after the owner removes
+    ///         the adapter (DELAY under the governor, not LONG_DELAY) and a stored floor exists, it can be reserved and
+    ///         traded with no inventory floor at all. Not silent (owner call, event, timelock), but a loosening of
+    ///         inventory protection that the selector-based delay does not give the long notice an inventory-bound
+    ///         change gets.
     function test_adapterRemoval_assetWithoutTarget_losesInventoryFloor() public {
         vm.startPrank(owner);
         vault.setInventoryBounds(tau, 0, KAPPA, KAPPA);
         vault.setSellFloor(c1, uint160(Q96));
         vm.stopPrank();
         uint256 big = _net(c1) / 10; // ten times the 1% room a target would allow
-        uint256 id = _allocM(c1, uint128(big), uint160(Q96));
-        _tradeExpect(
-            id, c1, big, big, abi.encodeWithSelector(ISharedCommitmentVault.InventoryBoundsNotConfigured.selector)
-        );
+        ISharedCommitmentVault.AllocationRequest memory r = _request(keyM, c1, uint128(big));
+        r.minInPerOutX96 = uint160(Q96);
+        vm.prank(curator);
+        vm.expectRevert(ISharedCommitmentVault.InventoryBoundsNotConfigured.selector);
+        auth.activateDirect(r);
 
         vm.prank(owner);
         vault.setRiskAdapter(IMarketRiskAdapter(address(0)));
+        uint256 id = _allocM(c1, uint128(big), uint160(Q96));
         _trade(id, c1, big, big);
         assertEq(vault.inventoryTargetPerShare(0), tau, "asset0 keeps its floor");
         _assertAccountingConsistent();

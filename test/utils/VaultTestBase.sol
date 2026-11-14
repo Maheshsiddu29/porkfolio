@@ -267,11 +267,12 @@ abstract contract VaultTestBase is Test {
         });
     }
 
-    /// @dev Sets both inventory targets to zero (keeping the tolerances) so that the next allocation is admitted without
-    ///      the room rule, and returns the bounds to restore with `_restoreInventoryFloor`. Tests of the fill-time
-    ///      inventory check use it to reach a state room-aware admission no longer creates directly but the vault can
-    ///      still be in: reserved capacity above the room, after the guardian raises the floor (immediately) or LP
-    ///      exits shrink the room (CE-2) under an existing reservation. The owner must not be a timelock.
+    /// @dev Sets both tolerances to 1e6 (keeping the targets), which makes every floor L_a = 0, so the next allocation
+    ///      is admitted with a room of N_a, and returns the bounds to restore with `_restoreInventoryFloor`. Tests of
+    ///      the fill-time inventory check use it to reach a state room-aware admission no longer creates directly but
+    ///      the vault can still be in: reserved capacity above the room, after the guardian raises the floor
+    ///      (immediately) or LP exits shrink the room (CE-2) under an existing reservation. Targets stay set because
+    ///      in adapter mode an asset without a target cannot be reserved at all. The owner must not be a timelock.
     function _suspendInventoryFloor() internal returns (uint256[4] memory saved) {
         saved = [
             lens.inventoryTargetPerShare(vault, 0),
@@ -280,8 +281,7 @@ abstract contract VaultTestBase is Test {
             lens.inventoryTolerancePips(vault, 1)
         ];
         vm.prank(vault.owner());
-        // forge-lint: disable-next-line(unsafe-typecast) tolerances were read from uint24 fields.
-        vault.setInventoryBounds(0, 0, uint24(saved[2]), uint24(saved[3]));
+        vault.setInventoryBounds(saved[0], saved[1], 1e6, 1e6);
     }
 
     /// @dev Restores the bounds `_suspendInventoryFloor` returned.
@@ -453,6 +453,8 @@ abstract contract VaultTestBase is Test {
                 uint256 L = FullMath.mulDivRoundingUp(S * tau, 1e6 - lens.inventoryTolerancePips(vault, i), 1e24);
                 uint256 room = N > L + q ? N - L - q : 0;
                 if (room < expected) expected = room;
+            } else if (address(lens.riskAdapter(vault)) != address(0)) {
+                expected = 0; // adapter mode without a target: every new allocation is refused
             }
             assertEq(lens.admissibleCapacity(vault, c), expected, "admission != min(N - Q - R - D, N - L - Q)");
         }

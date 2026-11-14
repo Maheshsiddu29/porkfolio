@@ -358,6 +358,9 @@ library VaultStateReader {
     ///      turn with a floor at zero, which equals the exact value without ever summing Q_a + R_a + D_a, whose sum
     ///      can overflow because R_a has no upper bound. Example: N_a = 1,000, Q_a = 300, R_a = 100 and D_a = 150
     ///      give 450 without a target; with L_a = 650 the room term is 50 and the limit is 50.
+    ///
+    ///      Without a target in adapter mode the limit is 0: the vault refuses every such allocation, with
+    ///      `InventoryBoundsNotConfigured` rather than `InsufficientBacking`.
     function admissibleCapacity(IVaultState vault, Currency currency) internal view returns (uint256 limit) {
         uint256 q = sweptReserved(vault, currency);
         limit = _sub0(_sub0(eligibleBacking(vault, currency), q), bufferFloor(vault, currency));
@@ -368,6 +371,8 @@ library VaultStateReader {
                 VaultRiskBoundary.inventoryFloor(totalShares(vault), target, inventoryTolerancePips(vault, i));
             uint256 room = _sub0(_sub0(netAssets(vault, currency), floor_), q);
             if (room < limit) limit = room;
+        } else if (address(riskAdapter(vault)) != address(0)) {
+            limit = 0;
         }
     }
 

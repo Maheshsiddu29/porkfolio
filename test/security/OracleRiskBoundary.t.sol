@@ -246,14 +246,25 @@ contract OracleRiskBoundaryTest is VaultTestBase {
         _trade(id, c0, room, room);
     }
 
-    /// @notice With an adapter installed, a direction whose asset has no inventory target is refused outright.
+    /// @notice With an adapter installed, a direction whose asset has no inventory target is refused outright: a new
+    ///         allocation of it at admission, and a fill of an allocation admitted while the target was set once the
+    ///         owner clears the target.
     function test_adapterMode_requiresInventoryTarget() public {
         vm.startPrank(owner);
         vault.setRiskBounds(EDGE, MAX_U);
         vault.setInventoryBounds(tau, 0, KAPPA, KAPPA);
         vault.setRiskAdapter(adapter);
         vm.stopPrank();
+        ISharedCommitmentVault.AllocationRequest memory r = _request(keyM, c1, 10 ether);
+        vm.prank(curator);
+        vm.expectRevert(ISharedCommitmentVault.InventoryBoundsNotConfigured.selector);
+        auth.activateDirect(r);
+
+        vm.prank(owner);
+        vault.setInventoryBounds(tau, tau, KAPPA, KAPPA);
         uint256 id = _allocM(c1, 10 ether, PRICE_1_1_X96);
+        vm.prank(owner);
+        vault.setInventoryBounds(tau, 0, KAPPA, KAPPA);
         _tradeExpect(
             id,
             c1,

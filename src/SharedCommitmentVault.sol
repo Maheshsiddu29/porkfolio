@@ -291,7 +291,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     /// @dev Largest reference uncertainty u the vault accepts, pips. Guardian may only lower it.
     uint24 internal maxUncertaintyPips;
     /// @dev tau_a: inventory target per share, by asset index (0: asset0, 1: asset1), in raw units scaled by 1e18.
-    ///      Zero: no inventory floor for that asset (and, in adapter mode, no selling of it).
+    ///      Zero: no inventory floor for that asset (and, in adapter mode, no selling or reserving of it).
     uint256[2] internal inventoryTargetPerShare;
     /// @dev kappa_a: how far below its target the holding of each asset may fall, pips of the target. Guardian may
     ///      only lower it.
@@ -1086,7 +1086,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      to `key.hooks`; pool currencies equal the vault's pair; `currencyOut` is one of them; direction
     ///      configured and not halted; curator floor >= vault floor; non-zero `maxOut` within MAX_AMOUNT; expiry in
     ///      the future, a multiple of one hour and within MAX_HORIZON; curator ceiling; the admission rules Q_a + maxOut + R_a + D_a <= N_a
-    ///      and, when the asset has an inventory target, Q_a + maxOut <= N_a - L_a; and the exposure caps of the
+    ///      and, when the asset has an inventory target, Q_a + maxOut <= N_a - L_a; in adapter mode, an inventory
+    ///      target for `currencyOut` (`InventoryBoundsNotConfigured` otherwise); and the exposure caps of the
     ///      hook, the curator and the vault. Nonces are the module's: the vault does not
     ///      track them, and only reports `req.nonce` in `AllocationCreated`. Each allocation gets a new id, so two
     ///      requests can never produce the same allocation.
@@ -1496,7 +1497,12 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      S including queued shares), so admission and fills compare against the same number.
     ///
     ///      Example: N_a = 1,000,000, Q_a = 10,000, R_a = 0, D_a = 0, L_a = 950,000: the first term is 990,000, the
-    ///      room term 40,000, so 40,000 is admissible. With tau_a = 0 the limit is 990,000.
+    ///      room term 40,000, so 40,000 is admissible. With tau_a = 0 the limit is 990,000 in static mode.
+    ///
+    ///      No target in adapter mode: reverts with `InventoryBoundsNotConfigured`, the error `_floorForFill` gives
+    ///      every fill of such an asset, so the vault never reserves capacity that no fill could use. Static mode
+    ///      with tau_a = 0 keeps the first term alone. Capacity reserved before the adapter was installed or the
+    ///      target cleared is not affected here; its fills are refused until it expires or is released.
     ///
     ///      Q_a here is the stored total after the caller's sweep. `VaultStateReader.admissibleCapacity` repeats this
     ///      formula for off-chain callers.
@@ -1511,6 +1517,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
             );
             room = _sub0(room, q);
             if (room < limit) limit = room;
+        } else if (address(riskAdapter) != address(0)) {
+            revert InventoryBoundsNotConfigured();
         }
     }
 

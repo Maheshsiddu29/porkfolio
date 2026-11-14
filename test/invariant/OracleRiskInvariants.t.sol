@@ -171,14 +171,15 @@ contract OracleRiskHandler is Test {
         if (!_swap(id, c, out + out / 100 + 1, out)) _cancelAllocation(id);
     }
 
-    /// @dev `_allocate` with both inventory targets lifted for the admission only (tolerances kept), then restored.
+    /// @dev `_allocate` with both inventory floors lifted for the admission only (tolerances 1e6, so L = 0; targets
+    ///      kept, since in adapter mode an asset without a target cannot be reserved), then restored.
     function _allocateWithoutFloor(Currency c, uint256 out) internal returns (uint256 id) {
         uint256 tau0 = vault.inventoryTargetPerShare(0);
         uint256 tau1 = vault.inventoryTargetPerShare(1);
         uint24 k0 = vault.inventoryTolerancePips(0);
         uint24 k1 = vault.inventoryTolerancePips(1);
         vm.prank(vault.owner());
-        vault.setInventoryBounds(0, 0, k0, k1);
+        vault.setInventoryBounds(tau0, tau1, 1e6, 1e6);
         id = _allocate(c, out);
         vm.prank(vault.owner());
         vault.setInventoryBounds(tau0, tau1, k0, k1);

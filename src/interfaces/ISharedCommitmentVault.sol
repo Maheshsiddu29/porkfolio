@@ -359,8 +359,8 @@ interface ISharedCommitmentVault {
     error InvalidRiskAdapter(address adapter);
     /// @notice The market-risk adapter returned a zero price or a reading that is no longer valid.
     error InvalidReference();
-    /// @notice A fill in adapter mode found no inventory target for the asset paid out, or a target or tolerance
-    ///         is out of range.
+    /// @notice In adapter mode, a fill or a new allocation found no inventory target for the asset paid out; or a
+    ///         target or tolerance is out of range.
     error InventoryBoundsNotConfigured();
 
     // ------------------------------------------------------------------
