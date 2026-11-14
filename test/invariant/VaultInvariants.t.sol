@@ -893,21 +893,49 @@ contract VaultHandler is Test {
         } catch {}
     }
 
-    /// @notice A curator that can allocate commits all admissible capacity of one asset (Hook A or Hook B, one day),
-    ///         then an LP redeems its whole balance with `queueRemainder`, so the part that cannot be paid instantly
-    ///         is queued behind the commitment. Without this action a withdrawal queued in only 25 of 100 single-run
+    /// @notice A curator that can allocate commits everything it may of one asset (Hook A or Hook B, one day), then
+    ///         an LP redeems its whole balance with `queueRemainder`, so the part that cannot be paid instantly is
+    ///         queued behind the commitment. Without this action a withdrawal queued in only 25 of 100 single-run
     ///         campaigns of depth 128, and a request was finalized or claimed in 9.
+    ///
+    ///         "Everything it may" is the admission limit capped by the hook, curator and vault exposure headroom and
+    ///         the curator's remaining ceiling. Asking for the admission limit alone was refused by an exposure cap in
+    ///         about a tenth of the calls, more often since expired, unreleased allocations keep counting in the hook
+    ///         and curator totals; nothing was then committed and the redemption was paid at once. The redeeming LP is
+    ///         the first from `lpSeed` on that still holds shares (a quarter of the calls picked an LP that had none).
     function queueBehindCommitment(uint256 lpSeed, uint256 seed) external {
         Currency out = seed % 2 == 0 ? c0 : c1;
+        PoolKey memory key = (seed >> 1) % 2 == 0 ? keyA : keyB;
         uint256 q = vault.admissibleCapacity(out);
         if (q != 0) {
             for (uint256 i; i < curators.length; ++i) {
-                if (!_canAllocate(curators[i])) continue;
-                if (_allocate(curators[i], (seed >> 1) % 2 == 0 ? keyA : keyB, out, q, 1 days) != 0) queueSetupsOk++;
+                address who = curators[i];
+                if (!_canAllocate(who)) continue;
+                q = _minHeadroom(
+                    q, lens.exposureAvailable(vault, ISharedCommitmentVault.RiskScope.Hook, address(key.hooks), out)
+                );
+                q = _minHeadroom(q, lens.exposureAvailable(vault, ISharedCommitmentVault.RiskScope.Curator, who, out));
+                q = _minHeadroom(
+                    q, lens.exposureAvailable(vault, ISharedCommitmentVault.RiskScope.Vault, address(0), out)
+                );
+                uint256 ceiling = vault.curatorCeiling(who, out);
+                uint256 held = vault.curatorReserved(who, out);
+                q = _minHeadroom(q, ceiling > held ? ceiling - held : 0);
+                if (q != 0 && _allocate(who, key, out, q, 1 days) != 0) queueSetupsOk++;
                 break;
             }
         }
-        this.redeem(lpSeed, vault.sharesOf(lps[lpSeed % lps.length]), true);
+        for (uint256 k; k < lps.length; ++k) {
+            uint256 idx = (lpSeed % lps.length + k) % lps.length;
+            uint256 bal = vault.sharesOf(lps[idx]);
+            if (bal == 0) continue;
+            this.redeem(idx, bal, true);
+            break;
+        }
+    }
+
+    function _minHeadroom(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a < b ? a : b;
     }
 
     function process(uint256 steps) external {
