@@ -238,7 +238,10 @@ contract OracleFailureExecutionTest is VaultTestBase {
 
         uint256 snap = vm.snapshotState();
         uint256 room = _net(c0) - _invFloor(0);
+        // room + 1 is admitted only without the floor (room-aware admission); the fill-time check is under test.
+        uint256[4] memory saved = _suspendInventoryFloor();
         uint256 id = _allocM(c0, uint128(room + 1), 1);
+        _restoreInventoryFloor(saved);
         uint256 floorAfter = _invFloor(0);
         _tradeExpect(
             id,
@@ -289,7 +292,10 @@ contract OracleFailureExecutionTest is VaultTestBase {
     ///         raw unit is refused, and LP exits are unaffected.
     function test_jumpTheFeedsMissed_lossStopsAtInventoryRoom() public {
         uint256 room = _net(c0) - _invFloor(0);
+        // room + 1 is admitted only without the floor (room-aware admission); the fill-time check is under test.
+        uint256[4] memory saved = _suspendInventoryFloor();
         uint256 id = _allocM(c0, uint128(room + 1), 1);
+        _restoreInventoryFloor(saved);
         uint256 paid = _minIn(c0, room);
         assertGe(paid * 994_900, room * 1_003_100, "priced at or above the stale band's top");
         _trade(id, c0, paid, room);
@@ -345,7 +351,11 @@ contract OracleFailureExecutionTest is VaultTestBase {
     ///         reads the adapter. Releasing the reservation, which the guardian may do early, frees the inventory the
     ///         queue was waiting for; trading resumes when a source pushes again, with no governance action.
     function test_outageWithReservation_exitsQueueBehindItUntilReleased() public {
+        // Sixty times the room above the floor: admitted without the floor, the state a later tightening or LP exits
+        // (CE-2) can leave behind. The test is about exits queuing behind it during an outage.
+        uint256[4] memory saved = _suspendInventoryFloor();
         uint256 id = _allocM(c0, 600_000 ether, 1);
+        _restoreInventoryFloor(saved);
         vm.warp(vm.getBlockTimestamp() + 23_400); // RedStone (pushed 600 s before) passes its 23,400 s limit
         bytes memory down = abi.encodeWithSelector(ReferenceBracket.InsufficientSources.selector, 1, 2);
         _tradeExpect(id, c0, 2 ether, 1 ether, down);

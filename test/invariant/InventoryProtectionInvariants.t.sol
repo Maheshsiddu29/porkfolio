@@ -379,6 +379,31 @@ contract InventoryProtectionHandler is Test {
         } catch {}
     }
 
+    /// @dev `_allocate` with both inventory targets lifted for the admission only (tolerances kept) and restored right
+    ///      after; `out = type(uint256).max` asks for the whole admissible amount while they are lifted. The owner is
+    ///      the governor; calling the vault as the governor is a configuration shortcut that skips its delay, used only
+    ///      here and never for a loosening that persists.
+    function _allocateWithoutFloor(uint256 curatorIdx, PoolKey memory key, Currency c, uint256 out, uint256 hours_)
+        internal
+        returns (uint256 id)
+    {
+        uint256 tau0 = vault.inventoryTargetPerShare(0);
+        uint256 tau1 = vault.inventoryTargetPerShare(1);
+        uint24 k0 = vault.inventoryTolerancePips(0);
+        uint24 k1 = vault.inventoryTolerancePips(1);
+        vm.prank(address(gov));
+        vault.setInventoryBounds(0, 0, k0, k1);
+        if (out == type(uint256).max) out = vault.admissibleCapacity(c);
+        id = _allocate(curatorIdx, key, c, out, hours_);
+        vm.prank(address(gov));
+        vault.setInventoryBounds(tau0, tau1, k0, k1);
+    }
+
+    function _drainAllocation(uint256 curatorIdx, Currency c, uint256 out, bool overshoot) internal returns (uint256) {
+        if (overshoot) return _allocateWithoutFloor(curatorIdx, keyM, c, out, 2);
+        return _allocate(curatorIdx, keyM, c, out, 2);
+    }
+
     function _cancel(uint256 curatorIdx, uint256 id) internal {
         vm.prank(curators[curatorIdx % 2]);
         try vault.cancelAllocation(id) {} catch {}
@@ -432,7 +457,11 @@ contract InventoryProtectionHandler is Test {
         // refusal reflects the state (floor, cap, reference), not an oversized order.
         uint256 amountIn = bound(amountSeed, 1e15, 2000 ether);
         if (honest) ++tradeAttempts;
-        uint256 id = _allocate(curatorIdx, key, out, _net(out) / 4, 2);
+        // A quarter of N_out, capped at what admission allows (the room above the inventory floor, after other
+        // reservations): room-aware admission refuses anything larger.
+        uint256 quota = _net(out) / 4;
+        uint256 admissible = lens.admissibleCapacity(vault, out);
+        uint256 id = _allocate(curatorIdx, key, out, admissible < quota ? admissible : quota, 2);
         if (id == 0) return;
         (bool ok, uint256 got) = _swap(key, zeroForOne, amountIn, abi.encode(id));
         if (ok) {
@@ -458,7 +487,10 @@ contract InventoryProtectionHandler is Test {
         if (extremePrice) _setActive(sellAsset1 ? 2 ** 160 : 1, 0);
         uint256 room = lens.inventoryRoom(vault, c);
         uint256 out = overshoot ? room + 1 : bound(outSeed, 1, room + 2);
-        uint256 id = _allocate(curatorIdx, keyM, c, out, 2);
+        // Room-aware admission refuses an allocation above the room. For an overshoot the targets are lifted for the
+        // admission only, which leaves the state a reservation admitted under a looser floor leaves (reachable through
+        // a guardian tightening or LP exits, CE-2); the fill-time inventory check is what this action exercises.
+        uint256 id = _drainAllocation(curatorIdx, c, out, overshoot);
         if (id == 0) return;
         uint256 floor_;
         try lens.effectiveFloorX96(vault, id) returns (uint256 f) {
@@ -635,7 +667,10 @@ contract InventoryProtectionHandler is Test {
         if (lateLp) {
             vm.warp(block.timestamp + 5 days);
             _releaseExpired();
-            _allocate(seed, keyA, c0, vault.admissibleCapacity(c0), 30 * 24);
+            // Every unit the backing rule N - Q - R - D admits, which holds the late LP. With the floor on asset0
+            // room-aware admission caps a new commitment at the room (about 5% of N_0) and the LP would exit at once;
+            // one this size exists only if it was admitted under a looser floor (or LP exits shrank the room, CE-2).
+            _allocateWithoutFloor(seed, keyA, c0, type(uint256).max, 30 * 24);
             address lp = lps[seed % 3];
             if (holders[lp].shares > 1) _redeem(lp, holders[lp].shares / 2, true);
         }

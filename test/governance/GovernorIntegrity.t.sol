@@ -102,13 +102,16 @@ contract GovernorIntegrityTest is VaultTestBase {
         gov.execute(target, data);
     }
 
-    /// @dev An honest curator commits all free asset0 until `expiry`; lp0 then queues half its shares behind it.
+    /// @dev An honest curator commits every admissible unit of asset0 until `expiry`; lp0 then redeems all its shares
+    ///      and the part free inventory cannot pay is queued behind the commitment. With the fixture's inventory floor
+    ///      (tolerance 5%) admission caps the commitment at the room above the floor, about 5% of N_0, so only a
+    ///      whole-balance redemption reaches past free inventory.
     function _queueLpBehindCommitment(uint256 expiry) internal returns (uint256 rid) {
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c0, uint128(vault.admissibleCapacity(c0)));
         r.expiry = uint64(expiry);
         vm.prank(curator);
         auth.activateDirect(r);
-        (,,, rid) = _redeem(lp0, vault.sharesOf(lp0) / 2, true);
+        (,,, rid) = _redeem(lp0, vault.sharesOf(lp0), true);
         assertGt(vault.getRequest(rid).sharesPending, 0);
     }
 

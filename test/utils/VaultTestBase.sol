@@ -267,6 +267,30 @@ abstract contract VaultTestBase is Test {
         });
     }
 
+    /// @dev Sets both inventory targets to zero (keeping the tolerances) so that the next allocation is admitted without
+    ///      the room rule, and returns the bounds to restore with `_restoreInventoryFloor`. Tests of the fill-time
+    ///      inventory check use it to reach a state room-aware admission no longer creates directly but the vault can
+    ///      still be in: reserved capacity above the room, after the guardian raises the floor (immediately) or LP
+    ///      exits shrink the room (CE-2) under an existing reservation. The owner must not be a timelock.
+    function _suspendInventoryFloor() internal returns (uint256[4] memory saved) {
+        saved = [
+            lens.inventoryTargetPerShare(vault, 0),
+            lens.inventoryTargetPerShare(vault, 1),
+            lens.inventoryTolerancePips(vault, 0),
+            lens.inventoryTolerancePips(vault, 1)
+        ];
+        vm.prank(vault.owner());
+        // forge-lint: disable-next-line(unsafe-typecast) tolerances were read from uint24 fields.
+        vault.setInventoryBounds(0, 0, uint24(saved[2]), uint24(saved[3]));
+    }
+
+    /// @dev Restores the bounds `_suspendInventoryFloor` returned.
+    function _restoreInventoryFloor(uint256[4] memory saved) internal {
+        vm.prank(vault.owner());
+        // forge-lint: disable-next-line(unsafe-typecast) tolerances were read from uint24 fields.
+        vault.setInventoryBounds(saved[0], saved[1], uint24(saved[2]), uint24(saved[3]));
+    }
+
     function _allocate(PoolKey memory key, Currency out, uint128 maxOut) internal returns (uint256 id) {
         ISharedCommitmentVault.AllocationRequest memory req = _request(key, out, maxOut);
         vm.prank(curator);
@@ -397,7 +421,14 @@ abstract contract VaultTestBase is Test {
             uint256 qd = Q[i] + D;
             uint256 R = lens.bufferFloor(vault, c);
             uint256 expected = N > qd && N - qd > R ? N - qd - R : 0;
-            assertEq(lens.admissibleCapacity(vault, c), expected, "admission != max(0, N - Q - R - D)");
+            // Room rule: with a target, also at most N - L - Q, L = ceil(S * tau * (1e6 - kappa) / 1e24).
+            uint256 tau = lens.inventoryTargetPerShare(vault, i);
+            if (tau != 0) {
+                uint256 L = FullMath.mulDivRoundingUp(S * tau, 1e6 - lens.inventoryTolerancePips(vault, i), 1e24);
+                uint256 room = N > L + Q[i] ? N - L - Q[i] : 0;
+                if (room < expected) expected = room;
+            }
+            assertEq(lens.admissibleCapacity(vault, c), expected, "admission != min(N - Q - R - D, N - L - Q)");
         }
         if (S != 0) assertGt(nSum, 0, "shares outstanding with no assets");
     }

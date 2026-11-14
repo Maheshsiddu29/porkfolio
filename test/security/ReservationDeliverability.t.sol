@@ -18,7 +18,7 @@ using VaultStateReader for SharedCommitmentVault;
 /// @notice What reserved capacity Q_a does and does not promise, when hooks and LP exits compete for one reserve.
 /// @dev Fixture: 1e24 of each asset, 1e24 shares, 1:1 sell floors in static mode. A registered test hook fills at
 ///      exact amounts at or above the floor. docs/security/G03_LP_ACCOUNTING.md §5 (examples B and G) and §6
-///      (counterexample CE-1) use these numbers.
+///      (counterexample CE-1, closed in C02 by room-aware admission) use these numbers.
 contract ReservationDeliverabilityTest is VaultTestBase {
     uint160 internal constant SWAP_FLAGS = Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG;
 
@@ -91,29 +91,34 @@ contract ReservationDeliverabilityTest is VaultTestBase {
         _assertEquations();
     }
 
-    /// @notice Counterexample CE-1. The admission rule does not look at the inventory floor, so a reservation can be
-    ///         admitted that can never be filled in full. Here 200,000 is reserved while only 50,000 sits above the
-    ///         floor; after 50,000 is sold, the next unit is refused, and the unsellable 150,000 still counts in Q_a
-    ///         and is still withheld from LP exits.
-    /// @dev Not a solvency defect: Q_a <= N_a holds and LPs are on the safe side. It means Q_a is an upper bound on
-    ///      what hooks can buy, not a promise. A fee charged for reserved capacity would charge for these units.
-    function test_admissionIgnoresInventoryFloor() public {
+    /// @notice Counterexample CE-1, closed by room-aware admission. Before it, the admission rule did not look at the
+    ///         inventory floor: 200,000 was admitted while only 50,000 sat above the floor, so 150,000 could never be
+    ///         sold yet counted in Q_a and was withheld from LP exits. Now the same request is refused with the room as
+    ///         the available amount, exactly the room is admitted, one more unit is refused, and the reservation can be
+    ///         filled in full.
+    /// @dev Room = N_a - L_a - Q_a = 1,000,000 - 950,000 - 0. What admission promises is that the units were sellable
+    ///      when admitted; `test_lpExitShrinksInventoryRoomOfExistingReservation` (CE-2) shows that this can change
+    ///      later.
+    function test_admissionRefusesBeyondInventoryRoom_CE1() public {
         _setFloor();
         assertEq(lens.inventoryRoom(vault, c1), 50_000 ether);
-        uint256 id = _allocate(keyM, c1, 200_000 ether);
+        assertEq(vault.admissibleCapacity(c1), 50_000 ether, "admission limit is the room");
+        ISharedCommitmentVault.AllocationRequest memory r = _request(keyM, c1, 200_000 ether);
+        vm.prank(curator);
+        vm.expectRevert(
+            abi.encodeWithSelector(ISharedCommitmentVault.InsufficientBacking.selector, 200_000 ether, 50_000 ether)
+        );
+        auth.activateDirect(r);
+
+        uint256 id = _allocate(keyM, c1, 50_000 ether);
+        r = _request(keyM, c1, 1);
+        vm.prank(curator);
+        vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.InsufficientBacking.selector, 1, 0));
+        auth.activateDirect(r);
 
         _fill(id, c1, 50_000 ether, 50_000 ether);
+        assertEq(vault.reserved(c1), 0, "the whole reservation was sellable");
         assertEq(lens.inventoryRoom(vault, c1), 0);
-
-        mal.configure(MaliciousConsumerHook.Attack.ExactAmounts, id, 1);
-        _expectSwapRevert(
-            address(mal),
-            abi.encodeWithSelector(VaultRiskBoundary.InventoryFloorBreached.selector, 950_000 ether - 1, 950_000 ether)
-        );
-        _swapRaw(keyM, true, -1, "");
-
-        assertEq(vault.reserved(c1), 150_000 ether, "unsellable capacity still reserved");
-        assertEq(lens.freeInventory(vault, c1), 800_000 ether, "and still withheld from exits");
         _assertEquations();
     }
 

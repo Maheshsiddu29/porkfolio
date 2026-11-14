@@ -375,7 +375,7 @@ contract GovernanceLivenessHandler is Test {
         if (opQueuedAt != 0) return;
         toggle = !toggle;
         uint24 k = toggle ? 60_000 : 50_000;
-        op = abi.encodeCall(vault.setInventoryBounds, (tau, tau, k, k));
+        op = abi.encodeCall(vault.setInventoryBounds, (0, tau, k, k));
         opQueuedAt = _now();
         vm.prank(govAdmin);
         (, opEta) = gov.queue(address(vault), op);
@@ -449,7 +449,10 @@ contract GovernanceLivenessInvariantsTest is VaultTestBase {
 
         vm.startPrank(owner);
         vault.setGuardian(guardian);
-        vault.setInventoryBounds(tau, tau, 50_000, 50_000);
+        // Floor on asset1 only: commitments sell asset0, and with a floor on asset0 room-aware admission would cap
+        // each at the room above it (about 5% of N_0), so no commitment could hold the queue right after admission.
+        // Asset0 without a floor keeps the campaign on the case G02 measures: the most a commitment can withhold.
+        vault.setInventoryBounds(0, tau, 50_000, 50_000);
         vault.setCurator(curator2, true);
         vault.setCurator(address(griefer), true);
         _openLimits(ISharedCommitmentVault.RiskScope.Curator, curator2);

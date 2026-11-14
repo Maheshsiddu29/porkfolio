@@ -79,6 +79,8 @@ contract Rehearse is Script {
         console2.log("LP deposited / redeemed instantly (shares)", shares, inst);
     }
 
+    /// @dev Two allocations of 0.25% of backing each: together half the room above the inventory floor at the default
+    ///      1% tolerance (`KAPPA_PIPS`), which room-aware admission requires; the rehearsal swaps need 100 tokens each.
     function _activate(DeploySystem.Deployment memory d) internal {
         uint256 curatorKey = vm.envUint("CURATOR_KEY");
         address curatorAddr = vm.addr(curatorKey);
@@ -93,7 +95,7 @@ contract Rehearse is Script {
             currencyIn: Currency.wrap(d.token0),
             currencyOut: Currency.wrap(d.token1),
             zeroForOne: true,
-            maxOut: uint128(v.backing(Currency.wrap(d.token1)) / 50),
+            maxOut: uint128(v.backing(Currency.wrap(d.token1)) / 400),
             minInPerOutX96: 1,
             expiry: uint64(block.timestamp + 1 days),
             validAfter: uint64(block.timestamp),
@@ -109,7 +111,7 @@ contract Rehearse is Script {
             consumer: d.hookB,
             key: ds.keyB(d),
             currencyOut: Currency.wrap(d.token1),
-            maxOut: uint128(v.backing(Currency.wrap(d.token1)) / 50),
+            maxOut: uint128(v.backing(Currency.wrap(d.token1)) / 400),
             minInPerOutX96: 1,
             expiry: uint64(block.timestamp + 1 days),
             nonce: uint256(keccak256(abi.encode("rehearsal-direct", block.timestamp))),

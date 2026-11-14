@@ -86,7 +86,12 @@ contract SharedCoreHooksTest is VaultTestBase {
     }
 
     function _swapOut(PoolKey memory key, bool zeroForOne, uint256 amountIn) internal returns (uint256) {
-        uint256 id = _allocate(key, zeroForOne ? c1 : c0, uint128(amountIn * 2));
+        // Quota: twice the input as a cushion, capped at what admission allows (with the inventory floor set, the
+        // room above it). The fill itself is about amountIn, well inside either bound.
+        Currency out = zeroForOne ? c1 : c0;
+        uint256 quota = amountIn * 2;
+        if (vault.admissibleCapacity(out) < quota) quota = vault.admissibleCapacity(out);
+        uint256 id = _allocate(key, out, uint128(quota));
         return _out(_swap(key, zeroForOne, amountIn, id), zeroForOne);
     }
 

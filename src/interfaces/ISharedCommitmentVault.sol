@@ -298,7 +298,9 @@ interface ISharedCommitmentVault {
     error HorizonExceeded(uint64 expiry, uint256 maxExpiry);
     /// @notice The instruction's deadline has passed.
     error InstructionExpired(uint64 deadline);
-    /// @notice The allocation exceeds what the admission rule allows: N_a - Q_a - R_a - D_a.
+    /// @notice The allocation exceeds what the admission rules allow: N_a - Q_a - R_a - D_a and, when the asset has
+    ///         an inventory target, the room above the inventory floor, N_a - L_a - Q_a. `available` is the smaller
+    ///         of the two (zero when either is negative).
     error InsufficientBacking(uint256 requested, uint256 available);
 
     // ------------------------------------------------------------------

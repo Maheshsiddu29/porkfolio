@@ -460,17 +460,19 @@ contract VaultGovernorTest is VaultTestBase {
 
     uint256[] internal _allocations;
 
-    /// @dev A curator commits almost all of asset0 for the full horizon, then lp0 redeems half its shares; the part
-    ///      that cannot be paid now is queued behind the commitment.
+    /// @dev A curator commits every admissible unit of asset0 for the full horizon, then lp0 redeems all its shares;
+    ///      the part that cannot be paid now is queued behind the commitment. With the fixture's inventory floor
+    ///      (tolerance 5%) admission caps the commitment at the room above the floor, about 5% of N_0, so only a
+    ///      whole-balance redemption reaches past free inventory.
     function _redeemQueuedBehindCommitment()
         internal
         returns (uint256 instantShares, uint256 a0, uint256 a1, uint256 rid)
     {
-        ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c0, uint128(vault.backing(c0) * 99 / 100));
+        ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c0, uint128(vault.admissibleCapacity(c0)));
         r.expiry = uint64(vm.getBlockTimestamp() + vault.MAX_HORIZON());
         vm.prank(curator);
         _allocations.push(auth.activateDirect(r));
-        (instantShares, a0, a1, rid) = _redeem(lp0, vault.sharesOf(lp0) / 2, true);
+        (instantShares, a0, a1, rid) = _redeem(lp0, vault.sharesOf(lp0), true);
         assertGt(rid, 0, "queued");
     }
 

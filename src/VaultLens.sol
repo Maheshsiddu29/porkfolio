@@ -261,18 +261,20 @@ contract VaultLens {
         return VaultStateReader.pendingDemand(vault, currency);
     }
 
-    /// @notice Largest new allocation of `currency` the admission rule accepts right now: N_a - Q_a - R_a - D_a,
-    ///         or 0 if that is negative.
+    /// @notice Largest new allocation of `currency` the admission rules accept right now: the smaller of
+    ///         N_a - Q_a - R_a - D_a and, when the asset has an inventory target, the room above the inventory floor
+    ///         left by existing commitments, N_a - L_a - Q_a; 0 if either is negative.
     /// @dev Same as the vault's `_admissible(currency, _eligibleBacking(currency))`, the limit `reserveFor`
-    ///      enforces. Example: N_a = 1,000, Q_a = 300, R_a = 100 and D_a = 150 give 450. This does not include the
-    ///      curator's own ceiling or the exposure caps, which `reserveFor` checks separately.
+    ///      enforces. Example: N_a = 1,000, Q_a = 300, R_a = 100 and D_a = 150 give 450 without a target, and 50
+    ///      with L_a = 650. This does not include the curator's own ceiling or the exposure caps, which `reserveFor`
+    ///      checks separately.
     ///
-    ///      Computed as max(0, max(0, E_a - Q_a) - R_a) with E_a = N_a - D_a (exact, since D_a <= N_a). Each term
-    ///      is subtracted in turn with a floor at zero instead of summing Q_a + R_a + D_a first: R_a is an admin
-    ///      input with no upper bound (the guardian may raise it to type(uint256).max to stop new allocations in
-    ///      this asset), so the sum could overflow. Because every term is non-negative, the floored chain equals
-    ///      max(0, N - D - Q - R) exactly: once an intermediate result reaches zero, the exact value is already
-    ///      <= 0.
+    ///      The first term is computed as max(0, max(0, E_a - Q_a) - R_a) with E_a = N_a - D_a (exact, since
+    ///      D_a <= N_a). Each term is subtracted in turn with a floor at zero instead of summing Q_a + R_a + D_a
+    ///      first: R_a is an admin input with no upper bound (the guardian may raise it to type(uint256).max to stop
+    ///      new allocations in this asset), so the sum could overflow. Because every term is non-negative, the
+    ///      floored chain equals max(0, N - D - Q - R) exactly: once an intermediate result reaches zero, the exact
+    ///      value is already <= 0. L_a is the vault's inventory floor (see `inventoryRoom`).
     /// @param vault Vault to read.
     /// @param currency Asset the allocation would sell.
     /// @return Raw units of `currency`.

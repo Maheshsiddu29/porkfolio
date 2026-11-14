@@ -296,7 +296,11 @@ contract OracleBandHooksTest is VaultTestBase {
         PoolKey memory key = useA ? s.kA : s.kB;
         Currency cin = zfo ? s.x0 : s.x1;
         Currency cout = zfo ? s.x1 : s.x0;
-        uint256 id = _alloc(s, key, cout, s.v.backing(cout) / 5);
+        // A fifth of backing, or less if admission allows less: with the inventory floor set, room-aware admission
+        // caps a reservation at the room above the floor, which is also where fills used to stop.
+        uint256 maxOut = s.v.backing(cout) / 5;
+        uint256 admissible = lens.admissibleCapacity(IVaultState(address(s.v)), cout);
+        uint256 id = _alloc(s, key, cout, admissible < maxOut ? admissible : maxOut);
         uint256 chunk = s.v.backing(cin) / 500;
         uint256[2] memory sizes = [10 ** (zfo ? s.td0 : s.td1) / 1000 + 1, chunk];
         for (uint256 k; k < 40; ++k) {

@@ -207,7 +207,11 @@ contract OracleRiskBoundaryTest is VaultTestBase {
             uint256 pay = _required(room + 1, _dyn(c, price, 0)); // what the corrupted price floor asks: dust
             assertLt(pay, room / 1e18, "the price floor alone would let the room go for dust");
             assertEq(lens.inventoryRoom(vault, c), room, "lens room");
+            // One unit more than the room: admitted before the floor applied (as after a later tightening or CE-2),
+            // since room-aware admission refuses it directly. The fill-time check below is what this test is about.
+            uint256[4] memory saved = _suspendInventoryFloor();
             uint256 id = _allocM(c, uint128(room + 1), 1);
+            _restoreInventoryFloor(saved);
             uint256 floorAfter = _invFloor(k);
             _tradeExpect(
                 id,
@@ -228,7 +232,10 @@ contract OracleRiskBoundaryTest is VaultTestBase {
         vm.prank(owner);
         vault.setInventoryBounds(tau, tau, KAPPA, KAPPA);
         uint256 room = _net(c0) - _invFloor(0);
+        // Admitted without the floor (room-aware admission would refuse room + 1), then the floor applies at fill time.
+        uint256[4] memory saved = _suspendInventoryFloor();
         uint256 id = _allocM(c0, uint128(room + 1), PRICE_1_1_X96);
+        _restoreInventoryFloor(saved);
         _tradeExpect(
             id,
             c0,
@@ -439,7 +446,10 @@ contract OracleRiskBoundaryTest is VaultTestBase {
     ///         queue processing, claims and cancellation all still work, and only fills stop.
     function test_lpPaths_independentOfAdapter() public {
         _installNoStaticFloors();
-        uint256 id = _allocM(c0, uint128(_net(c0) / 2), 1); // reserve half of asset0 so a redemption queues
+        // Reserve half of asset0 so a redemption queues; admitted without the floor (it is ten times the room).
+        uint256[4] memory saved = _suspendInventoryFloor();
+        uint256 id = _allocM(c0, uint128(_net(c0) / 2), 1);
+        _restoreInventoryFloor(saved);
         adapter.setBroken(true);
         _depositShares(trader, 1000 ether);
         _redeem(trader, 400 ether, true);

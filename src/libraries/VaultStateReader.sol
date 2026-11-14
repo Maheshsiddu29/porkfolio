@@ -8,6 +8,7 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {ISharedCommitmentVault} from "../interfaces/ISharedCommitmentVault.sol";
 import {IVaultState} from "../interfaces/IVaultState.sol";
 import {IMarketRiskAdapter} from "../interfaces/IMarketRiskAdapter.sol";
+import {VaultRiskBoundary} from "../risk/VaultRiskBoundary.sol";
 
 /// @title VaultStateReader
 /// @notice Decodes `SharedCommitmentVault`'s stored accounting from raw storage words read with the vault's
@@ -268,13 +269,28 @@ library VaultStateReader {
         return netAssets(vault, currency) - pendingDemand(vault, currency);
     }
 
-    /// @dev Admission limit max(0, N_a - Q_a - R_a - D_a), raw units: the largest new allocation `reserveFor`'s
-    ///      admission rule accepts now (the curator ceiling and the exposure caps are separate). The vault's
-    ///      `_admissible(currency, _eligibleBacking(currency))`: each term is subtracted in turn with a floor at zero,
-    ///      which equals the exact value without ever summing Q_a + R_a + D_a, whose sum can overflow because R_a
-    ///      has no upper bound. Example: N_a = 1,000, Q_a = 300, R_a = 100 and D_a = 150 give 450.
-    function admissibleCapacity(IVaultState vault, Currency currency) internal view returns (uint256) {
-        return _sub0(_sub0(eligibleBacking(vault, currency), reserved(vault, currency)), bufferFloor(vault, currency));
+    /// @dev Admission limit, raw units: the largest new allocation `reserveFor`'s admission rules accept now (the
+    ///      curator ceiling and the exposure caps are separate). The vault's `_admissible(currency,
+    ///      _eligibleBacking(currency))`:
+    ///
+    ///          min( max(0, N_a - Q_a - R_a - D_a),  max(0, N_a - L_a - Q_a) )
+    ///
+    ///      with the second term only when the asset has an inventory target (tau_a != 0), and
+    ///      L_a = ceil(S * tau_a * (1e6 - kappa_a) / (1e18 * 1e6)). In the first term each subtrahend is taken away in
+    ///      turn with a floor at zero, which equals the exact value without ever summing Q_a + R_a + D_a, whose sum
+    ///      can overflow because R_a has no upper bound. Example: N_a = 1,000, Q_a = 300, R_a = 100 and D_a = 150
+    ///      give 450 without a target; with L_a = 650 the room term is 50 and the limit is 50.
+    function admissibleCapacity(IVaultState vault, Currency currency) internal view returns (uint256 limit) {
+        uint256 q = reserved(vault, currency);
+        limit = _sub0(_sub0(eligibleBacking(vault, currency), q), bufferFloor(vault, currency));
+        uint256 i = currency == vault.asset1() ? 1 : 0;
+        uint256 target = inventoryTargetPerShare(vault, i);
+        if (target != 0) {
+            uint256 floor_ =
+                VaultRiskBoundary.inventoryFloor(totalShares(vault), target, inventoryTolerancePips(vault, i));
+            uint256 room = _sub0(_sub0(netAssets(vault, currency), floor_), q);
+            if (room < limit) limit = room;
+        }
     }
 
     /// @dev a - b, or 0 if b > a.

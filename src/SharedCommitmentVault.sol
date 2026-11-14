@@ -55,7 +55,8 @@ import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
 /// Accounting relations every external function maintains:
 ///   Q_a + W_a <= B_a <= PoolManager.balanceOf(vault, a)
 ///   W_a = sum of request claimables;  P = sum of request sharesPending;  S = sum(sharesOf) + P.
-/// Admission rule for a new allocation of size q:  Q_a + q + R_a + D_a <= N_a.
+/// Admission rule for a new allocation of size q:  Q_a + q + R_a + D_a <= N_a, and, when asset a has an inventory
+/// target, Q_a + q <= N_a - L_a (L_a is the inventory floor; see "Market-risk boundary").
 ///
 /// Roles.
 ///   Owner     Configures everything, initializes the vault, can loosen limits. Has no function that moves LP assets.
@@ -659,6 +660,10 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      floor after fees or skew have lifted holdings above it. Example: tau_0 = 2e15 (0.002 raw asset0 per share, scaled by
     ///      1e18) and kappa_0 = 50,000 (5%) with S = 1e12 shares give L_0 = ceil(1e12 * 2e15 * 950,000 / 1e24) =
     ///      1.9e9 raw asset0.
+    ///
+    ///      The floor also bounds new allocations: `reserveFor` admits only what fits in the room N_a - L_a left by
+    ///      existing commitments. A change here does not touch existing allocations or Q_a; a higher floor can leave
+    ///      part of them unsellable until it is lowered again or they expire.
     /// @param target0 tau_0, raw asset0 per share scaled by 1e18. Below 2^128.
     /// @param target1 tau_1, raw asset1 per share scaled by 1e18. Below 2^128.
     /// @param tolerance0 kappa_0, pips; at most 1e6 (1e6 = no floor).
@@ -1015,8 +1020,9 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      `generation` equals the curator's current generation; deadline not passed; consumer registered and equal
     ///      to `key.hooks`; pool currencies equal the vault's pair; `currencyOut` is one of them; direction
     ///      configured and not halted; curator floor >= vault floor; non-zero `maxOut` within MAX_AMOUNT; expiry in
-    ///      the future and within MAX_HORIZON; curator ceiling; the admission rule Q_a + maxOut + R_a + D_a <= N_a;
-    ///      and the exposure caps of the hook, the curator and the vault. Nonces are the module's: the vault does not
+    ///      the future and within MAX_HORIZON; curator ceiling; the admission rules Q_a + maxOut + R_a + D_a <= N_a
+    ///      and, when the asset has an inventory target, Q_a + maxOut <= N_a - L_a; and the exposure caps of the
+    ///      hook, the curator and the vault. Nonces are the module's: the vault does not
     ///      track them, and only reports `req.nonce` in `AllocationCreated`. Each allocation gets a new id, so two
     ///      requests can never produce the same allocation.
     ///
@@ -1026,10 +1032,13 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      curator is the caller, it passes the current one.
     ///
     ///      Admission and eligible backing. E_a = N_a - D_a is net assets minus the queue's pro-rata claim. The
-    ///      admission limit is max(0, E_a - Q_a - R_a), computed by subtracting in turn with a floor at zero, which
-    ///      equals max(0, N_a - Q_a - R_a - D_a) (see `_admissible`). It protects three things from being
-    ///      promised to a hook: existing commitments (Q_a), the buffer (R_a), and the queue's pro-rata share (D_a).
-    ///      Claimable assets W_a are excluded because N_a = B_a - W_a.
+    ///      admission limit is the smaller of max(0, N_a - Q_a - R_a - D_a) and, when the asset has an inventory
+    ///      target, the room left above the inventory floor, max(0, N_a - L_a - Q_a) (see `_admissible`). The
+    ///      first protects existing commitments (Q_a), the buffer (R_a) and the queue's pro-rata share (D_a); the
+    ///      second makes sure that every reserved unit could be sold without breaching the inventory floor at the
+    ///      moment it is admitted. Neither promises that it can still be sold later: LP exits shrink the room above
+    ///      the floor, and fills can be refused for other reasons (oracle, pause, halt, freeze, flow caps). Claimable
+    ///      assets W_a are excluded because N_a = B_a - W_a.
     ///
     ///      Exposure caps. For each scope, with `held` its current unused reserved capacity (hookReserved,
     ///      curatorReserved or Q_a) and `bps` its maxReservedBps, the allocation is accepted only if
@@ -1390,18 +1399,46 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         return _netAssets(currency) - _pendingDemand(currency);
     }
 
-    /// @dev Admission limit max(0, E_a - Q_a - R_a) = max(0, N_a - Q_a - R_a - D_a) with E_a = N_a - D_a (exact,
-    ///      since D_a <= N_a). Example: N_a = 1,000, Q_a = 300, R_a = 100 and D_a = 150 give 450.
+    /// @dev Admission limit: the largest new allocation of `currency` that the two backing rules accept,
     ///
+    ///          min( max(0, N_a - Q_a - R_a - D_a),  max(0, N_a - L_a - Q_a) )
+    ///
+    ///      where the second term applies only when the asset has an inventory target (tau_a != 0). With
+    ///      E_a = N_a - D_a (exact, since D_a <= N_a) the first term is max(0, E_a - Q_a - R_a).
+    ///
+    ///      First term: existing commitments, the buffer and the queue's pro-rata claim are never promised to a hook.
     ///      Each term is subtracted in turn with a floor at zero instead of summing Q_a + R_a + D_a first. R_a is an
     ///      admin input with no upper bound (the guardian may raise it to type(uint256).max to stop new allocations
     ///      in this asset), so the sum could overflow and revert with a panic. Because every term is non-negative,
     ///      the floored chain equals max(0, N - D - Q - R) exactly: once an intermediate result reaches zero, the
-    ///      exact value is already <= 0. The result is therefore the exact limit wherever the sum would not
-    ///      overflow, and 0 (so `reserveFor` reverts with `InsufficientBacking`) wherever it would.
-    ///      `VaultLens.admissibleCapacity` repeats this formula.
-    function _admissible(Currency currency, uint256 eligible) internal view returns (uint256) {
-        return _sub0(_sub0(eligible, reserved[currency]), bufferFloor[currency]);
+    ///      exact value is already <= 0.
+    ///
+    ///      Second term (room): fills may never take N_a below the inventory floor
+    ///      L_a = ceil(S * tau_a * (1e6 - kappa_a) / (1e18 * 1e6)), so only the room N_a - L_a above it can ever be
+    ///      sold. Admitting no more than the room left by existing commitments means every unit reserved was sellable
+    ///      at the moment it was admitted: right after a successful `reserveFor`, Q_a <= N_a - L_a. It does not keep
+    ///      it sellable: an LP exit lowers N_a by more than it lowers L_a (each share holds more than the floor per
+    ///      share), and the guardian may raise the floor, so reserved capacity can later sit below the floor and be
+    ///      refused at fill time. L_a is computed exactly as `exchange` computes it (`VaultRiskBoundary`, rounded up,
+    ///      S including queued shares), so admission and fills compare against the same number.
+    ///
+    ///      Example: N_a = 1,000,000, Q_a = 10,000, R_a = 0, D_a = 0, L_a = 950,000: the first term is 990,000, the
+    ///      room term 40,000, so 40,000 is admissible. With tau_a = 0 the limit is 990,000.
+    ///
+    ///      Q_a here is the stored total after the caller's sweep. `VaultStateReader.admissibleCapacity` repeats this
+    ///      formula for off-chain callers.
+    function _admissible(Currency currency, uint256 eligible) internal view returns (uint256 limit) {
+        uint256 q = reserved[currency];
+        limit = _sub0(_sub0(eligible, q), bufferFloor[currency]);
+        uint256 i = currency == asset1 ? 1 : 0;
+        uint256 target = inventoryTargetPerShare[i];
+        if (target != 0) {
+            uint256 room = _sub0(
+                _netAssets(currency), VaultRiskBoundary.inventoryFloor(totalShares, target, inventoryTolerancePips[i])
+            );
+            room = _sub0(room, q);
+            if (room < limit) limit = room;
+        }
     }
 
     /// @dev D_a = ceil(P * N_a / S): what the pending queue would be owed in `currency` if it were finalized now.

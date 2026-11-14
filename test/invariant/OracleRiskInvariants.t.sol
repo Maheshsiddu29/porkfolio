@@ -56,6 +56,7 @@ contract OracleRiskHandler is Test {
     uint256 public drained;
     uint256 public fills;
     uint256 public refusedAtFloor; // drains over the room refused with the vault's InventoryFloorBreached
+    uint256 public refusedAtAdmission; // reservations over the room refused by room-aware admission
     bytes internal lastSwapError; // revert data of the last failed `_swap`
 
     constructor(
@@ -130,8 +131,15 @@ contract OracleRiskHandler is Test {
         uint256 out = bound(outSeed, 1, room + 2);
         if (overshoot) out = room + 1;
         if (out == 0 || out > type(uint120).max) return;
-        uint256 id = _allocate(c, out);
-        if (id == 0) return;
+        // Room-aware admission refuses anything above the room. For an overshoot the owner lifts the targets for this
+        // one admission and restores them, which leaves the state a reservation admitted under a looser floor leaves:
+        // reserved capacity above the room (reachable through a guardian tightening or LP exits, CE-2). The fill
+        // below is then refused by the fill-time inventory check, which is what this action exercises.
+        uint256 id = overshoot ? _allocateWithoutFloor(c, out) : _allocate(c, out);
+        if (id == 0) {
+            if (out > room) ++refusedAtAdmission;
+            return;
+        }
         uint256 floor_;
         try lens.effectiveFloorX96(vault, id) returns (uint256 f) {
             floor_ = f;
@@ -161,6 +169,19 @@ contract OracleRiskHandler is Test {
         uint256 id = _allocate(c, out);
         if (id == 0) return;
         if (!_swap(id, c, out + out / 100 + 1, out)) _cancelAllocation(id);
+    }
+
+    /// @dev `_allocate` with both inventory targets lifted for the admission only (tolerances kept), then restored.
+    function _allocateWithoutFloor(Currency c, uint256 out) internal returns (uint256 id) {
+        uint256 tau0 = vault.inventoryTargetPerShare(0);
+        uint256 tau1 = vault.inventoryTargetPerShare(1);
+        uint24 k0 = vault.inventoryTolerancePips(0);
+        uint24 k1 = vault.inventoryTolerancePips(1);
+        vm.prank(vault.owner());
+        vault.setInventoryBounds(0, 0, k0, k1);
+        id = _allocate(c, out);
+        vm.prank(vault.owner());
+        vault.setInventoryBounds(tau0, tau1, k0, k1);
     }
 
     /// @dev Unused capacity would otherwise stay reserved until expiry and block later allocations (admission rule).
@@ -356,6 +377,7 @@ contract OracleRiskInvariantsTest is VaultTestBase {
         console2.log("fills", handler.fills());
         console2.log("drained raw units", handler.drained());
         console2.log("refused at the inventory floor", handler.refusedAtFloor());
+        console2.log("refused at admission (room)", handler.refusedAtAdmission());
     }
 }
 

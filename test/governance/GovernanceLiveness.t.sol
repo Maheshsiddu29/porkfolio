@@ -35,6 +35,10 @@ contract GovernanceLivenessTest is VaultTestBase {
     uint256 internal tau;
     address internal v;
     bytes internal loosen; // LONG_DELAY: tolerance 5% -> 10% on both assets
+    // Inventory floor on asset1 only. Commitments here sell asset0, and room-aware admission caps a commitment at the
+    // room above the floor of the asset it sells (about 5% of N_0 with a 5% tolerance), so with a floor on asset0 no
+    // single commitment could take free asset0 to zero. Asset0 without a floor is the case these tests measure: the
+    // most one commitment can withhold. `test/security/RoomAwareAdmission.t.sol` covers the floored case.
 
     function setUp() public override {
         super.setUp();
@@ -48,7 +52,7 @@ contract GovernanceLivenessTest is VaultTestBase {
 
         vm.startPrank(owner);
         vault.setGuardian(guardian);
-        vault.setInventoryBounds(tau, tau, 50_000, 50_000);
+        vault.setInventoryBounds(0, tau, 50_000, 50_000);
         vault.setCurator(address(griefer), true);
         vault.setCuratorCeiling(address(griefer), c0, type(uint256).max);
         vault.setCuratorCeiling(curator, c0, type(uint256).max);
@@ -56,7 +60,7 @@ contract GovernanceLivenessTest is VaultTestBase {
         vault.transferOwnership(address(gov));
         vm.stopPrank();
         _run1(address(gov), abi.encodeCall(gov.acceptVaultOwnership, ()));
-        loosen = abi.encodeCall(vault.setInventoryBounds, (tau, tau, 100_000, 100_000));
+        loosen = abi.encodeCall(vault.setInventoryBounds, (0, tau, 100_000, 100_000));
     }
 
     // =================================================================== admin helpers
