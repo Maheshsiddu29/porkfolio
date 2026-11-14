@@ -612,3 +612,91 @@ only to reservations created afterwards.
 | Replay of an intent | nonce bitmap, generation, deadline (unchanged); one `post` per allocation id | IMPLEMENTED + PROPOSED |
 | Bond counted as backing | separate custody; admission reads `N` only | §5.6 |
 | Realization timed to move core-mode quotes | realization raises `N_1` like a donation of earned fees; amount is not attacker-chosen; bounded by `U_a` | ARGUED; CE-G5-6 (§12.3) |
+
+## 6. Idle-yield custody and loss model
+
+### 6.1 The two models
+
+**Model A — LP-held, not recallable.** The commitment reserve is 100% physical ERC-6909 claims. Porkfolio holds no
+external ERC-4626 shares, calls no strategy and recalls nothing. An LP who wants yield on part of its capital holds
+the external shares itself (outside Porkfolio, or later through an optional periphery wrapper that is not part of the
+core and that the vault does not know about). Those shares are not available to Porkfolio and are never counted.
+
+**Model B — custody module, recallable.** A `YieldCustody` module holds external shares `Z_a` for the vault's
+shareholders and can attempt redemption ("recall") when the vault needs physical inventory. Share accounting is in
+kind (design note §3.4, Y1): each vault share is a fraction of physical `N_a` and of `Z_a`; deposits buy both parts;
+exits receive both parts, the external part as a claimable balance in the custody module. Book-value accounting
+(Y2) is rejected (D-7): a stale value pays exiting LPs at the expense of remaining ones (400,000 paid against a fair
+360,000 in `test_bookValue_staleExitTransfersLoss`) unless every exit re-reads the strategy, which breaks P-5.
+
+### 6.2 Comparison
+
+| Criterion | Model A | Model B (Y1, in kind) |
+|---|---|---|
+| Shared-liquidity goal (commitments on one reserve) | fully met | met only for physical capital; every unit deployed is not admissible and not instantly exitable until recalled |
+| Idle-yield goal | not met inside the reserve | met for capital above every requirement (`I_a`, §6.3) |
+| Counts external assets as backing? | no | no (required); admission, `W`, `D`, `R` and fills stay physical |
+| Strategy code reachable from | nowhere | deploy, recall, deposit (buying the external part); never `exchange`, exits or claims |
+| Deposits depend on the strategy? | no | yes: fail closed while the strategy refuses `mint` |
+| Exits depend on the strategy? | no | no, if the external part is credited to a claimable ledger rather than transferred |
+| Valuation of external shares | none | none (in kind) |
+| Loss allocation | n/a | pro rata through each share's external part; realized recall losses pro rata through `N_a` |
+| New attack surface | none | inflation/donation on first deploy, strategy pause, transfer hooks, withdrawal fees, illiquidity, allowlist governance |
+| Vault changes | none | deposit, redeem, queue finalization and claim paths carry a third basket component; a no-share inflow entry for recalls; deploy entry; inventory-floor interaction (D-8). ESTIMATE ≥ 1 KB of vault runtime (not measured) |
+| Fits the V2 byte budget (§8)? | yes | **no**: V2 already uses the reclaimed bytes |
+
+### 6.3 Can either model meet both goals?
+
+**Neither meets both in full (PROVEN for B's limit, from the admission rule).** Admission, fills, `W` and `D` must use
+physical claims only, because `maxWithdraw` and `previewRedeem` describe the present and promise nothing about the
+moment a reservation is consumed (G03 design note §3.2). Hence at any instant deployed capital and committable
+capital are disjoint:
+
+    deployable_a = I_a = max(0, min(N_a − Q_a − R_a − D_a − K_a,  room_a − Q_a))
+
+with `K_a` a liquidity buffer for instant exits (D-10). Deploying `x` lowers future admissible capacity and `F_a` by
+`x` until it is recalled, and recall is best effort. So B delivers yield only on capital that neither current
+commitments, nor the queue, nor the buffers, nor the inventory room above `Q` need; and when demand for commitments
+returns, that capital is not available for admission until a recall succeeds.
+
+- **A** keeps the shared-liquidity guarantees exactly as they are and gives no yield inside the reserve.
+- **B** gives yield on genuinely idle capital without weakening any commitment, at the cost of strategy-dependent
+  deposits, a four-asset exit basket (two pair tokens, two strategy share tokens), new governance (allowlist, caps,
+  deployer role) and at least a kilobyte of LP-path code in the vault.
+
+### 6.4 Capital movements (specification for Model B; not in V2)
+
+Per asset `a`; `N_a` physical, `Z_a` external shares by internal count (shares sent to the module directly are not
+counted, as donated claims are not).
+
+| Movement | Who | Condition | Effect |
+|---|---|---|---|
+| Deploy `x` | deployer role within limits (D-9) | `x ≤ I_a`; strategy allowlisted with `asset() = a`; `maxDeposit ≥ x`; caps; value check: shares received redeem now for ≥ `x(1 − ε)`; shares received = measured balance change; exact approval | vault burns `x` claims, custody deposits `x`, `B_a −= x`, `Z_a += shares` |
+| Partial recall `z` shares | deployer; anyone when `F_a < K_a` or the queue head waits (D-11) | `z ≤ maxRedeem(custody)`; minimum assets bound | custody redeems, settles ERC-20 into claims, vault `B_a += assets` through a no-share inflow entry (custody only), `Z_a −= z` |
+| LP deposit `s` | anyone | strategy accepts `mint` | physical `⌈s·N_a/S⌉` + external `⌈s·Z_a/S⌉` shares minted at the depositor's expense (`previewMint` rounds up) |
+| LP exit `s` | LP | as today for the physical part | physical `⌊s·N_a/S⌋`; external `⌊s·Z_a/S⌋` credited to the LP's claimable balance in the custody module; no strategy call |
+| Queue finalization | permissionless | as today | as an exit, at finalization |
+| Realized loss | — | recall returns fewer assets than the pre-fee value | shortfall stays out of `N_a`: borne by every share pro rata |
+| Unrealized loss / gain | — | share price moves | each share's external part moves pro rata; nothing is accounted |
+| Strategy pause / illiquidity | — | — | deploys, recalls and deposits revert; exits continue; external parts stay claimable |
+| Shutdown | owner (DELAY) stops deployment; recall what can be recalled | — | the rest stays in kind; LPs receive their external part on exit; nothing is written down or valued |
+| Non-transferable shares | — | — | refused at allowlisting; the claimable ledger is the fallback if a strategy changes (D-12) |
+
+Loss model: every loss of the external position is borne pro rata by the shares outstanding when it happens, in kind;
+no LP can exit ahead of a loss at a stale price, because nothing is ever priced. Commitments, `W` and the queue's
+physical claim are unaffected by any strategy event.
+
+### 6.5 Recommendation (DECISION V2-3)
+
+**Model A for V2.** Reasons, in order:
+1. It keeps every commitment and exit guarantee exactly, with no new external code reachable from Porkfolio.
+2. B's yield exists only on capital the commitment engine does not need, and taking it reduces what the engine can
+   sell until a recall succeeds; the product's core is commitments, not yield.
+3. B needs LP-path changes in the vault that do not fit next to the V2 ledger and bond changes (§8), so B implies a
+   vault split or giving up keeper-free expiry.
+4. No measured idle-capital data exists to justify B's complexity; the blueprint's APY figures are unverified
+   hypotheses (`ACCOUNTING_FLOW.md` §7).
+
+Tradeoff accepted: the idle-yield goal is not met inside Porkfolio in V2. **Model B (Y1, claimable external parts) is
+the only design to consider later**, gated on: a vault split or measured bytes; an allowlisted strategy whose shares
+are transferable without hooks; measured idle capital; and D-7 … D-12 as resolved in §10.
