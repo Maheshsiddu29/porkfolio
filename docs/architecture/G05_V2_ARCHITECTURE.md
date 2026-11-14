@@ -294,7 +294,7 @@ in `Q^live` is counted for exactly one allocation and is not payable to anyone e
 to bucket `b = expiry/δ` and is live while `now < b·δ`; with `c = ⌊now/δ⌋`, bucket `b` is expired iff `b ≤ c`. Per
 asset the vault keeps `swept` (every bucket `≤ swept` is out of `Q`), `maxBucket` (largest bucket ever written) and
 `K = MAX_HORIZON/δ = 720` slots; bucket `b` lives in slot `b mod K`, tagged with `b`. Reference implementation:
-`test/model/ExpiryRing.sol` (library, 106 lines).
+`test/model/ExpiryRing.sol` (a test-only library).
 
 | Path | Ring operation | Notes |
 |---|---|---|
@@ -397,3 +397,218 @@ revocation lets anyone close it.
 Who may move a reservation out of Live early: its curator (`cancelAllocation`, any time, any state, while paused);
 the owner or guardian (`release`, emergency); anyone once the curator is revoked. A payer who is not the curator has
 no direct close in V2 (D-4, §10).
+
+## 5. Reservation bonds and fee accounting (PROPOSED)
+
+### 5.1 What the bond pays for
+
+A bond pays LPs for capacity withheld from them over time: G-R1 exclusive accounting capacity, which blocks LP exits
+(`F = N − Q`) and other admissions. It is not insurance of execution (§3.2, G-R4). The terms a payer accepts, and
+that interfaces and documentation must state, are:
+- the fee accrues on the unused remainder until expiry or an observed close, whether or not fills are possible;
+- pause, direction halts, curator freezes, oracle outages, flow caps and room lost to LP exits do not stop accrual;
+- the payer's remedy is an early close (through the curator) or the guardian's emergency release, after which the
+  unearned bond is refunded.
+
+These resolve D-6 and R-23 (§10). The alternative of suspending accrual while fills are refused needs an on-chain
+record of every refusal interval, including oracle outages a `view` call cannot prove, and invites timing games;
+rejected (REJECTED-7).
+
+### 5.2 Creation (one transaction)
+
+1. The **payer** calls `CommitmentAuthorizer.activate(intent, key, signature)`. The curator's EIP-712 intent contains
+   today's fields plus `payer` and `maxRate`; the authorizer requires `msg.sender == payer`, so nobody else can spend
+   the payer's allowance or activate at a time the payer did not choose.
+2. The authorizer calls `vault.reserveFor` (all V2 admission rules, §3.4) and receives `allocationId`.
+3. The authorizer calls `escrow.post(allocationId, payer, maxRate)`. The escrow
+   - accepts only `msg.sender == vault.authModule()`;
+   - reads the allocation (asset `a`, `maxOut = A`, `expiry`), requires it unconsumed, unreleased and unbonded;
+   - fixes `ρ_j = rate_a` (the escrow's governance-set rate for `a`) and requires `ρ_j ≤ maxRate`;
+   - computes the bond `Y_j = ⌈A·(expiry − now)·ρ_j / 1e18⌉`, pulls `Y_j` of `a` (ERC-20) from the payer, settles it into
+     the PoolManager and mints ERC-6909 claims **to the escrow**;
+   - adds `A·ρ_j` to the asset's accrual rate and to the rate drop of bucket `expiry/δ` (§5.4).
+4. Any failure reverts all of it: no reservation without its bond, no bond without its reservation.
+
+Every reservation made through the V2 authorizer is bonded; with `rate_a = 0` the bond is 0 and nothing accrues
+(today's behaviour, without anti-griefing). Recommended launch setting: `rate_a > 0`.
+
+### 5.3 Accrual, charge and refund per reservation
+
+Notation per reservation `j`: `A` reserved, `t_c` creation, `t_1` expiry, `ρ` rate (fee units of `a` per reserved unit
+of `a` per second, scaled by `1e18`), `r(t)` the remainder **as the escrow knows it**.
+
+    I_j(t)    = ∫ r(u)·ρ du   over [t_c, min(t, t_1, t_close)),  kept unscaled (exact integer "rho-seconds")
+    Y_j       = ⌈A·(t_1 − t_c)·ρ / 1e18⌉                                         bond, prepaid
+    I_min     = A·min(T_min, t_1 − t_c)·ρ                                          minimum charge, rho-seconds
+    charge_j  = ⌈max(I_j, I_min) / 1e18⌉   at settlement
+    refund_j  = Y_j − charge_j ≥ 0
+
+`I_j ≤ A·(t_1 − t_c)·ρ` because `r ≤ A` and accrual stops at `t_1`, and `I_min ≤` the same bound, so
+`charge_j ≤ Y_j` (PROVEN; TESTED (model) `charge never exceeds bond`).
+
+**Lazy consumption (new in V2).** The escrow is not on the swap path, so it does not see fills when they happen.
+`sync(j)` (anyone, any time) reads the vault's `consumed` and `released` for `j`, accrues to now, and then lowers `r`
+by the consumption it had not seen. Consumption therefore stops accruing at the sync, not at the fill: the payer is
+charged `x·ρ·(t_sync − t_fill)` extra for a fill of `x` synced late (`test_lazySync_overchargeIsExact`: 30,000 units
+synced one day late cost exactly 2.592 more at `ρ = 1e-9`). The error is always against the payer and in favour of
+LPs, and the payer removes it by syncing in the fill's transaction (a hook may call `sync` in `afterSwap`; that is the
+hook's choice and puts the escrow on that hook's path only).
+
+A close the escrow did not perform (curator cancel, emergency release, revoked-curator cleanup) is observed the same
+way: accrual stops at the sync that sees `released`. A curator that cancels and syncs in one transaction stops
+accrual exactly.
+
+Why not exact accrual inside `exchange`: it needs a per-allocation consumption-time moment `Σ x·t` (up to 2^167, a
+new storage slot written on every fill) or a call from `exchange` to the escrow. Both cost every swap; the first also
+costs vault bytes. Rejected (REJECTED-8).
+
+**Settlement.** `settle(j)` is open to anyone once `j` is closed (observed) or `now ≥ t_1`. It syncs, computes
+`charge_j`, credits `refund_j` to the payer, moves `j` from the open aggregate to the settled total (§5.4), sets a
+terminal flag, and calls `vault.release(allocationId)` if the allocation is still unreleased (permissionless after
+expiry; it cleans the per-scope totals, §3.5). A second `settle` reverts.
+
+**Refunds and protocol fees are pulled.** `claimRefund(to)`: the payer chooses the recipient, so a payer whose
+address a token refuses can still be paid (unlike the vault's fixed request receiver, G03 CE-5). Unclaimed refunds
+stay in the escrow forever (D-5). `claimProtocol()`: the protocol recipient (governance-set) only.
+
+### 5.4 Aggregate realization and LP fee ownership
+
+**Why aggregate.** LPs must receive fees before any change of `S` they did not pay for (G03 model: a just-in-time
+depositor took 43.2 of 86.4). Realizing per reservation before each deposit would iterate over every open bond.
+Instead the escrow keeps, per asset, the rate `Rate_a = Σ r_j·ρ_j` over open, unexpired reservations, and a ring of
+rate drops per expiry bucket (the same `δ = 1 h`, K = 720 layout as §3.5). The aggregate accrual
+`Agg_a(t) = Σ_open I_j(t)` advances bucket by bucket, applying each bucket's drop at its end. Because every expiry is
+a bucket end, the aggregate and each reservation stop at the same second.
+
+**Realization.** `realize()`:
+
+    target_a   = settledCharges_a + ⌊Agg_a(now) / 1e18⌋
+    Δ_a        = target_a − realized_a
+    protocolΔ  = ⌊target_a·π / 10⁴⌋ − ⌊realized_a·π / 10⁴⌋          π = protocol share, bps
+    lpΔ        = Δ_a − protocolΔ          → vault.realizeFee(a, lpΔ)  (the vault pulls exactly lpΔ claims)
+    realized_a = target_a
+
+`target_a` never falls: when `j` settles, `settledCharges` rises by `charge_j ≥ ⌈I_j/1e18⌉` while `Agg` falls by `I_j`,
+and `⌊x⌋ ≤ ⌊x − y⌋ + ⌈y⌉`.
+
+**Ownership rule.** A fee becomes LP property when it enters `N_a` through `realizeFee`; from then on it belongs to the
+`S` outstanding shares pro rata, queued shares included, exactly like a hook's spread. Before that it is escrow-held,
+belongs to no LP, is not in any share price, and is not claimable by anyone: "accrued but unpaid LP revenue" is
+`U_a = target_a(now) − realized_a`.
+
+- **Deposits realize first.** `vault.deposit` calls `escrow.realize()` before computing the price, inside its lock
+  (`realizeFee` is lock-free and accepts only the escrow, so the call back works). If `realize` reverts, the deposit
+  reverts: deposits fail closed (D-2). `test_jitDeposit_buysNoPastFees`: the depositor redeems for what it paid, less
+  at most one raw unit.
+- **Exits never call the escrow** (P-5 kept). An LP that exits, or a queued request finalized, between realizations
+  forfeits its pro-rata part of `U_a` to the shares that stay (`test_exitBeforeRealization_forfeitsProRata`). It can
+  call `realize()` itself first. The forfeit is at most `(s/S)·U_a` and favours the remaining LPs, never a newcomer.
+- **Bounded walk.** `realize` walks at most a fixed number of buckets per call (proposal: 32). If it cannot reach `now`
+  it realizes up to where it got; the deposit path then reverts with `EscrowBehind` instead of pricing on a stale
+  realization, and anyone can catch up with `realize(maxSteps)`.
+
+**Exactness (TESTED (model), `test/model/BondLedgerModel.t.sol`, 7 tests).**
+- `testFuzz_aggregateIsExactAndEscrowSolvent` (1,000 schedules × 60 steps: create, vault fills, late syncs, early
+  closes, settlements, realizations, claims, warps): after every step the aggregate equals the sum of per-reservation
+  accruals exactly; nothing is realized before it is earned; and the escrow identity of §5.6 holds. At the end every
+  bond splits exactly into LP fees, protocol fees and refunds.
+- `testFuzz_realizationFrequencyIsIrrelevant`: realizing at random points or only at the end gives identical charges,
+  LP and protocol totals and refunds.
+- `test_aggregateRealization_matchesPerReservationCharge`: G03's example D through the aggregate (35.424 realized on day
+  5 without touching the reservation; final charge 41.472; LPs 37.3248, protocol 4.1472).
+- `test_schedulesExerciseEveryOperation`: over 16 seeds, before the final sweep, 133 reservations, 31 with fills, 463
+  reservation-steps with unsynced fills, 55 early closes, 20 settlements, and a non-zero realization in all 16.
+
+### 5.5 Fee state machine
+
+Per bond `j`:
+
+| State | Condition | Enters by | Leaves by | Accrues? |
+|---|---|---|---|---|
+| Open | posted, not closed, `now < t_1` | `post` | sync (stays Open, `r` lower); observed close; time | on synced `r` |
+| Closed | close observed by a sync | `sync` sees `released` | `settle` | no |
+| Expired | `now ≥ t_1`, not settled | time | `settle` | no (clipped at `t_1`) |
+| Settled | terminal flag | `settle` | — | no |
+
+Escrow-level balances per asset (raw units of `a`, as ERC-6909 claims held by the escrow):
+
+| Bucket | Increases | Decreases |
+|---|---|---|
+| open bonds `Σ_open Y_j` | `post` | `settle` (moves `charge` to settled charges and `refund` to refunds owed) |
+| earned, unrealized `U_a` | time (aggregate) | `realize` |
+| refunds owed | `settle` | `claimRefund` |
+| protocol owed | `realize` (`protocolΔ`) | `claimProtocol` |
+| LP fees moved | `realize` (`lpΔ`) | — (now in the vault's `N_a`) |
+
+### 5.6 Bond collateral stays separate from LP backing
+
+Kept from the design note §2.6 (R-B1 … R-B3), with the V2 mechanics:
+- **Custody.** Bonds are ERC-6909 claims owned by the escrow's address. The vault's `B_a` counts only what the vault
+  has accounted for (V-1); the escrow's claims are not the vault's balance at all.
+- **One inflow path.** The only escrow-to-vault movement is `realizeFee`, called by `realize` for fees already earned;
+  it raises `B_a` by exactly the claims pulled and mints no shares.
+- **Per-reservation limits.** `charge_j ≤ Y_j`; a bond pays only its own charge and its own refund; refunds go only to
+  the payer's chosen recipient.
+- **Admission reads only `N, Q, R, D, L`.** A bond can never back a reservation, an exit or a fill.
+- **Escrow identity (PROVEN; TESTED (model)).** Per asset, at every step:
+
+      escrow + realized = refunds owed + protocol owed + Σ_open Y_j + settled charges
+      realized − settled charges ≤ ⌊Agg/1e18⌋ ≤ Σ_open Y_j
+
+  so the escrow always holds every owed refund, every owed protocol fee and the unearned part of every open bond.
+
+### 5.7 Pricing and rounding
+
+**Deterministic pricing.** `rate_a` is a number stored in the escrow, set by the owner through the governor (DELAY),
+fixed per reservation at creation and capped by the signed `maxRate`. No model, no learned or adaptive pricing, no
+oracle. The blueprint's utilization-scaled premium `Q·k·(f_base + f_slope·U/(1 − U))` is deterministic but unbounded as
+`U → 1` and is an upfront charge with no refund; not adopted for V2 (REJECTED-6). A bounded, kinked utilization
+schedule evaluated at creation is a possible later addition (DEFERRED-3).
+
+**Units.** The fee asset is the reserved asset (D-1), so `ρ` is dimensionless per second and independent of token
+decimals: `1e18` scaling resolves rates down to `1e-18`/s (about `3.2e-11` per year), which removes the design note's
+need for a `1e36` scale. Bounds: `A ≤ 2^127`, durations `≤ 2^22` s, so `A·T ≤ 2^149`; products with `ρ` use
+`FullMath.mulDiv` (512-bit). `Rate_a = Σ A·ρ` fits 256 bits for `ρ < 2^100`; the escrow caps `rate_a` (proposal:
+`≤ 1e18`, i.e. 100% of the amount per second) so no sum can overflow.
+
+| Quantity | Rounding | Favours | Bound |
+|---|---|---|---|
+| bond `Y` | up | LPs (covers the largest charge) | < 1 unit |
+| aggregate realization | down (`⌊Agg/1e18⌋`) | nobody: the remainder is realized later | < 1 unit outstanding |
+| final charge | up | LPs and protocol, against the payer | < 1 unit per reservation |
+| protocol share | down on cumulative totals | LPs | < 1 unit in total, not per step |
+| refund | exact `Y − charge` | — | 0 |
+| deposit / exit | up / down (unchanged) | remaining shares | < 1 unit per payout (G03 G-7) |
+
+**Parameters** (owner through the governor, DELAY; the guardian has no power over them): `rate_a` per asset,
+`T_min` (D-3; proposal 1 hour), `π` (proposal: immutable cap 2,000 bps), the protocol recipient. A rate change applies
+only to reservations created afterwards.
+
+### 5.8 Failure and recovery
+
+| Failure | Effect | Recovery |
+|---|---|---|
+| `escrow.realize` reverts (bug, walk behind) | deposits revert; exits, claims, swaps, admissions unaffected | catch up with `realize(maxSteps)`; for a bug, the owner unsets `feeEscrow` (DELAY): deposits resume, fees still in the escrow stop reaching LPs |
+| `vault.realizeFee` reverts (amount above `MAX_AMOUNT − B`) | as above | as above |
+| a payer's token transfer refused at creation | activation reverts | none needed |
+| refund recipient refuses the token | that claim reverts | claim to another address |
+| nobody syncs after a fill or close | payer over-charged until a sync | anyone may sync; the payer can always |
+| nobody settles after expiry | refund waits; `Q` is already free (ring); per-scope totals stale | anyone may settle |
+| escrow replaced while bonds are open | the old escrow keeps settling and refunding but can no longer realize: the LP part of its remaining fees is stranded | replacement procedure, §7.5 |
+| escrow has a bug that locks claims | locked | none: no admin can withdraw escrow funds (intended; §7.6) |
+
+### 5.9 Adversarial cases
+
+| Attack | Control | Status |
+|---|---|---|
+| Reserve all admissible capacity briefly, release | `T_min` minimum charge | design note §2.3; TESTED (model) |
+| Self-trade to reduce the fee | fee on remainder; no volume term; consumption stops accrual only as release would | design note §2.2 |
+| JIT deposit before realization | `deposit` realizes first | TESTED (model) |
+| Exit just before realization | forfeits own share to remaining LPs | TESTED (model) |
+| Delay someone else's sync to inflate their charge | anyone, including the payer, can sync at any time | ARGUED |
+| Keep the escrow behind so a deposit prices stale | deposit reverts with `EscrowBehind` | PROPOSED |
+| Rate raised between signing and activation | `maxRate` in the signed intent | PROPOSED |
+| Another party activates the curator's intent | `payer` signed and must be `msg.sender` | PROPOSED |
+| Replay of an intent | nonce bitmap, generation, deadline (unchanged); one `post` per allocation id | IMPLEMENTED + PROPOSED |
+| Bond counted as backing | separate custody; admission reads `N` only | §5.6 |
+| Realization timed to move core-mode quotes | realization raises `N_1` like a donation of earned fees; amount is not attacker-chosen; bounded by `U_a` | ARGUED; CE-G5-6 (§12.3) |
