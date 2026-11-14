@@ -1,7 +1,7 @@
 # C02: Time-bound commitment ledger (room-aware admission and the expiry ring)
 
-**Status: plan, committed before any production change.** §1–§9 are the plan and stay as written. Results, measured
-numbers and every deviation from the plan go in §10.
+**Status: implemented locally, awaiting owner review.** §1–§9 are the plan as committed before any production change
+(`03aa331`) and stay as written. Results, measured numbers and every deviation from the plan are in §10.
 
 Basis:
 - `docs/architecture/G05_V2_ARCHITECTURE.md` (the ADR) is the specification, in particular §3.2–§3.6 (reservation
@@ -379,4 +379,275 @@ broadcast. The untracked `AGENTS.md` is not touched. No co-authorship lines. C03
 
 ## 10. Results
 
-(Filled in at step 5.)
+### 10.1 Commits
+
+| Step | Commit | Content |
+|---|---|---|
+| 1 | `03aa331` | this plan (§1–§9) |
+| 2 | `d24fa24` | room-aware admission; reader/lens admission limit; CE-1 flipped; test migrations; `RoomAwareAdmission.t.sol` |
+| 3 | `6a3ccda` | expiry ring, hour-aligned expiries, every path, reader/lens/layout; test migrations; `ExpiryRing.t.sol` |
+| 4 | `cdba22a` | differential test, invariant extension (V-2 … V-10), L-2 re-proved, coverage gates, bench rows |
+| 5 | this commit | results; one bench row (`test_bench_ring_redeemInstant_steady`); the differential's deep run count |
+
+Baseline for every comparison: `5ab3051` (C01, in `main`).
+
+### 10.2 Admission as implemented (§3.2)
+
+`reserveFor` sweeps the sold asset, then admits `q` only if `q ≤ min(max(0, N − Q − R − D), max(0, N − L − Q))`, the
+second term only when the asset has a target (`_admissible`). The refusal is the existing
+`InsufficientBacking(q, available)` with `available` the smaller term. `L` is `VaultRiskBoundary.inventoryFloor(S, τ,
+κ)`, the function fills use; `test_admissionAndFillUseTheSameFloor` admits exactly the room and fills it to the last
+unit at a rounded `L`. Curator ceiling and exposure caps unchanged and still checked after it.
+
+| Case | Behaviour | Evidence |
+|---|---|---|
+| CE-1 (G03) | refused: `InsufficientBacking(200,000e18, 50,000e18)`; exactly the room admitted and filled in full | `test_admissionRefusesBeyondInventoryRoom_CE1` |
+| boundary `room − Q` / `+1` | admitted / refused, both assets, different targets | `test_exactBoundary_bothAssets` |
+| queued withdrawals | `D` binds when the target is low, the room binds when it is high; queued shares stay in `S` for `L` | `test_pendingWithdrawals_bothRulesAtTheirBoundary` |
+| `τ = 0`, `κ = 10⁶` | no room rule / room = `N` | `test_zeroTargetOrFullTolerance_noRoomRule` |
+| adapter mode, `τ = 0` | admitted, every fill refused (`InventoryBoundsNotConfigured`); ADR behaviour, owner item §9.1 | `test_adapterMode_zeroTarget_admittedButNeverFillable` |
+| ceiling / exposure tighter than room | they refuse first, unchanged | `test_ceilingAndExposureCapsStillBind` |
+| random state (target, tolerance, buffer, prior reservations, queue, asset) | reader = lens = independent formula; that amount admitted, `+1` refused; V-5 and V-9 right after | `testFuzz_limitIsExactAndBothRulesHoldAfterAdmission` (1,000 runs default; 10,000 ci) |
+| CE-2 (G03) | still demonstrated: an LP exit after admission makes part of a reservation unsellable | `test_lpExitShrinksInventoryRoomOfExistingReservation` (unchanged) |
+
+What admission does not promise is written into the vault NatSpec (`reserveFor`, `_admissible`, contract header "Not
+implemented here") and the interface (`InsufficientBacking`): sellable when admitted, nothing about later fills.
+
+### 10.3 Expiry as implemented (§3.3–§3.5)
+
+As planned, with one change (DV-1: `uint64` fields). Storage: slot 28, `_expiryRings`. Expiries must be multiples
+of 3,600 (`InvalidExpiry()`). `reserveFor` sweeps the sold asset, `redeem` and `processQueue` sweep both, 32 buckets
+per asset or O(1) once `c ≥ maxBucket`; `exchange` reads one ring slot and writes it (no header read, no loop);
+`_close` removes only while the bucket is counted. `processQueue(0)` is the permissionless sweep. The vault ABI
+(functions, events, errors) is identical to `5ab3051`.
+
+Per-scope totals: `curatorReserved` and `hookReserved` keep expired capacity until the close. Recovery is `release`
+(anyone, after expiry) or `cancelAllocation` (curator). Observed effect in the suite: `Reentrancy.t.sol` commits "all
+admissible asset1" after an expired, unreleased allocation; the hook's exposure cap (100%) refused the full amount by
+exactly that allocation's 1,000, because the hook's total still counted it while `Q_1` no longer did. The test now caps
+at the exposure headroom, and one test releases the expired allocation first (the documented recovery).
+
+### 10.4 Storage-layout compatibility
+
+| Check | Result |
+|---|---|
+| `storageLayout` of `5ab3051` vs ``cdba22a`` (labels, slots, offsets, types; AST ids ignored) | slots 0–27: identical (30 entries); added: `_expiryRings` at slot 28 |
+| packing (compiler) | `ExpiryRing`: `swept` uint64 offset 0, `maxBucket` uint64 offset 8, `buckets` at struct slot 1; `ExpiryBucket`: `bucket` uint64 offset 0, `amount` uint128 offset 8 |
+| `VaultStorageLayout.t.sol` | literal slot 28 and bit offsets checked on raw words after real transitions: populated slots, header with `maxBucket` at the horizon's far end, a slot reused 720 buckets later (`test_layout_expiryRing_populatedAndWrapped`); fuzzed words through lens vs by-name getters (`testFuzz_layout_ringWordsDecodeLikeGetters`); reader constants = vault (`test_layout_readerRingConstants`) |
+| `VaultGetterHarness` | `oldExpiryRing`, `oldExpiryBucket`, `sweptAdmissibleCapacity`, `sweptReservedNow` (the last two sweep for real inside a snapshot) |
+| `VaultLensParity` | lens `admissibleCapacity` and `sweptReserved` equal the vault's own sweep followed by its formula, on every generated state; ring header and a slot near the current bucket equal the by-name getters |
+
+New reads (`VaultStateReader` and `VaultLens`): `expiryRing`, `expiryBucket`, `liveReserved` (exact; at most 720 slot
+reads), `sweptReserved` (the Q the next sweeping call computes). `admissibleCapacity`, `freeInventory`,
+`deliverableShares` and the vault-scope `exposureAvailable` now use `sweptReserved`; `reserved` stays the stored value.
+
+### 10.5 Differential test against the G05 model
+
+`test/security/ExpiryRingDifferential.t.sol`: 80-step random schedules on the real vault mirrored into two
+`ExpiryRingModel(3600, 720, 32)` instances (the G05 library, unchanged). After every step: stored `Q` = model total,
+lens `liveReserved` = model view = naive live sum, `Q^live ≤ Q ≤ Q^lazy`, ring header = model header.
+
+| Run | Result |
+|---|---|
+| default profile, 256 runs (ordinary and eviction-heavy schedules) | pass |
+| ci profile, 1,000 runs | pass (inside `security.sh`) |
+| deep profile, 10,000 runs | pass |
+| `test_schedulesReachEveryOperation` (24 fixed seeds, half eviction-heavy) | reserves 555, fills 174–190, cancellations 48–62, releases after expiry 64–78, `processQueue(0)` 103, instant redemptions 90, evictions 24 |
+
+The first version of the generator reached only 1–2 evictions in 24 seeds (sweeps too frequent, and 60-day jumps end
+every bucket so the next sweep takes the O(1) branch); the eviction-heavy mode (no permissionless sweeps, warps of up to
+4 days, two reservations in three reuse an earlier slot) was added for that reason.
+
+### 10.6 Financial invariants and non-vacuity
+
+`VaultInvariants.t.sol` handler: a ghost ring (G05 library) fed every successful reservation, fill, close,
+redemption and queue call; new actions `setInventoryTarget` (owner; targets ≤ 80% of holding, tolerance ≥ 10%, or
+cleared) and `longWarp` (3–35 days); expiries aligned.
+
+| Id | Check in the campaign | Where |
+|---|---|---|
+| V-2 | `Q + W ≤ B` (stored, swept `Q`) | `invariant_reservedIsExactAndBacked` |
+| V-3 | `Q^live ≤ Q ≤ Q^lazy`; `liveReserved = Q^live`; stored `Q` and ring header = ghost ring | `invariant_reservedIsExactAndBacked`, `invariant_ringMatchesGhostModel` |
+| V-4 | live buckets resident and unswept; per-curator and per-hook totals = lazy sums; Σ hookReserved ≥ `Q`; closes checked against "still counted" | `invariant_liveBucketsResident`, `invariant_exposureAndHookReserved`, `_recordClose` |
+| V-5, V-9 | right after each successful admission: `Q ≤ N − R − D`, `Q ≤ N − L` with a target, `F ≥ R + D` | `_checkAdmissionBounds` → `invariant_commitmentLedgerRules` |
+| V-6 | `consumed` rises by exactly the measured output of its own fills; ghost per allocation | `_afterFill`, `invariant_commitmentLedgerRules` |
+| V-7 | no fill at `now ≥ expiry`; a close of a swept or evicted bucket leaves `Q` unchanged | `_afterFill`, `_recordClose` |
+| V-8 | §10.7 | |
+| V-10 | a fill never lowers `deliverableShares` | `_afterFill` |
+
+Non-vacuity: `test_handler_commitmentLedgerProgress` reaches an expiry sweep, a release after expiry whose capacity a
+sweep had removed, a target change, a room refusal, a 35-day quiet period. Coverage gate (`coverage.py`, 64 seeds,
+depth 128):
+
+| Campaign / counter | zero-run fraction, seed base 13 | range over bases 13, 101, 4001, 65537 | gate |
+|---|---|---|---|
+| vault `expirySweeps` | 0.14 | 0.14–0.25 | 0.50 (new) |
+| vault `expiredReleases` | 0.23 | 0.23–0.31 | 0.55 (new) |
+| vault `releasesAfterSweep` | 0.28 | 0.28–0.44 | 0.70 (new) |
+| vault `targetChangesOk` | 0.11 | 0.05–0.12 | 0.30 (new) |
+| vault `roomRefusals` | 0.86 | 0.83–0.88 | 0.98 (new; rare per run, gated like G02's `longBlocked`) |
+| liveness `restrictedWithoutRelease` | 0.69 | 0.69–0.84 | 0.98 (new) |
+| vault `queuedOk` (existing gate) | 0.33 | 0.31–0.42 | 0.50 (unchanged; G01 observed 0.17–0.25) |
+| vault `finalizedOk`, `claimsOk` (existing) | 0.58, 0.55 | 0.58–0.69, 0.45–0.62 | 0.80, 0.85 (unchanged) |
+| vault `swapsOk` (existing) | 0.16 | 0.09–0.22 | 0.40 (unchanged) |
+
+`python3 test/invariant/coverage.py` (all four campaigns, 64 seeds, depth 128, base 13): every gate passed (2 min 9 s).
+The bases 101, 4001 and 65537 were run for the vault and liveness campaigns with the final handler: every gate passed.
+
+The vault campaign queues less than before C02: with targets set, a commitment cannot take free inventory below the
+floor, so `queueBehindCommitment` often pays the LP instantly (finding F-1 in the campaign). The new
+`setInventoryTarget` action therefore sets targets one call in three and clears them otherwise, which brought
+`queuedOk` from 0.38–0.42 (targets set two calls in three) to 0.31–0.41. The existing gate (0.50) still passes on every
+family and deterministically on the default seeds, but the margin is now about 1.5 standard deviations instead of the
+four the G01 method asks for. Left unchanged; owner item (§10.13).
+
+### 10.7 Expiry and withdrawal liveness
+
+| Property | Evidence |
+|---|---|
+| G02 L-2 re-proved: commitments stopped by the guardian ⇒ a LONG_DELAY change queued then executes at eta through a batch with **no release** | `testFuzz_L2_executesWithoutReleaseOnceCommitmentsStop` (1,000 runs; up to six commitments of random size and horizon) |
+| the same in the stateful campaign: half the batches and half the warps release nothing; `restrictedWithoutRelease` counts required executions done without a release | `GovernanceLivenessInvariants` (L2 never violated); counter in §10.6 |
+| "one share holds the change": after expiry the batch executes without release (was: `PendingWithdrawals` until a release) | `test_oneShare_holdsLongChange_whileFullyCommitted` (flipped) |
+| a griefer can no longer queue behind an expired commitment: its redemption sweeps and is paid at once | `test_restrictingNewCommitments_endsBlockingWithinMaxHorizon` (restated) |
+| lever deadline: `queuedAt + 9 days` remains safe; the tight one is up to an hour later because expiries round down to the hour | `test_leverDeadline_isQueueTimePlusNineDays` (restated with the exact boundary) |
+| queued LPs finalized by `processQueue` alone after expiry, FIFO; at `expiry − 1` nothing is finalized | `test_queuedWithdrawals_finalizeAfterExpiryWithoutRelease`, `test_R1_reserveConditionDoesNotGrantFullExit` |
+| 100 idle days, one `redeem`: `Q = 0`, whole balance instant | `test_longInactivity_singleRedeemExitsEverything` |
+| oracle outage: fills refused, `Q` kept while live, recognized at expiry, queue finalized, adapter still broken | `test_oracleOutage_expiryAndExitsUnaffected` |
+| renewed reservations keep the ring behind: `Q` within bounds at every step, `⌈backlog/32⌉` calls catch up | `test_renewedReservations_sweepFallsBehind_butStaysBoundedAndConverges` |
+
+Sweep-gap and boundary cases (`ExpiryRing.t.sol`): gaps of 0, 1, 32, 33, 719, 720, 721 hours with and without a
+far bucket (stored `Q` after one call equals the exact expected value, then converges); `now = maxBucket·δ` and one
+second before; the first sweep after deployment (no walk from bucket 0); fills at `expiry − 1` and at `expiry`;
+`now + 30 days` at an aligned clock in bucket `c + 720`; three horizons of slot reuse with exact eviction amounts;
+close before / after sweep / after eviction; partial consumption then expiry; three hooks on one asset.
+
+### 10.8 Bytecode and gas
+
+**Sizes** (MEASURED, `forge build --sizes`, production profile):
+
+| Contract | `5ab3051` | C02 | Δ | Under EIP-170 |
+|---|---|---|---|---|
+| `SharedCommitmentVault` | 20,220 | **21,449** | +1,229 | **3,127** (policy ≥ 2,048: pass) |
+| `VaultLens` | 12,530 | 14,344 | +1,814 | 10,232 |
+| Hooks, authorizer, governor, adapter | — | identical bytecode | 0 | — |
+
+Breakdown: room-aware admission +214 B (prototype A: +217); ring +990 B with `uint40` fields, +25 B for `uint64`
+(prototype C: +1,185, which included an on-vault `liveReserved` view; here that view is in the lens). Total +1,229 B
+against the ADR estimate of +1,402 B for A + C. Inside the C02 budget (≤ 21,750 B). Remaining before the size policy:
+1,079 B. C03's fee entry (+602 B, prototype F) and the C-1 TVL cap (+175 B, prototype T) total 777 B in the prototype,
+which leaves about 300 B; the real C03 code (events, errors) may differ.
+
+**Gas** (MEASURED, `test/bench/run.sh`, production artifacts, `--isolate`; C01 baseline measured the same way on a
+`git archive` of `5ab3051`):
+
+Selected rows (the full table, 78 rows, is reproducible with `test/bench/run.sh` and the same command on a `git archive
+5ab3051`). Every row not listed changed by 0 to +56 gas (failed swaps +44/+56; `initialDeposit` +2).
+
+| Operation | C01 | C02 | Δ |
+|---|---|---|---|
+| swap Hook A (router + PM + hook + vault) | 269,697 | 275,410 | +5,713 (+2.1%) |
+| swap Hook B | 251,829 | 257,542 | +5,713 (+2.3%) |
+| ten split swaps, Hook A | 2,479,895 | 2,537,025 | +57,130 (+5,713 each) |
+| allocate, first in vault (ring header and slot written for the first time) | 332,783 | 380,876 | +48,093 |
+| allocate, steady state, new curator | 294,096 | 304,521 | +10,425 |
+| activate signed (EOA), steady state | 314,349 | 324,762 | +10,413 |
+| ring: reserve into a bucket already in use | — | 270,521 | (baseline of the ring rows) |
+| ring: reserve into a slot never written | — | 287,563 | +17,042 vs same bucket |
+| ring: reserve into a slot reused after wrap-around | — | 273,443 | +2,922 vs same bucket |
+| ring: reserve after a quiet period (its sweep walks 32 populated buckets) | — | 352,390 | +81,869 vs same bucket |
+| release (owner, before expiry) | 47,618 | 53,878 | +6,260 |
+| release (revoked curator, stranger) | 43,888 | 50,148 | +6,260 |
+| cancelAllocation (after partial consumption) | 44,121 | 50,381 | +6,260 |
+| ring: release after its bucket was swept | — | 44,652 | (no ring write) |
+| redeem instant, fresh vault (first write of both ring headers) | 160,601 | 206,160 | +45,559 |
+| redeem instant, steady state (same scenario on both builds) | 156,113 | 160,728 | +4,615 |
+| redeem queued, fresh vault | 147,624 | 173,269 | +25,645 |
+| processQueue(1) (headers already written) | 121,919 | 126,515 | +4,596 |
+| ring: processQueue(0), nothing ended | — | 32,429 | |
+| ring: processQueue(0), one bucket ended | — | 48,669 | |
+| ring: processQueue(0), 32 populated buckets ended (cap) | — | 124,434 | ≈ 2,875 per walked bucket |
+| ring: processQueue(0), everything ended (O(1)) | — | 41,186 | |
+| ring: redeem instant whose sweep recognizes every expiry (O(1)) | — | 184,561 | |
+| deposit, claim, quotes, governor, setRiskLimit, lifecycle setters | | | 0 |
+| deploy vault (CREATE) | 4,547,503 | 4,813,201 | +265,698 |
+
+**Against the ADR §8.2 estimates.** Measured against ADR §8.2: `exchange` +5,713 (estimate +5,600; one cold ring-slot read and write, no header);
+`reserveFor` +10,425 steady (estimate about +8,000), +17,042 more for a slot never used (estimate +28,000 including
+the base slot write), up to +81,869 when its sweep walks the 32-bucket cap (estimate +80,000); `redeem` and
+`processQueue` +4,596 to +4,615 when nothing has ended (estimate +4,200), a walked bucket about 2,875 gas (harness
+estimate 2,415), a full 32-bucket walk about +92,000 per asset over the nothing-ended case (estimate up to +80,000).
+New relative to the estimates: the first write of each asset's ring header (about 22,000 gas, once per asset, paid by
+whichever sweeping call comes first) and +6,260 on every `release`/`cancelAllocation` (header read for `swept` plus
+the slot). No swap path loops or reads a header: `test_exchangeGas_independentOfElapsedBuckets` shows the same fill
+costs within 15 gas with the ring 0 or 700 buckets behind.
+
+### 10.9 Deviations from the plan
+
+| # | Plan | Done instead | Why |
+|---|---|---|---|
+| DV-1 | ring fields `uint40` (§4) | `uint64` for `bucket`, `swept`, `maxBucket` (offsets 0/64) | `FlowLimits.test_FL_nearUint64Timestamps_failClosed` runs near the end of 64-bit time, where the current bucket exceeds 2⁴⁰: a `uint40` cast would truncate. With `uint64` every expiry bucket fits by type; +25 B |
+| DV-2 | authorizer source untouched | NatSpec only in `CuratorAuthorization.sol` and `ICuratorAuthorization.sol` (expiry on an hour boundary) | curators sign the expiry; the rule belongs where they read it. Runtime bytecode identical (checked) |
+| DV-3 | — | `exposureAvailable` (vault scope) reads `sweptReserved` | `reserveFor` checks the vault-scope cap after its sweep |
+| DV-4 | test migrations listed generally (§2.5–2.6) | G02 fixtures (`GovernanceLiveness`, its campaign) put no target on asset0; `VaultGovernor` and `GovernorIntegrity` redeem lp0's whole balance | with a 5% tolerance on the committed asset, room-aware admission caps a commitment at 5% of `N_0`, so "commit everything, one share queues" is impossible right after admission; asset0 unfloored keeps the worst case G02 measures (finding F-1) |
+| DV-5 | — | fill-floor tests reach "reserved above the room" by lifting the targets for the admission (`_suspendInventoryFloor`; in governor-owned handlers by calling as the governor) | room-aware admission no longer creates that state directly; it remains reachable through a guardian tightening or LP exits (CE-2), and the fill-time check is what those tests exercise |
+| DV-6 | — | `PricingAdversarial.t.sol`: allocations hoisted out of two loops | via-IR stack limit after `_request` gained the alignment |
+| DV-7 | — | `AdmissibleCapacity._write` also marks the ring swept to the current bucket | a `Q` written with `vm.store` and an empty ring is not a reachable state (the next sweep would zero it) |
+| DV-8 | — | `Rehearse.s.sol`: two allocations of 0.25% of backing (were 2%), hour-aligned | room at the default 1% tolerance |
+| DV-9 | — | two new handler actions in `VaultInvariants` (`setInventoryTarget`, `longWarp`); the G02 campaign releases half the time | the room rule and long gaps must be live in the campaign; L-2 must hold without releases |
+
+### 10.10 Findings
+
+- **F-1 (G02 threat model).** With an inventory target on the committed asset, one admission can withhold at most the
+  room `N − L`, so right after it `F ≥ L` and a single queued share is paid at once. The G02 "one share holds a
+  LONG_DELAY change" case now needs that asset without a target, or LP exits that drain free inventory after the
+  admission (CE-2). G02's measurements stay valid as the unfloored worst case.
+- **F-2 (lever deadline).** `queuedAt + 9 days` remains a safe lever deadline. With hour-aligned expiries the tight
+  deadline is the last second before a full-horizon commitment can reach the first hour boundary after
+  `eta + GRACE` (at most an hour after `queuedAt + 9 days`).
+- **F-3 (stale scope totals).** An expired, unreleased allocation keeps counting in its curator's ceiling and its
+  hook's exposure cap; the lens's `admissibleCapacity` does not include those, so "reserve everything admissible" can
+  be refused by the hook cap. Recovery: anyone `release`s the expired allocation. Documented in the vault NatSpec.
+- **F-4 (catch-up rate).** A vault where reservations keep `maxBucket` ahead and nobody calls a sweeping function for
+  more than 32 hours keeps expired capacity in `Q` until `⌈backlog/32⌉` sweeping calls; conservative, and anyone can
+  call `processQueue(0)`. Measured: 32 populated buckets cost about 124k gas in one `processQueue(0)`.
+
+### 10.11 Validation
+
+| Criterion (§7) | Command | Result |
+|---|---|---|
+| 1 | `forge fmt --check`; `forge build`; `forge lint` | clean; builds; warning counts identical to C01 (17 block-timestamp, 2 incorrect-shift, 20 unsafe-typecast; the new casts carry justified `forge-lint: disable` lines) |
+| 2 | `forge build --sizes`; `test/bench/run.sh` size rows | vault 21,449 B runtime, 22,093 B init, margin 3,127 B (policy ≥ 2,048: pass; C02 budget ≤ 21,750: pass). Hooks, authorizer, governor, adapter: deployed-bytecode sha256 identical to `5ab3051` |
+| 3 | `storageLayout` diff (§10.4) | slots 0–27 identical; slot 28 added |
+| 4 | ABI diff of the vault (`forge inspect … abi`) | identical to `5ab3051` (functions, events, errors) |
+| 5 | `forge test` (default profile) at `cdba22a`, and with the results commit | **731 passed, 0 failed, 8 skipped** (fork tests without an RPC); C01 ended at 695 (+36 new tests). With this commit's bench row: **732 passed, 0 failed, 8 skipped** |
+| 6 | `test/bench/security.sh` (`FOUNDRY_PROFILE=ci`) at `cdba22a` (only this document uncommitted) | exit 0: size gate ok; `ProductionBuilds.t.sol` 3/3; `ProductionArtifactSecurity.t.sol` 25/25; complete suite **731 passed, 0 failed, 8 skipped** at 10,000 fuzz runs (the differential test 1,000 runs) and 128 × 128 invariants (`invariant_ringMatchesGhostModel`, `invariant_liveBucketsResident`, `invariant_commitmentLedgerRules`: 128 runs, 16,384 calls, 0 reverts). Wall time 10 min 18 s |
+| 7 | `python3 test/invariant/coverage.py` | every gate passed (§10.6) |
+| 8 | §10.5, §10.2, §10.7 | differential pass (default 256, ci 1,000 runs); CE-1 refused; CE-2 still shown; L-2 without releases |
+| 9 | `test/bench/run.sh` | exit 0; §10.8 |
+| deep (ring only) | `FOUNDRY_PROFILE=deep forge test` on `ExpiryRingDifferential`, `ExpiryRing`, `RoomAwareAdmission` | all pass: `ExpiryRing` 15/15, `RoomAwareAdmission` 8/8 (fuzz 10,000 runs), `ExpiryRingDifferential` 2/2. The differential's inline config named only `default` and `ci`, so the deep profile ran it at 256 runs; a `deep.fuzz.runs = 10000` entry was added in the results commit and the test re-run: **10,000 runs × 80 steps pass** (2 min 55 s) | |
+
+### 10.12 Residual risks and what was not run
+
+- **Not an execution guarantee.** Admission proves sellability at admission only; CE-2, guardian tightening, oracle
+  outages, pauses, halts, freezes and flow caps can all make reserved capacity unsellable later. C03's bond terms
+  must charge for withheld capacity, not for execution (ADR §5.1).
+- **Stale scope totals (F-3).** Curator ceilings and hook exposure caps count expired, unreleased capacity until a
+  `release`; harmless for safety, but it can refuse a curator's or hook's new reservations. Anyone can clean up.
+- **Catch-up rate (F-4).** With reservations renewed so that `maxBucket` stays ahead and no sweeping call for more than
+  32 hours, `Q` overstates commitments until enough calls run; conservative for LPs, costly for admission.
+- **Bytes for C03.** 1,079 B remain before the size policy; the C03 prototype items (fee entry + TVL cap) measured
+  777 B in G05. A real escrow entry with events and errors may not fit; the K = 1 fallback is not needed for C02.
+- **Coverage margin.** `queuedOk` is 1.5 σ from its gate (§10.6).
+- **Layout as interface.** Third-party readers of `reserved` now read the stored, possibly unswept `Q`; `liveReserved`
+  and `sweptReserved` are the meaningful reads. Documented in the lens NatSpec.
+- Hand proofs only (§3.4); nothing formally verified; no independent review.
+
+Not run: the full historical deep suite `test/deep.sh` (brief §8), mutation testing, Slither, fork tests (no RPC), any
+broadcast. The deep profile was run only on the three ring/admission suites.
+
+### 10.13 Next action requiring owner approval
+
+Review of C02 (`03aa331` … this commit). Decisions for the owner: §9.1 (refuse admission in adapter mode when the sold
+asset has no target), §9.2 (dedicated `ExpiryNotAligned` error and a sweep event, both cost bytes and an ABI change),
+§9.3 (a separate `sweep` entry: not needed, `processQueue(0)` serves), whether to recalibrate the `queuedOk` gate, and
+the C03 byte budget. C03 does not start before that review.

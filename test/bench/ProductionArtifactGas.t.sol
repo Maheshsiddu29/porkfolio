@@ -418,6 +418,18 @@ contract ProductionArtifactGasTest is Test {
         _benchSweep("everything ended (O(1))");
     }
 
+    /// @notice Instant redemption in steady state: both assets' ring headers already written by an earlier sweep and
+    ///         nothing ended since. `redeem instant` above runs on a fresh vault, so it also pays the first write of
+    ///         both headers (zero to non-zero); this row separates the recurring cost.
+    function test_bench_ring_redeemInstant_steady() public {
+        _reserveIn(block.timestamp / 1 hours + 24);
+        vault.processQueue(0); // writes both headers
+        vm.prank(lp0);
+        uint256 g = gasleft();
+        vault.redeem(1000 ether, 0, 0, lp0, false);
+        console2.log("BENCH ring redeem instant, headers written, nothing ended:", g - gasleft());
+    }
+
     /// @notice Release of an expired allocation whose capacity a sweep already took out of Q: only the curator's and
     ///         the hook's totals change. And an instant redemption whose own sweep recognizes the expiry of all
     ///         reserved asset1.

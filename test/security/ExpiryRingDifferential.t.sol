@@ -192,6 +192,7 @@ contract ExpiryRingDifferentialTest is VaultTestBase {
     /// @notice 80-step random schedules: the vault agrees with the model and the naive ledger after every step.
     /// forge-config: default.fuzz.runs = 256
     /// forge-config: ci.fuzz.runs = 1000
+    /// forge-config: deep.fuzz.runs = 10000
     function testFuzz_vaultRingMatchesModel(uint256 seed, bool heavy) public {
         Counts memory n;
         for (uint256 step; step < STEPS; ++step) {
