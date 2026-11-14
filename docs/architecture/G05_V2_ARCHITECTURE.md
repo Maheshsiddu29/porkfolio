@@ -700,3 +700,304 @@ physical claim are unaffected by any strategy event.
 Tradeoff accepted: the idle-yield goal is not met inside Porkfolio in V2. **Model B (Y1, claimable external parts) is
 the only design to consider later**, gated on: a vault split or measured bytes; an allowlisted strategy whose shares
 are transferable without hooks; measured idle capital; and D-7 … D-12 as resolved in §10.
+
+## 7. Authority and governance boundaries
+
+### 7.1 Who can move funds
+
+| Funds | Can move them | Only to | Path |
+|---|---|---|---|
+| LP claims (vault) | the vault's own code | LPs and their receivers (exits, claims); hooks (fills, input pulled first) | `redeem`, `processQueue` + `claim`, `exchange` |
+| Inflows to the vault | depositors; hooks (fill input); the escrow (earned fees) | the vault's `B` | `deposit`, `exchange`, `realizeFee` |
+| Bond claims (escrow) | the escrow's own code | the vault (earned LP fees), the payer's chosen recipient (refunds), the protocol recipient (protocol fees) | `realize`, `claimRefund`, `claimProtocol` |
+| Payer's tokens | the escrow, once, for the bond computed in `post` | the escrow | `post` inside `activate` |
+| Hook claims | the vault (operator), only inside `exchange` | the vault | `exchange` |
+
+Nobody else moves funds: the owner, the governor, the guardian, curators, the authorizer, the adapter and the lens have
+no function that transfers LP assets, bonds, refunds or fees (V-20, §12).
+
+### 7.2 Who changes what
+
+| Setting | Owner (through `VaultGovernor`) | Guardian | Others |
+|---|---|---|---|
+| Hook pricing parameters | DELAY | — | — |
+| Stored floors, edge, uncertainty bound, caps, curator ceilings, registrations | DELAY | tighten only, immediate | — |
+| Adapter | DELAY | — | — |
+| Inventory targets and tolerances | LONG_DELAY, refused while `P ≠ 0` | tighten only, immediate | — |
+| Authorization module | DELAY (install); retire is permanent | disable only | — |
+| `feeEscrow` | DELAY | — | — |
+| Bond rate per asset, `T_min`, protocol share (under an immutable cap), protocol recipient | DELAY (escrow setters callable only by the vault's owner) | — | — |
+| A reservation's rate | fixed at creation, capped by the signed `maxRate` | — | — |
+
+`VaultGovernor.queue` today accepts only the vault and hooks whose `hookOwner()` is the governor and whose `vault()` is
+the vault. C03 must extend that target check to the escrow (a governor change; the vault is not involved).
+
+### 7.3 Who can stop or release commitments
+
+| Action | Who | Funds moved | Bond effect |
+|---|---|---|---|
+| Cancel one allocation | its curator, any time | none | accrual stops at the next sync; refund at settle |
+| Emergency release one allocation | owner or guardian | none | as above |
+| Release after expiry or curator revocation | anyone | none | as above; `settle` does it |
+| Stop all new commitments | guardian: pause, deregister curators, exposure caps to 0, disable the module | none | none on existing bonds |
+| Stop fills | guardian: pause, halt a direction, freeze a curator, raise floors | none | accrual continues (§5.1) |
+
+### 7.4 Oracle failures and governance with live commitments
+
+- **Oracle failure.** Fills refused (G04 O-1); admission, release, exits, claims, deposits, bond posting, sync,
+  settlement and realization read no price and continue. `Q` stays reserved until release or expiry (CE-O8); with
+  the ring it leaves `Q` at expiry without a call.
+- **DELAY changes** (floors, edge, adapter, caps, hook pricing) apply to live reservations at once: a reservation fixes
+  no price except its curator floor. **LONG_DELAY** changes keep the queue check (G02 S-1).
+- **G02 L-2 with the ring.** After governance stops new commitments, `Q` falls to zero within `MAX_HORIZON` without any
+  release call: each expiry leaves `Q` at the next sweep, and once `now ≥ maxBucket` the next sweep zeroes `Q` in O(1).
+  The admin's batch still needs `processQueue` (which sweeps). This removes the release step from L-2; it must be
+  re-proved on the implementation in C02.
+- **R-10** (cap a new commitment's expiry at an outstanding LONG_DELAY change's eta) stays deferred: it needs a
+  vault read of governor state at admission and vault bytes.
+
+### 7.5 Upgrade and migration
+
+- No proxies, no `delegatecall`, no upgradeable storage in any V2 contract. V2 is a new vault deployment; LPs move by
+  exiting the old vault and depositing in the new one. No role can move LP assets between vaults.
+- The authorization module is replaceable; a replaced module is retired forever (unchanged).
+- **Escrow replacement** (V2-7). `realizeFee` accepts only the current `feeEscrow`, so an escrow replaced while it holds
+  open bonds can still settle and refund but can no longer pay LP fees into the vault. Procedure: stop activations
+  (guardian disables the module), wait until the old escrow's last bond expires (at most `MAX_HORIZON`), settle and
+  realize everything, then execute `setFeeEscrow(new)` and install a new authorizer. Cost: up to 30 days without new
+  bonded reservations. The alternative (previously installed escrows may still call `realizeFee`) costs vault bytes
+  (not measured; a mapping read and write) and is deferred (DEFERRED-6).
+- **Hook strategy migration** needs no LP action: register the new hook, let curators reserve for it, let the old
+  hook's reservations expire, deregister it. LP capital never sits in a hook.
+
+### 7.6 Emergency withdrawal limitations
+
+There is no emergency withdrawal. No role can send LP assets, bonds, refunds or protocol fees anywhere except along
+§7.1's paths. Governance problems are solved with the existing levers (stop new commitments, emergency release, wait
+at most `MAX_HORIZON`; G02 L-2), not by moving funds. The escrow has no rescue function: if a defect locks its claims,
+they stay locked. That is deliberate: a rescue power over bonds would be a power over payers' and LPs' money that no
+delay makes safe.
+
+### 7.7 Release blockers carried forward
+
+From G02: R-9 (conditional LONG_DELAY liveness), R-10, R-13, R-14 open; R-11 rows G-6 … G-11 in the checklist.
+From G04 §9: no provider-supported sequencer feed on Unichain; RedStone `updatedAt` semantics unmeasured (blocks the
+fresh tier); correlated sources; no stored sanity floors in the rehearsal (R-19); adapter replacement is DELAY and
+re-prices live allocations; gate 7's independent price; synthetic results predate the corrected `u`. R-19 … R-21
+open. From `MAINNET_READINESS.md`: C-1 (TVL cap) not started; it fits the V2 byte budget (§8). New G05 blockers are
+in §10.5.
+
+## 8. Gas and bytecode budget
+
+### 8.1 Vault runtime size (MEASURED on a prototype)
+
+Method: each candidate change applied to a scratch copy of `src/` by `docs/proposals/g05-vault-size-probe.py`, built
+with the production profile (vault at 200 runs, via-IR, `bytecode_hash = none`), `forge build --sizes
+src/SharedCommitmentVault.sol`. `src/` in the repository was never modified. The combined A + C + F + X prototype is
+`docs/proposals/g05-v2-vault-size-probe.patch` (applies to `5701e9c`). The code is the smallest that exercises each
+change, without final NatSpec-free details such as events and error names; the real implementation will differ, most
+likely upward.
+
+| Variant | Runtime B | Under EIP-170 | Δ vs today |
+|---|---|---|---|
+| today (`5701e9c`) | 22,440 | 2,136 | 0 |
+| A room-aware admission | 22,657 | 1,919 | +217 |
+| F fee entry (escrow-only `realizeFee`, `deposit` → `realize`) | 23,042 | 1,534 | +602 |
+| B fee entry, first draft (unlock-based, deposit lock restructured) | 23,182 | 1,394 | +742 |
+| C ring (K = 720, 32-step sweeps, `liveReserved` view) | 23,625 | 951 | +1,185 |
+| E ring in a separate ledger contract | 23,512 | 1,064 | +1,072 |
+| G degenerate ring (K = 1) | 22,777 | 1,799 | +337 |
+| T C-1 TVL cap | 22,615 | 1,961 | +175 |
+| A + B + C | 24,584 | −8 | over EIP-170 |
+| A + C + F | 24,444 | 132 | +2,004 |
+| A + C + F without the view | 24,196 | 380 | +1,756 |
+| A + F + G | 23,596 | 980 | +1,156 |
+| **X getters behind `extsload`** | **20,220** | **4,356** | **−2,220** |
+| A + C + F + X | 22,268 | 2,308 | −172 |
+| **A + C + F + X + T (recommended V2)** | **22,443** | **2,133** | **+3** |
+| A + F + G + X + T (fallback) | 21,595 | 2,981 | −845 |
+| today at `optimizer_runs = 1` | 22,267 | 2,309 | −173 |
+
+Conclusions:
+1. Without X, no V2 vault change fits the 2,048 B policy (88 B usable today); A + C + F leaves 132 B.
+2. X frees 2,220 B. It keeps every getter that hooks (`coreInputs`), the governor (`owner`, `guardian`,
+   `pendingShares`), the authorizer (`getCurator`), and the scripts (`isConsumer`, `owner`) call, and moves the rest
+   behind `extsload(bytes32)`, as v4's PoolManager does. `VaultLens` decodes the layout. It changes no state transition.
+3. The recommended V2 set measures 2,133 B under EIP-170: inside the policy with 85 B spare, the same position as
+   today. No vault room remains for R-13 (+19 B), R-14 (+65 B), a vault-side R-20 check or DEFERRED-6 without a further
+   reclaim.
+4. If the real C02/C03 code exceeds the policy, the fallback is G instead of C (+848 B of margin), which keeps
+   keeper-free expiry only for the case where every reservation of the asset has expired (V2-4).
+5. Lowering the optimizer setting is not a lever (−173 B).
+
+### 8.2 Gas (MEASURED on the model harness; vault figures are ESTIMATES)
+
+`test_gas_operations`, cold storage (`vm.cool`), whole call into `ExpiryRingGasHarness`, which keeps only the ring and
+the running total. `plainAdd` is today's single running total.
+
+| Operation | 1 h buckets, K = 720, cap 32 | 1 d buckets, K = 30, cap 30 |
+|---|---|---|
+| today's running-total update | 5,351 | 5,351 |
+| reserve, slot never used | 33,491 | 33,491 |
+| reserve, same bucket | 13,457 | 13,457 |
+| reserve, reused slot | 16,391 | 16,391 |
+| consume / close (`remove`) | 13,043 | 13,043 |
+| sweep, nothing expired | 4,875 | 4,875 |
+| sweep, one bucket | 13,296 | 13,296 |
+| sweep, full cap (32 / 28 buckets) | 82,162 | 72,902 |
+| sweep, everything expired (shortcut) | 10,734 | 10,734 |
+
+Marginal cost of a walked bucket: about 2,415 gas (one cold slot read plus the loop).
+
+ESTIMATED vault deltas (to be measured on the production build in C02):
+- `exchange`: about +5,600 (one cold ring slot read and write; the live allocation's bucket is always resident, so the
+  header check can be skipped). Today `exchange`'s own logic is about 79,000 of a 417,221-gas Hook B swap
+  (`HOT_PATH_GAS.md`): about +1.3% per swap.
+- `reserveFor`: about +8,000 typically, about +28,000 the first time a slot index is used; at most one capped sweep
+  (≈ +80,000) after a quiet period.
+- `redeem` and `processQueue`: about +4,200 when nothing expired (one cold header read per asset); up to about
+  +80,000 per asset when a full step cap is walked.
+- `deposit`: the `realize()` call (cold account access plus the escrow's walk; not measured).
+- Bond posting in `activate`: an ERC-20 pull and one PoolManager unlock in the escrow (not measured).
+- No change to any swap unless a hook chooses to call `escrow.sync` itself.
+
+Storage: per asset one ring header slot and up to 720 ring slots (written lazily, never cleared, reused at about 5,000
+gas). The escrow: a record per bond and a per-asset rate ring of the same shape.
+
+### 8.3 Iteration bounds
+
+`exchange` iterates over nothing (no sweep, no registry, no escrow). Sweeps walk at most 32 buckets per call in
+`reserveFor`, `redeem` and `processQueue`; `realize` walks at most 32 buckets per call. No path iterates over
+allocations, curators, hooks or bonds. The `liveReserved` view walks up to the sweep gap (a view; not called on-chain
+by any V2 contract).
+
+## 9. Assumptions and limitations
+
+Assumptions (in addition to G03 A-1 … A-6 and G04 §2.10):
+- **A-7.** The escrow and the authorizer are the reviewed builds (verified bytecode at installation, as for modules).
+- **A-8.** The vault is called at least occasionally; expiry is recognized by the next sweeping call, and a long-idle
+  vault catches up 32 buckets per call or at once through the shortcut.
+- **A-9.** Payers sync after fills and closes when they care about the charge; nobody else needs to.
+- **A-10.** Curators accept hour-aligned expiries.
+
+Limitations:
+1. No execution guarantee (G-R4); CE-2 remains (§3.3).
+2. Fees accrue through every refusal, including oracle outages (§5.1).
+3. Lazy sync over-charges payers who do not sync (§5.3); exits forfeit unrealized fees (§5.4).
+4. Per-scope totals and curator ceilings stay lazy after expiry until `release` (§3.5).
+5. A capped sweep leaves `Q` over-stated until later calls catch up (conservative).
+6. No payer-initiated or partial early release (D-4).
+7. Escrow replacement may block new bonded reservations for up to 30 days (§7.5).
+8. No idle yield (§6).
+9. After V2 the vault is back to 85 B above the size policy (§8.1).
+10. With X, the vault's storage layout becomes part of its read interface: a layout change needs a lens change, and
+    third-party readers must use the lens or the layout.
+11. Flow caps are not reserved: a reservation larger than the flow it can use before expiry cannot be filled in full
+    (DEFERRED-7).
+12. All byte and gas figures for the vault are prototype measurements or estimates; the models check equations, not
+    contracts. Nothing is formally verified or independently reviewed.
+
+## 10. Owner decisions and release blockers
+
+### 10.1 G03 design-note decisions D-1 … D-12
+
+The decision column quotes the design note's §5 decision and options; the resolution is G05's recommendation for
+owner approval.
+
+| # | Decision (design note §5) | Options there | G05 resolution |
+|---|---|---|---|
+| D-1 | Fee asset | one pair asset per vault; the reserved asset `a_j`; a third asset | **the reserved asset `a_j`.** No cross-asset term, decimal-free rate, `1e18` scale suffices (§5.7) |
+| D-2 | Fee attribution | epoch-bucketed aggregate accrual with checkpoint in `deposit` (fail closed) and none in exits; or checkpoint-only with a deposit delay | **the first**, with 1-hour buckets and a 720-slot rate ring; `realize` before every deposit, fail closed; exits never call (§5.4) |
+| D-3 | Minimum charge `T_min` | none; a fixed duration; a fraction of `t_1 − t_c` | **a fixed duration**, proposal 1 hour (one bucket), owner-set through the governor |
+| D-4 | Who may release early | payer only; payer or curator | **curator** (direct cancel) and owner/guardian (emergency) in V2. A payer-initiated close needs a vault change and breaks when the authorizer is replaced; partial release needs a new vault function. Both DEFERRED-2 |
+| D-5 | Unclaimed refunds | kept forever; swept to the protocol after a long period | **kept forever**; the payer may claim to any recipient |
+| D-6 | Capacity the vault refuses to sell | B1 admission against `L_a`; B2 credits; B4 disclose | **B1 + B4.** Admission against the room (§3.4); disclosure; no accrual pause for pause, halt, freeze or outage (§5.1) |
+| D-7 | What a share holds when capital is deployed | Y1 in kind; Y2 book value | **Y1**, for the future Model B only; no deployment in V2 (§6) |
+| D-8 | Inventory floor and deployment | size deployments inside `N − L − Q`; redefine the floor on total holdings | **size deployments** inside the room above `Q` (§6.3); no strategy call in `exchange`. Future Model B only |
+| D-9 | Who deploys | owner through the governor; a keeper role within limits; anyone within limits | **a keeper role within the limits**, future Model B only |
+| D-10 | Liquidity buffer `K_a` | absolute; fraction of `N_a` | **a fraction of `N_a`**, future Model B only |
+| D-11 | When recalls are permissionless | never; when `F_a < K_a` or the queue head waits | **the latter**, future Model B only |
+| D-12 | Strategy shares that cannot be transferred | refuse such strategies; fallback claimable balance | **refuse at allowlisting and keep the claimable ledger** (exits credit external parts there anyway) |
+
+### 10.2 Earlier R items
+
+| Item | Status after G05 |
+|---|---|
+| R-15 admission against the floor | **resolved** by room-aware admission (§3.4), with CE-2 disclosed (§3.3) |
+| R-16 slice rounding | unchanged: accept |
+| R-17 fixed request receivers | unchanged for the vault; escrow refunds take a recipient (§5.3) |
+| R-23 fees during oracle outages | **resolved**: accrue through outages, stated in the terms (§5.1), as G04 recommended |
+| R-19 stored sanity floors | open; recommendation unchanged (set them at deployment) |
+| R-20 static fall-back check | open; gate 13; no vault bytes left for a vault check (§8.1) |
+| R-21 broken source with `minSources = 1` | open; keep halting |
+| R-22 sequencer `startedAt = 0` | done (G04) |
+| R-9, R-10, R-13, R-14 | open; R-10 deferred (§7.4); R-13/R-14 vault options no longer fit after V2 (§8.1) |
+
+### 10.3 New decisions (V2-n)
+
+| # | Decision | Recommendation | Consequence |
+|---|---|---|---|
+| V2-1 | Byte reclaim: move derived and struct getters behind `extsload` | adopt (C01) | frees 2,220 B; read API changes; lens and storage-layout tests become part of the interface |
+| V2-2 | Bucket width | 1 hour, K = 720, sweep cap 32 | hour-aligned expiries; vs 1 day (K = 30): coarser expiry, slightly cheaper worst case |
+| V2-3 | Yield custody | Model A (no external yield in V2) | idle-yield goal not met in V2 |
+| V2-4 | Fallback if the measured V2 vault misses the policy | K = 1 flush instead of the ring | keeper-free expiry only when everything has expired |
+| V2-5 | Bonds on every V2 reservation | yes; rate may be 0 | one path; anti-griefing only with `rate > 0` |
+| V2-6 | Consumption seen by sync, not in `exchange` | yes | no swap cost; payer bears late-sync over-charge |
+| V2-7 | Escrow replacement | procedure (§7.5) | up to 30 days without new bonded reservations when replacing |
+| V2-8 | Activation by the payer only | yes (`msg.sender == payer`, payer signed) | relayed activation of bonded intents is not possible |
+| V2-9 | Protocol share | immutable cap 2,000 bps; value and recipient DELAY | — |
+| V2-10 | Size policy | keep ≥ 2,048 B | the V2 set uses the reclaimed bytes |
+
+### 10.4 Alternatives
+
+| Id | Alternative | Verdict | Reason |
+|---|---|---|---|
+| REJECTED-1 | Exits must keep reserved room sellable | rejected | holds back `h/(h − l)` (≈ `1/κ`) times as many shares (§3.3) |
+| REJECTED-2 | Global pro-rata scaling of reservations when room shrinks | rejected | state write in every exit and fill, plus an accrual integral for fees |
+| REJECTED-3 | Exempt reserved capacity from the floor (design note B3) | rejected | weakens the per-share floor for LPs |
+| REJECTED-4 | Book-value yield accounting (Y2) | rejected | stale value transfers losses; fresh value needs strategy calls in exits |
+| REJECTED-5 | Ring in a separate ledger contract | rejected | saves 113 B, adds a call to every path |
+| REJECTED-6 | Blueprint utilization premium `f_slope·U/(1 − U)`, upfront | rejected for V2 | unbounded as `U → 1`; not time-based; no refund |
+| REJECTED-7 | Suspend accrual while fills are refused | rejected | needs proof of refusal intervals; griefable |
+| REJECTED-8 | Exact consumption accrual inside `exchange` | rejected | swap gas and vault bytes on every fill |
+| REJECTED-9 | `realizeFee` open to anyone (counted donations) | rejected | new manipulation surface on core-mode quotes (`N_1`) at attacker-chosen size |
+| REJECTED-10 | Lower optimizer runs for bytes | rejected | −173 B |
+| REJECTED-11 | Epoch flow limit as a substitute for expiry | rejected | flow caps limit speed, not how long capacity is withheld; both are kept, separately |
+| REJECTED-12 | A third fee asset | rejected | needs per-account reward indices on every share change |
+| REJECTED-13 | Learned or model-based bond pricing | rejected | the brief excludes it; not deterministic |
+| DEFERRED-1 | Split the vault into reserve and commitment-engine contracts | deferred | the clean way to gain bytes for Model B and R-13/R-14; a rewrite of the reviewed core |
+| DEFERRED-2 | Payer-initiated and partial early release | deferred | vault change; authorizer migration |
+| DEFERRED-3 | Bounded kinked utilization rate at creation | deferred | deterministic; needs calibration data |
+| DEFERRED-4 | Model B idle yield | deferred | §6.5 gates |
+| DEFERRED-5 | R-10 expiry cap at a LONG_DELAY eta | deferred | vault bytes; governor coupling |
+| DEFERRED-6 | Retired escrows may still realize | deferred | vault bytes |
+| DEFERRED-7 | Flow-aware admission (`q ≤` flow usable before expiry) | deferred | shared caps cannot be reserved; disclosure instead |
+| DEFERRED-8 | Bitmap of non-empty buckets to skip empty ones | deferred | only matters after long gaps; bytes |
+| DEFERRED-9 | Permissionless `sweep(maxSteps)` entry | deferred | add only if C02 shows a need |
+| ACCEPTED | Room-aware admission; bucketed ring; escrow with aggregate realization; lazy sync; deposit realizes; exits never call; Model A; extsload reclaim | accepted | §3, §5, §6, §8 |
+
+### 10.5 New release blockers
+
+- **B-G5-1.** The implemented V2 vault keeps ≥ 2,048 B under EIP-170 (production build), or the owner approves V2-4's
+  fallback or a policy change.
+- **B-G5-2.** Storage-layout test pinning every slot the lens and escrow read through `extsload`, and lens parity tests
+  against the old getters.
+- **B-G5-3.** The Hook C integration test of §2.4 passes on the production build.
+- **B-G5-4.** Invariant campaigns extended with the ring and bonds in the handlers, with non-vacuity counts, at the ci
+  and deep profiles.
+- **B-G5-5.** The escrow identity (§5.6) and the aggregate equality hold as invariants on the real contracts, and a
+  differential test against `BondLedgerModel` passes.
+- **B-G5-6.** The bond terms of §5.1 are stated in the interface documentation and the deployment checklist.
+- **B-G5-7.** Independent review of the V2 vault, escrow and authorizer before any deployment with value.
+
+## 11. Implementation order
+
+Each milestone stops for owner review. None starts before the owner accepts this record or amends it.
+
+| Milestone | Scope | Exit criteria |
+|---|---|---|
+| **C01** read-surface reclaim | vault: `extsload`, getters made internal except those in §2.3; `VaultLens` rewritten on the layout; storage-layout test; tests moved from vault getters to the lens | no state transition changes: the full suite passes unchanged in behaviour; runtime ≈ 20,220 B; ABI diff documented |
+| **C02** commitment ledger | vault: hour-aligned expiry, ring (§3.5), room-aware admission (§3.4); `liveReserved` view; invariant and handler updates (V-2 … V-10) | B-G5-1 measured; ring differential test against the model on the real vault; CE-1 test now refused; CE-2 test still demonstrates the disclosed limit; G02 L-2 re-proved with the ring |
+| **C03** bonds | `BondEscrow`, `CommitmentAuthorizer`, vault `realizeFee` and `deposit` → `realize`, governor target extension | V-11 … V-16 on the real contracts; differential test against `BondLedgerModel`; reentrancy tests of `realizeFee` during deposit and payouts |
+| **C04** integration | Hook C test (§2.4); interface documentation for hooks, curators, payers; C-1 TVL cap if approved | B-G5-3; bytecode hash unchanged by Hook C |
+| **C05** validation | ci and deep campaigns, coverage gate, mutation of all new code, benchmarks regenerated, deployment scripts and gates | B-G5-4 … B-G5-6; report for B-G5-7 |

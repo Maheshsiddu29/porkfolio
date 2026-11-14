@@ -1,0 +1,443 @@
+diff --git a/src/ExpiryRing.sol b/src/ExpiryRing.sol
+new file mode 100644
+index 0000000..c640500
+--- /dev/null
++++ b/src/ExpiryRing.sol
+@@ -0,0 +1,111 @@
++// SPDX-License-Identifier: MIT
++pragma solidity 0.8.26;
++
++/// @title ExpiryRing (test-only reference; PROPOSED, not in src/)
++/// @notice Keeper-free expiry of reserved capacity for one asset, using a fixed ring of K time buckets.
++/// @dev Specification: docs/architecture/G05_V2_ARCHITECTURE.md §3.5. Nothing in `src/` uses this library.
++///
++///      Time is cut into buckets of WIDTH seconds; bucket b ends at b * WIDTH. A reservation's expiry must be a bucket
++///      end, so it belongs to bucket b = expiry / WIDTH and is live while now < b * WIDTH. With
++///      c = floor(now / WIDTH), bucket b is expired exactly when b <= c.
++///
++///      The owner of the ring keeps one running total (the vault's Q_a) equal to the sum of the amounts of every
++///      bucket that has not been subtracted yet. Bucket b lives in slot b % K, tagged with b, so a slot reused after
++///      wrap-around is never mistaken for an older bucket. `swept` is the last bucket whose expiry has been
++///      recognized: every bucket <= swept has been subtracted from the total.
++///
++///      Sizing. A new expiry satisfies c < b <= c + H with H = MAX_HORIZON / WIDTH, so at most H buckets are live at
++///      once and K = H slots suffice. If a slot is found holding another tag b' when bucket b is written, then
++///      b' <= b - K <= c: the older bucket is expired, never live (proof in the design note §3.5).
++///
++///      Who sweeps. Every path that needs the total (admission, LP exits) sweeps at most a fixed number of buckets
++///      first. A capped sweep leaves the total too high, never too low, so admission and LP exits computed from it
++///      are conservative. A write that finds an expired bucket still counted in its slot subtracts it (`add`), so
++///      writes never need a full sweep. If c >= maxBucket every bucket ever written has expired and the total is
++///      zero, in O(1).
++library ExpiryRing {
++    struct Slot {
++        uint40 bucket;
++        uint128 amount;
++    }
++
++    struct Ring {
++        /// @dev Every bucket <= swept has been subtracted from the owner's total.
++        uint40 swept;
++        /// @dev Largest bucket ever written.
++        uint40 maxBucket;
++        mapping(uint256 index => Slot) slots;
++    }
++
++    /// @dev Recognizes the expiry of buckets swept + 1 .. min(nowBucket, swept + maxSteps) and returns the new total.
++    ///      O(1) when nothing has expired or when everything ever written has expired; otherwise one slot read per
++    ///      bucket walked, whether or not the bucket held anything.
++    function sweep(Ring storage r, uint256 total, uint256 nowBucket, uint256 maxSteps, uint256 k)
++        internal
++        returns (uint256)
++    {
++        uint256 s = r.swept;
++        if (nowBucket <= s) return total;
++        if (nowBucket >= r.maxBucket) {
++            // forge-lint: disable-next-line(unsafe-typecast) bucket numbers are timestamps / WIDTH < 2^40.
++            r.swept = uint40(nowBucket);
++            return 0;
++        }
++        uint256 end = nowBucket - s > maxSteps ? s + maxSteps : nowBucket;
++        for (uint256 b = s + 1; b <= end; ++b) {
++            Slot storage slot = r.slots[b % k];
++            if (slot.bucket == b) total -= slot.amount;
++        }
++        // forge-lint: disable-next-line(unsafe-typecast) end <= nowBucket < 2^40.
++        r.swept = uint40(end);
++        return total;
++    }
++
++    /// @dev Adds `amount` to bucket `bucket` and returns the new total. Precondition: c < bucket <= c + k.
++    function add(Ring storage r, uint256 total, uint256 bucket, uint256 amount, uint256 k) internal returns (uint256) {
++        Slot storage slot = r.slots[bucket % k];
++        uint256 tag = slot.bucket;
++        if (tag == bucket) {
++            // forge-lint: disable-next-line(unsafe-typecast) bucket sums are bounded by the total (< 2^127).
++            slot.amount += uint128(amount);
++        } else {
++            // An older bucket in this slot is expired (see the library notes). Subtract it if no sweep has.
++            if (tag > r.swept) total -= slot.amount;
++            // forge-lint: disable-next-line(unsafe-typecast) see above.
++            slot.bucket = uint40(bucket);
++            // forge-lint: disable-next-line(unsafe-typecast) see above.
++            slot.amount = uint128(amount);
++        }
++        // forge-lint: disable-next-line(unsafe-typecast) see above.
++        if (bucket > r.maxBucket) r.maxBucket = uint40(bucket);
++        return total + amount;
++    }
++
++    /// @dev Removes `amount` from bucket `bucket` (consumption or release) and returns the new total. A bucket that
++    ///      has already been subtracted, by a sweep or by eviction from its slot, is left alone: its capacity is
++    ///      already out of the total.
++    function remove(Ring storage r, uint256 total, uint256 bucket, uint256 amount, uint256 k)
++        internal
++        returns (uint256)
++    {
++        if (bucket <= r.swept) return total;
++        Slot storage slot = r.slots[bucket % k];
++        if (slot.bucket != bucket) return total;
++        // forge-lint: disable-next-line(unsafe-typecast) amount <= slot.amount.
++        slot.amount -= uint128(amount);
++        return total - amount;
++    }
++
++    /// @dev Total minus every expired bucket not yet subtracted, without writing. One slot read per bucket between
++    ///      `swept` and now (a view; sweeps keep that gap small in practice).
++    function live(Ring storage r, uint256 total, uint256 nowBucket, uint256 k) internal view returns (uint256) {
++        uint256 s = r.swept;
++        if (nowBucket <= s) return total;
++        if (nowBucket >= r.maxBucket) return 0;
++        for (uint256 b = s + 1; b <= nowBucket; ++b) {
++            Slot storage slot = r.slots[b % k];
++            if (slot.bucket == b) total -= slot.amount;
++        }
++        return total;
++    }
++}
+diff --git a/src/SharedCommitmentVault.sol b/src/SharedCommitmentVault.sol
+index f97c1c7..d7e8458 100644
+--- a/src/SharedCommitmentVault.sol
++++ b/src/SharedCommitmentVault.sol
+@@ -16,6 +16,7 @@ import {ISharedCommitmentVault, AUTH_MODULE_ID} from "./interfaces/ISharedCommit
+ import {IVaultState} from "./interfaces/IVaultState.sol";
+ import {IMarketRiskAdapter} from "./interfaces/IMarketRiskAdapter.sol";
+ import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
++import {ExpiryRing} from "./ExpiryRing.sol";
+ 
+ /// @title SharedCommitmentVault
+ /// @notice A two-asset reserve that several Uniswap v4 hooks can sell from. LPs deposit both assets and receive
+@@ -137,7 +138,11 @@ import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
+ /// Not implemented here: rolling-window flow limits (the flow window is a fixed epoch; see `FLOW_WINDOW`),
+ /// path-independent cumulative pricing, epoch-based expiry of commitments, transferable share tokens, and any
+ /// protocol, curator or performance fee.
+-contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCallback {
++interface IFeeEscrowV2 {
++    function realize() external;
++}
++
++contract SharedCommitmentVault is ISharedCommitmentVault, IUnlockCallback {
+     /// @notice Largest amount accepted for any single asset amount, per-asset backing, or the share supply:
+     ///         2^127 - 1.
+     /// @dev The PoolManager converts amounts to int128 for its delta accounting, so anything larger would revert
+@@ -197,51 +202,51 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+     mapping(address curator => CuratorRecord) internal _curators;
+     /// @notice Most unused capacity, in raw units of `currency`, that a curator may hold across its unreleased
+     ///         allocations. Zero means the curator can allocate nothing in that currency.
+-    mapping(address curator => mapping(Currency currency => uint256)) public curatorCeiling;
++    mapping(address curator => mapping(Currency currency => uint256)) internal curatorCeiling;
+     /// @notice Unused capacity currently held by a curator's unreleased allocations, in raw units of `currency`.
+     /// @dev Moves in lockstep with `reserved`: raised by `reserveFor`, lowered by `exchange`, `release` and
+     ///      `cancelAllocation`.
+-    mapping(address curator => mapping(Currency currency => uint256)) public curatorReserved;
++    mapping(address curator => mapping(Currency currency => uint256)) internal curatorReserved;
+ 
+     /// @notice B_a: ERC-6909 claims the vault has accounted for, in raw units of the asset.
+-    mapping(Currency currency => uint256) public backing;
++    mapping(Currency currency => uint256) internal backing;
+     /// @notice Q_a: total unused capacity of all unreleased allocations that sell this asset.
+-    mapping(Currency currency => uint256) public reserved;
++    mapping(Currency currency => uint256) internal reserved;
+     /// @notice R_a: inventory that new allocations must leave unreserved. Existing allocations and LP exits are
+     ///         not affected by it.
+-    mapping(Currency currency => uint256) public bufferFloor;
++    mapping(Currency currency => uint256) internal bufferFloor;
+     /// @notice Vault price floor and halt flag for the direction in which the vault sells `currencyOut`.
+-    mapping(Currency currencyOut => SellPolicy) public sellPolicy;
++    mapping(Currency currencyOut => SellPolicy) internal sellPolicy;
+     /// @notice W_a: assets finalized for queued redemptions but not yet claimed. These belong to specific
+     ///         requests, not to the remaining shares, and no path except `claim` reduces them.
+-    mapping(Currency currency => uint256) public claimableAssets;
++    mapping(Currency currency => uint256) internal claimableAssets;
+ 
+     /// @dev Allocation records by id. Ids start at 1, so an all-zero record (consumer == address(0)) means
+     ///      "unknown allocation".
+     mapping(uint256 allocationId => Allocation) internal _allocations;
+     /// @notice Id the next successful `reserveFor` call will assign.
+-    uint256 public nextAllocationId = 1;
++    uint256 internal nextAllocationId = 1;
+ 
+     /// @notice S: all outstanding shares, including queued shares and the MIN_SHARES held by address(0).
+-    uint256 public totalShares;
++    uint256 internal totalShares;
+     /// @notice P: shares escrowed in the withdrawal queue and not yet finalized.
+     uint256 public pendingShares;
+     /// @notice Free (not escrowed) shares of each account. Shares are not transferable.
+-    mapping(address account => uint256) public sharesOf;
++    mapping(address account => uint256) internal sharesOf;
+ 
+     /// @dev Withdrawal requests by id. Ids start at 1 and increase, which defines FIFO order.
+     mapping(uint256 requestId => WithdrawalRequest) internal _requests;
+     /// @notice Id the next queued redemption will receive.
+-    uint256 public nextRequestId = 1;
++    uint256 internal nextRequestId = 1;
+     /// @notice Lowest request id that may still hold pending shares. Every request below it is finished or
+     ///         canceled, so queue processing starts here.
+-    uint256 public queueHead = 1;
++    uint256 internal queueHead = 1;
+ 
+     /// @notice Unused capacity currently held by a hook's unreleased allocations, in raw units of `currency`.
+     /// @dev The per-hook counterpart of `curatorReserved`, and like it the sum of maxOut - consumed over the hook's
+     ///      unreleased allocations: raised by `allocate`, lowered by `exchange` and `_close`. Summed over all hooks it
+     ///      equals Q_a. Used only for the hook-scope exposure cap.
+-    mapping(address consumer => mapping(Currency currency => uint256)) public hookReserved;
++    mapping(address consumer => mapping(Currency currency => uint256)) internal hookReserved;
+     /// @dev Risk limits by keccak256(abi.encode(scope, account, currency)); see `RiskLimit` and `getRiskLimit`.
+     mapping(bytes32 key => RiskLimit) internal _riskLimits;
+ 
+@@ -253,17 +258,22 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+ 
+     /// @notice Market-risk adapter read on every fill. Zero: static mode (only the stored floors price fills). Hooks
+     ///         read it from here, so they cannot price from a different adapter than the one the vault enforces.
+-    IMarketRiskAdapter public riskAdapter;
++    IMarketRiskAdapter internal riskAdapter;
+     /// @notice e: the vault's edge beyond the reference band, pips. Guardian may only raise it.
+-    uint24 public riskEdgePips;
++    uint24 internal riskEdgePips;
+     /// @notice Largest reference uncertainty u the vault accepts, pips. Guardian may only lower it.
+-    uint24 public maxUncertaintyPips;
++    uint24 internal maxUncertaintyPips;
+     /// @notice tau_a: inventory target per share, by asset index (0: asset0, 1: asset1), in raw units scaled by 1e18.
+     ///         Zero: no inventory floor for that asset (and, in adapter mode, no selling of it).
+-    uint256[2] public inventoryTargetPerShare;
++    uint256[2] internal inventoryTargetPerShare;
+     /// @notice kappa_a: how far below its target the holding of each asset may fall, pips of the target. Guardian may
+     ///         only lower it.
+-    uint24[2] public inventoryTolerancePips;
++    uint24[2] internal inventoryTolerancePips;
++    address internal feeEscrow;
++    uint256 internal constant _BUCKET = 1 hours;
++    uint256 internal constant _RING = 720;
++    uint256 internal constant _SWEEP_STEPS = 32;
++    mapping(Currency currency => ExpiryRing.Ring) internal _expiry;
+ 
+     /// @dev Transient-storage (EIP-1153) slot of the reentrancy lock: keccak256 of
+     ///      "porkfolio.SharedCommitmentVault.reentrancyLock". Transient storage is cleared at the end of every
+@@ -316,6 +326,17 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+         asset0 = asset0_;
+         asset1 = asset1_;
+         emit OwnershipTransferred(address(0), owner_);
++        uint40 b = uint40(block.timestamp / _BUCKET);
++        _expiry[asset0_].swept = b;
++        _expiry[asset1_].swept = b;
++    }
++
++    function _sweep(Currency a) internal {
++        reserved[a] = ExpiryRing.sweep(_expiry[a], reserved[a], block.timestamp / _BUCKET, _SWEEP_STEPS, _RING);
++    }
++
++    function liveReserved(Currency a) external view returns (uint256) {
++        return ExpiryRing.live(_expiry[a], reserved[a], block.timestamp / _BUCKET, _RING);
+     }
+ 
+     // ==================================================================
+@@ -742,6 +763,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+         whenNotPaused
+         returns (uint256 amount0, uint256 amount1)
+     {
++        address escrow = feeEscrow;
++        if (escrow != address(0)) IFeeEscrowV2(escrow).realize();
+         uint256 supply = totalShares;
+         if (supply == 0) revert NotInitialized();
+         if (receiver == address(0)) revert ZeroAddress();
+@@ -808,6 +831,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+         // Queued LPs have priority over newly freed inventory. Serve them first (bounded), then allow an instant
+         // exit only if nobody is still waiting. Without this step a deliverable-but-unprocessed request would
+         // block every instant exit until someone called processQueue separately.
++        _sweep(asset0);
++        _sweep(asset1);
+         if (pendingShares != 0) _processQueue(INLINE_QUEUE_STEPS);
+         uint256 supply = totalShares;
+         if (pendingShares == 0) {
+@@ -878,6 +903,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+     /// @param maxSteps Most queue entries to visit in this call, to bound gas. Zero does nothing.
+     /// @return sharesFinalized Total shares converted into claimable assets in this call.
+     function processQueue(uint256 maxSteps) external nonReentrant returns (uint256 sharesFinalized) {
++        _sweep(asset0);
++        _sweep(asset1);
+         return _processQueue(maxSteps);
+     }
+ 
+@@ -1079,7 +1106,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+         if (maxOut == 0) revert ZeroAmount();
+         if (maxOut > MAX_AMOUNT) revert AmountTooLarge();
+         uint64 expiry = req.expiry;
+-        if (expiry <= block.timestamp) revert InvalidExpiry();
++        if (expiry <= block.timestamp || expiry % _BUCKET != 0) revert InvalidExpiry();
+         if (expiry > block.timestamp + MAX_HORIZON) {
+             revert HorizonExceeded(expiry, block.timestamp + MAX_HORIZON);
+         }
+@@ -1087,14 +1114,16 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+         uint256 curatorAvailable = _sub0(curatorCeiling[curator][out], curatorReserved[curator][out]);
+         if (maxOut > curatorAvailable) revert CuratorCeilingExceeded(maxOut, curatorAvailable);
+ 
++        _sweep(out);
+         uint256 eligible = _eligibleBacking(out);
+         uint256 admissible = _admissible(out, eligible);
+         if (maxOut > admissible) revert InsufficientBacking(maxOut, admissible);
++        _checkRoom(out, maxOut);
+         _checkExposure(RiskScope.Hook, consumer, out, hookReserved[consumer][out], maxOut, eligible);
+         _checkExposure(RiskScope.Curator, curator, out, curatorReserved[curator][out], maxOut, eligible);
+         _checkExposure(RiskScope.Vault, address(0), out, reserved[out], maxOut, eligible);
+ 
+-        reserved[out] += maxOut;
++        reserved[out] = ExpiryRing.add(_expiry[out], reserved[out], expiry / _BUCKET, maxOut, _RING);
+         curatorReserved[curator][out] += maxOut;
+         hookReserved[consumer][out] += maxOut;
+ 
+@@ -1310,7 +1339,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+         // allocation's remaining capacity, so they cannot underflow either.
+         // forge-lint: disable-next-line(unsafe-typecast) amountOut <= remaining <= maxOut (a uint128).
+         a.consumed += uint128(amountOut);
+-        reserved[cout] -= amountOut;
++        reserved[cout] = ExpiryRing.remove(_expiry[cout], reserved[cout], a.expiry / _BUCKET, amountOut, _RING);
+         curatorReserved[curator][cout] -= amountOut;
+         hookReserved[msg.sender][cout] -= amountOut;
+         backing[cout] -= amountOut;
+@@ -1327,7 +1356,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+     // Views. Derived values and previews are in VaultLens (see the contract documentation).
+     // ==================================================================
+ 
+-    /// @inheritdoc IVaultState
++    ///
+     function coreInputs()
+         external
+         view
+@@ -1353,12 +1382,6 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+             );
+     }
+ 
+-    /// @notice Stored state of an allocation. Returns an all-zero struct for an unknown id.
+-    /// @param allocationId Allocation to read.
+-    /// @return The allocation record.
+-    function getAllocation(uint256 allocationId) external view returns (Allocation memory) {
+-        return _allocations[allocationId];
+-    }
+ 
+     /// @notice Stored record of a curator. All-zero for an address that was never touched.
+     /// @param curator Curator to read.
+@@ -1367,46 +1390,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+         return _curators[curator];
+     }
+ 
+-    /// @notice Stored risk limits and flow usage of one scope in one asset. All-zero if never configured.
+-    /// @dev `flowUsed` belongs to window `epoch`; it is current usage only while `epoch` equals
+-    ///      block.timestamp / FLOW_WINDOW. `VaultLens.flowAvailable` applies that rule.
+-    /// @param scope Hook, Curator or Vault.
+-    /// @param account The hook or curator; address(0) for the vault scope.
+-    /// @param currency Asset the limit applies to.
+-    /// @return The stored record.
+-    function getRiskLimit(RiskScope scope, address account, Currency currency)
+-        external
+-        view
+-        returns (RiskLimit memory)
+-    {
+-        return _riskLimit(scope, account, currency);
+-    }
+ 
+-    /// @notice Stored state of a withdrawal request. Returns an all-zero struct for an unknown id.
+-    /// @param requestId Request to read.
+-    /// @return The request record.
+-    function getRequest(uint256 requestId) external view returns (WithdrawalRequest memory) {
+-        return _requests[requestId];
+-    }
+ 
+-    /// @notice Largest new allocation of `currency` the admission rule accepts right now: N_a - Q_a - R_a - D_a,
+-    ///         or 0 if that is negative.
+-    /// @dev Example: N_a = 1,000, Q_a = 300, R_a = 100 and D_a = 150 give 450. This does not include the curator's
+-    ///      own ceiling or the exposure caps, which `reserveFor` checks separately.
+-    ///
+-    ///      Computed as max(0, max(0, E_a - Q_a) - R_a) with E_a = N_a - D_a (exact, since D_a <= N_a), the same
+-    ///      E_a the exposure caps use. Each term is subtracted in turn with a floor at zero instead of summing
+-    ///      Q_a + R_a + D_a first. R_a is an admin input with no upper bound (the guardian may raise it to
+-    ///      type(uint256).max to stop new allocations in this asset), so the sum could overflow and revert with a
+-    ///      panic. Because every term is non-negative, the floored chain equals max(0, N - D - Q - R) exactly: once an
+-    ///      intermediate result reaches zero, the exact value is already <= 0. The result is therefore unchanged
+-    ///      wherever the sum did not overflow, and is 0 (so `reserveFor` reverts with `InsufficientBacking`) wherever
+-    ///      it did.
+-    /// @param currency Asset the allocation would sell.
+-    /// @return Raw units of `currency`.
+-    function admissibleCapacity(Currency currency) external view returns (uint256) {
+-        return _admissible(currency, _eligibleBacking(currency));
+-    }
+ 
+     // ==================================================================
+     // Internal
+@@ -1521,7 +1506,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+         uint256 unused = a.maxOut - a.consumed;
+         a.released = true;
+         Currency out = a.currencyOut;
+-        reserved[out] -= unused;
++        reserved[out] = ExpiryRing.remove(_expiry[out], reserved[out], a.expiry / _BUCKET, unused, _RING);
+         curatorReserved[a.curator][out] -= unused;
+         hookReserved[a.consumer][out] -= unused;
+         emit AllocationReleased(allocationId, msg.sender, unused, reason);
+@@ -1714,6 +1699,37 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
+         }
+     }
+ 
++    function _checkRoom(Currency out, uint256 maxOut) internal view {
++        uint256 i = out == asset1 ? 1 : 0;
++        uint256 target = inventoryTargetPerShare[i];
++        if (target != 0) {
++            uint256 room = _sub0(
++                _netAssets(out), VaultRiskBoundary.inventoryFloor(totalShares, target, inventoryTolerancePips[i])
++            );
++            uint256 q = reserved[out];
++            if (q + maxOut > room) revert InsufficientBacking(maxOut, _sub0(room, q));
++        }
++    }
++
++    function setFeeEscrow(address escrow) external {
++        _authorize(false);
++        feeEscrow = escrow;
++    }
++
++    function realizeFee(Currency currency, uint256 amount) external {
++        if (msg.sender != feeEscrow) revert NotOwner();
++        uint256 b = backing[_otherAsset(_otherAsset(currency))];
++        if (amount > MAX_AMOUNT - b) revert AmountTooLarge();
++        backing[currency] = b + amount;
++        poolManager.transferFrom(msg.sender, address(this), currency.toId(), amount);
++    }
++
++    function extsload(bytes32 slot) external view returns (bytes32 value) {
++        assembly ("memory-safe") {
++            value := sload(slot)
++        }
++    }
++
+     /// @dev a - b, or 0 if b > a.
+     function _sub0(uint256 a, uint256 b) internal pure returns (uint256) {
+         return a > b ? a - b : 0;
+diff --git a/src/interfaces/ISharedCommitmentVault.sol b/src/interfaces/ISharedCommitmentVault.sol
+index 86c592d..0695cd1 100644
+--- a/src/interfaces/ISharedCommitmentVault.sol
++++ b/src/interfaces/ISharedCommitmentVault.sol
+@@ -480,5 +480,5 @@ interface ISharedCommitmentVault {
+     /// @notice Stored state of an allocation; an all-zero struct if the id does not exist.
+     /// @param allocationId Allocation to read.
+     /// @return The allocation record.
+-    function getAllocation(uint256 allocationId) external view returns (Allocation memory);
++
+ }
