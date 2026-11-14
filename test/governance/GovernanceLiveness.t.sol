@@ -35,10 +35,12 @@ contract GovernanceLivenessTest is VaultTestBase {
     uint256 internal tau;
     address internal v;
     bytes internal loosen; // LONG_DELAY: tolerance 5% -> 10% on both assets
-    // Inventory floor on asset1 only. Commitments here sell asset0, and room-aware admission caps a commitment at the
-    // room above the floor of the asset it sells (about 5% of N_0 with a 5% tolerance), so with a floor on asset0 no
-    // single commitment could take free asset0 to zero. Asset0 without a floor is the case these tests measure: the
-    // most one commitment can withhold. `test/security/RoomAwareAdmission.t.sol` covers the floored case.
+    // Special case, kept on purpose: static mode (no adapter) with no inventory target on asset0, the asset these
+    // commitments sell. Room-aware admission caps a commitment at the room above the floor of the asset it sells
+    // (about 5% of N_0 with a 5% tolerance), so with a floor on asset0 no single commitment could take free asset0 to
+    // zero. Asset0 without a floor is the most one commitment can withhold, the worst case G02 measured. In adapter
+    // mode, the deployment configuration, an asset without a target cannot be reserved at all; the configured case
+    // (targets on both assets, deployment limits) is `GovernanceLivenessConfigured.t.sol`.
 
     function setUp() public override {
         super.setUp();

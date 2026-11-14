@@ -456,7 +456,9 @@ contract GovernanceLivenessInvariantsTest is VaultTestBase {
         vault.setGuardian(guardian);
         // Floor on asset1 only: commitments sell asset0, and with a floor on asset0 room-aware admission would cap
         // each at the room above it (about 5% of N_0), so no commitment could hold the queue right after admission.
-        // Asset0 without a floor keeps the campaign on the case G02 measures: the most a commitment can withhold.
+        // Asset0 without a floor keeps the campaign on the case G02 measures: the most a commitment can withhold. This
+        // is a static-mode special case (no adapter); in adapter mode an asset without a target cannot be reserved.
+        // GovernanceLivenessConfigured.t.sol covers targets on both assets under the deployment limits.
         vault.setInventoryBounds(0, tau, 50_000, 50_000);
         vault.setCurator(curator2, true);
         vault.setCurator(address(griefer), true);

@@ -66,13 +66,17 @@ contract QueueGriefer {
         return live.length == 0 ? 0 : live[live.length - 1];
     }
 
-    /// @dev Commits every unit of `out` the admission rule allows right now, for `horizon` seconds.
+    /// @dev Commits every unit of `out` the admission rule and this curator's remaining ceiling allow right now, for
+    ///      `horizon` seconds.
     function commitAll(uint256 horizon) public returns (uint256 id) {
+        uint256 amount = vault.admissibleCapacity(out);
+        uint256 ceilingLeft = vault.curatorCeiling(address(this), out) - vault.curatorReserved(address(this), out);
+        if (ceilingLeft < amount) amount = ceilingLeft;
         ISharedCommitmentVault.AllocationRequest memory r = ISharedCommitmentVault.AllocationRequest({
             consumer: address(key.hooks),
             key: key,
             currencyOut: out,
-            maxOut: uint128(vault.admissibleCapacity(out)),
+            maxOut: uint128(amount),
             minInPerOutX96: uint160(FixedPoint96.Q96),
             expiry: uint64((block.timestamp + horizon) / 1 hours * 1 hours), // hour boundary, as the vault requires
             nonce: nonce++,
@@ -82,17 +86,37 @@ contract QueueGriefer {
         live.push(id);
     }
 
+    /// @dev Redeems `shares`, paying what free inventory allows and queuing the rest.
+    function redeem(uint256 shares) public returns (uint256 instant, uint256 rid) {
+        (instant,,, rid) = vault.redeem(shares, 0, 0, address(this), true);
+    }
+
     function queue(uint256 shares) public returns (uint256 rid) {
-        (,,, rid) = vault.redeem(shares, 0, 0, address(this), true);
+        (, rid) = redeem(shares);
         require(rid != 0, "not queued");
     }
 
     function rotate(uint256 horizon, uint256 shares) external returns (uint256 rid) {
+        _cancelLive();
+        commitAll(horizon);
+        rid = queue(shares);
+    }
+
+    /// @dev `rotate` with fresh capital, for a vault with inventory targets, where a commitment can take at most the
+    ///      room above the floor: deposit `shares` (which widens the room), cancel, commit everything admissible, then
+    ///      redeem the same `shares`. The redemption first finalizes what was queued before (inline processing), then
+    ///      pays what free inventory allows and queues the rest behind the new commitment. One transaction.
+    function rotateWithCapital(uint256 horizon, uint256 shares) external returns (uint256 rid) {
+        vault.deposit(shares, type(uint256).max, type(uint256).max, address(this));
+        _cancelLive();
+        commitAll(horizon);
+        rid = queue(shares);
+    }
+
+    function _cancelLive() internal {
         for (uint256 i; i < live.length; ++i) {
             if (!vault.getAllocation(live[i]).released) vault.cancelAllocation(live[i]); // skip expired-and-released
         }
         delete live;
-        commitAll(horizon);
-        rid = queue(shares);
     }
 }
