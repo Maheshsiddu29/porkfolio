@@ -31,8 +31,8 @@ interface ICuratorAuthorization {
     /// @param maxOut         Capacity: most raw units of `currencyOut` the allocation may pay out in total.
     /// @param minInPerOutX96 Curator floor: minimum raw input per raw output, Q64.96.
     /// @param expiry         Unix time from which the allocation can no longer be consumed. Required by the vault
-    ///                       (at most MAX_HORIZON after activation); this is the allocation's lifetime, not the
-    ///                       instruction's.
+    ///                       to be a multiple of 3,600 (an hour boundary) and at most MAX_HORIZON after activation;
+    ///                       this is the allocation's lifetime, not the instruction's.
     /// @param validAfter     Earliest Unix time at which the instruction may be activated (inclusive). At most
     ///                       `deadline`.
     /// @param deadline       Latest Unix time at which the instruction may be activated (inclusive). At most

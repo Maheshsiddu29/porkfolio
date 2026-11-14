@@ -297,6 +297,9 @@ contract AdmissibleCapacityTest is VaultTestBase {
         _store(keccak256(abi.encode(a, VaultStateReader.BUFFER_FLOOR_SLOT)), r);
         _store(bytes32(VaultStateReader.TOTAL_SHARES_SLOT), s);
         stdstore.target(address(vault)).sig("pendingShares()").checked_write(p);
+        // Q written directly is only meaningful if no sweep would change it: mark the expiry ring as swept up to the
+        // current bucket (header word: swept in bits 0-63, maxBucket 0), so the next sweep leaves Q as written.
+        _store(keccak256(abi.encode(a, VaultStateReader.EXPIRY_RINGS_SLOT)), block.timestamp / 1 hours);
     }
 
     function _store(bytes32 slot, uint256 value) internal {

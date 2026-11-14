@@ -918,14 +918,14 @@ contract ProductionArtifactSecurityTest is Test {
         );
         auth.activateDirect(r);
 
-        (a.validAfter, a.deadline, a.expiry) = (t, t + 1 days, t + 2 days);
+        (a.validAfter, a.deadline, a.expiry) = (t, t + 1 days, (t + 2 days) / 1 hours * 1 hours); // hour boundary
         bytes memory sig = _signAuth(k, a);
         vm.warp(t + 1 days);
         _activateSigned(a, keyA, sig);
 
         ICuratorAuthorization.AllocationAuthorization memory f = _authz(curator, keyA, c1, 1000 ether);
         uint64 opens = t + 200 days;
-        (f.validAfter, f.deadline, f.expiry) = (opens, opens + 1 hours, opens + 1 days);
+        (f.validAfter, f.deadline, f.expiry) = (opens, opens + 1 hours, (opens + 1 days) / 1 hours * 1 hours);
         bytes memory fSig = _signAuth(k, f);
         _activateReverts(
             f, keyA, fSig, abi.encodeWithSelector(ICuratorAuthorization.AuthorizationNotYetValid.selector, opens)
@@ -1340,7 +1340,7 @@ contract ProductionArtifactSecurityTest is Test {
             zeroForOne: out == key.currency1,
             maxOut: maxOut,
             minInPerOutX96: PRICE_1_1_X96,
-            expiry: uint64(now_ + 1 days),
+            expiry: uint64((now_ + 1 days) / 1 hours * 1 hours), // hour boundary, as the vault requires
             validAfter: uint64(now_),
             deadline: uint64(now_ + 1 hours),
             nonce: nonce++
@@ -1426,7 +1426,7 @@ contract ProductionArtifactSecurityTest is Test {
             currencyOut: out,
             maxOut: maxOut,
             minInPerOutX96: PRICE_1_1_X96,
-            expiry: uint64(block.timestamp + 1 days),
+            expiry: uint64((block.timestamp + 1 days) / 1 hours * 1 hours), // hour boundary, as the vault requires
             nonce: nonce++,
             deadline: uint64(block.timestamp)
         });

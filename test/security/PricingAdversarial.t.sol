@@ -29,9 +29,11 @@ contract PricingAdversarialTest is PricingTestBase {
     ///         eight runs per hook receive exactly the single trade's output and end in the same pricing state.
     function test_ADV_split_2_5_10_100_sameAndCrossTx() public {
         uint256[4] memory ns = [uint256(2), 5, 10, 100];
+        // Both allocations up front: allocating inside the loop exceeds the via-IR stack limit.
+        uint256[2] memory ids = [_allocate(keyA, c1, BIG), _allocate(keyB, c1, BIG)];
         for (uint256 h; h < 2; ++h) {
             PoolKey memory key = h == 0 ? keyA : keyB;
-            uint256 id = _allocate(key, c1, BIG);
+            uint256 id = ids[h];
             uint256 snap = vm.snapshotState();
             uint256[] memory one = new uint256[](1);
             one[0] = 8000 ether;
@@ -66,15 +68,11 @@ contract PricingAdversarialTest is PricingTestBase {
         vault.setCuratorCeiling(curator2, c1, VAULT_FUNDING);
         _openLimits(ISharedCommitmentVault.RiskScope.Curator, curator2);
         vm.stopPrank();
+        uint256[4][2] memory all = [_splitAllocations(keyA, curator2), _splitAllocations(keyB, curator2)];
         for (uint256 h; h < 2; ++h) {
             PoolKey memory key = h == 0 ? keyA : keyB;
-            uint256[3] memory ids;
-            ids[0] = _allocate(key, c1, 3000 ether);
-            ids[1] = _allocate(key, c1, 3000 ether);
-            ISharedCommitmentVault.AllocationRequest memory r = _request(key, c1, 3000 ether);
-            vm.prank(curator2);
-            ids[2] = auth.activateDirect(r);
-            uint256 big = _allocate(key, c1, 10_000 ether);
+            uint256[4] memory ids = all[h];
+            uint256 big = ids[3];
 
             uint256 snap = vm.snapshotState();
             uint256 single = _out(_swap(key, true, 7500 ether, big), true);
@@ -86,6 +84,17 @@ contract PricingAdversarialTest is PricingTestBase {
             assertEq(split, single);
             vm.revertToState(snap);
         }
+    }
+
+    /// @dev Three allocations of 3,000 on `key` (two by the fixture curator, one by `curator2`) and one of 10,000,
+    ///      made before the loop of `test_ADV_split_acrossAllocationsAndCurators` to stay inside the via-IR stack limit.
+    function _splitAllocations(PoolKey memory key, address curator2) internal returns (uint256[4] memory ids) {
+        ids[0] = _allocate(key, c1, 3000 ether);
+        ids[1] = _allocate(key, c1, 3000 ether);
+        ISharedCommitmentVault.AllocationRequest memory r = _request(key, c1, 3000 ether);
+        vm.prank(curator2);
+        ids[2] = auth.activateDirect(r);
+        ids[3] = _allocate(key, c1, 10_000 ether);
     }
 
     // ------------------------------------------------------------------

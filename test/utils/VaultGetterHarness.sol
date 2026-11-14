@@ -107,4 +107,27 @@ contract VaultGetterHarness is SharedCommitmentVault {
     function oldAdmissibleCapacity(Currency c) external view returns (uint256) {
         return _admissible(c, _eligibleBacking(c));
     }
+
+    /// @notice The admission limit exactly as `reserveFor` computes it: after the vault's own sweep of `c`. Writes
+    ///         (the sweep); callers compare it inside a snapshot.
+    function sweptAdmissibleCapacity(Currency c) external returns (uint256) {
+        _sweep(c);
+        return _admissible(c, _eligibleBacking(c));
+    }
+
+    /// @notice Q_a after the vault's own sweep of `c` (writes; see above).
+    function sweptReservedNow(Currency c) external returns (uint256) {
+        _sweep(c);
+        return reserved[c];
+    }
+
+    function oldExpiryRing(Currency c) external view returns (uint64 swept, uint64 maxBucket) {
+        ExpiryRing storage r = _expiryRings[c];
+        return (r.swept, r.maxBucket);
+    }
+
+    function oldExpiryBucket(Currency c, uint256 index) external view returns (uint64 bucket, uint128 amount) {
+        ExpiryBucket storage b = _expiryRings[c].buckets[index];
+        return (b.bucket, b.amount);
+    }
 }

@@ -253,7 +253,7 @@ contract OracleBandHooksTest is VaultTestBase {
             currencyOut: out,
             maxOut: uint128(maxOut),
             minInPerOutX96: 1,
-            expiry: uint64(vm.getBlockTimestamp() + 30 days),
+            expiry: _hourAligned(vm.getBlockTimestamp() + 30 days),
             nonce: nextNonce++,
             deadline: uint64(vm.getBlockTimestamp() + 1 hours)
         });

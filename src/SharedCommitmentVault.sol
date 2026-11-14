@@ -43,7 +43,8 @@ import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
 /// Notation, per asset a in {asset0, asset1}. `docs/architecture/SHARE_ACCOUNTING.md` has derivations.
 ///   B_a = backing[a]           Claims the vault has accounted for. Never more than its real PoolManager balance;
 ///                              claims donated straight to the vault are not counted.
-///   Q_a = reserved[a]          Unused capacity of all unreleased allocations selling a.
+///   Q_a = reserved[a]          Unused capacity of the unreleased allocations selling a whose expiry has not yet
+///                              been recognized (see "Expiry"). Never below the capacity of the live ones.
 ///   W_a = claimableAssets[a]   Assets already finalized for queued redemptions and owed to specific requests.
 ///   N_a = B_a - W_a            Net assets owned by outstanding shares (includes Q_a).
 ///   F_a = N_a - Q_a            Free inventory: what can be paid out now without breaking a commitment.
@@ -57,6 +58,18 @@ import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
 ///   W_a = sum of request claimables;  P = sum of request sharesPending;  S = sum(sharesOf) + P.
 /// Admission rule for a new allocation of size q:  Q_a + q + R_a + D_a <= N_a, and, when asset a has an inventory
 /// target, Q_a + q <= N_a - L_a (L_a is the inventory floor; see "Market-risk boundary").
+///
+/// Expiry. An allocation is consumable while block.timestamp < expiry, and every expiry is a multiple of one hour.
+/// Expired capacity leaves Q_a without anyone releasing the allocation: Q_a is kept per asset in a ring of 720
+/// hourly buckets (bucket b = expiry / 1 hour, held in slot b % 720 and tagged with b), and the calls that need an
+/// up-to-date Q_a (`reserveFor` for the asset it sells, `redeem` and `processQueue` for both assets) first subtract
+/// the buckets whose hour has passed, at most 32 per asset per call, or all of them in one step once every bucket
+/// ever written has passed (`_sweep`). `processQueue(0)` therefore works as a permissionless sweep. `exchange`
+/// never sweeps. A sweep that is behind leaves Q_a too high, never too low, so admission and LP exits stay
+/// conservative. Nothing happens without a call: expiry is recognized by the next sweeping call. The per-curator and
+/// per-hook totals (`curatorReserved`, `hookReserved`) do not use the ring; they keep expired capacity until the
+/// allocation is closed (`release`, permissionless after expiry, or `cancelAllocation`), which only makes that
+/// curator's ceiling and that hook's exposure cap stricter in the meantime.
 ///
 /// Roles.
 ///   Owner     Configures everything, initializes the vault, can loosen limits. Has no function that moves LP assets.
@@ -100,7 +113,7 @@ import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
 /// `reserveFor` checks all three exposure caps. A record the owner never configured fails closed at both points.
 /// The four quantities are kept apart:
 ///   reserved capacity   Q_a, curatorReserved, hookReserved: promised but not yet paid; falls on consumption,
-///                       cancellation, release and expiry-release;
+///                       cancellation and release, and Q_a also when a sweep recognizes an expiry;
 ///   gross outflow       RiskLimit.flowUsed: paid in the current window; only consumption raises it, nothing
 ///                       lowers it before the window ends, and inflows are never netted against it;
 ///   free inventory      F_a = N_a - Q_a: what LP exits can be paid from;
@@ -140,8 +153,9 @@ import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
 /// prices from anything else is still held to this boundary by `exchange`. See `_floorForFill`.
 ///
 /// Not implemented here: rolling-window flow limits (the flow window is a fixed epoch; see `FLOW_WINDOW`),
-/// path-independent cumulative pricing, epoch-based expiry of commitments, transferable share tokens, and any
-/// protocol, curator or performance fee.
+/// path-independent cumulative pricing, any guarantee that reserved capacity can still be sold later (LP exits,
+/// floors, oracle outages, pauses, halts, freezes and flow caps can all refuse a fill), transferable share tokens,
+/// and any protocol, curator, reservation or performance fee.
 contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCallback {
     /// @notice Largest amount accepted for any single asset amount, per-asset backing, or the share supply:
     ///         2^127 - 1.
@@ -152,7 +166,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
 
     /// @notice Longest lifetime an allocation may have, measured from the block that creates it.
     /// @dev This bounds how long a queued redemption can be blocked by commitments that existed when it was
-    ///      queued, provided someone calls `release` after they expire.
+    ///      queued: once they have expired, the next `processQueue` or `redeem` takes them out of Q_a (after at most
+    ///      one call per 32 hours of backlog, or one call once every recorded expiry has passed).
     uint256 public constant MAX_HORIZON = 30 days;
 
     /// @notice Shares minted to address(0) by `initialDeposit` and never redeemable.
@@ -177,6 +192,15 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
 
     /// @dev Denominator of the exposure caps: 10,000 basis points = 100%.
     uint256 internal constant _BPS = 10_000;
+
+    /// @dev Width of one expiry bucket, seconds. Every allocation expiry is a multiple of it; bucket b ends at
+    ///      b * _EXPIRY_BUCKET and has expired once block.timestamp >= b * _EXPIRY_BUCKET.
+    uint256 internal constant _EXPIRY_BUCKET = 1 hours;
+    /// @dev Ring slots per asset, MAX_HORIZON / _EXPIRY_BUCKET = 720. A new expiry lies at most this many buckets
+    ///      after the current one, so a slot is reused only after the bucket it held has expired (see `_addToBucket`).
+    uint256 internal constant _EXPIRY_SLOTS = MAX_HORIZON / _EXPIRY_BUCKET;
+    /// @dev Most buckets one `_sweep` walks per asset, which bounds the extra gas of a sweeping call.
+    uint256 internal constant _SWEEP_STEPS = 32;
 
     /// @notice The Uniswap v4 PoolManager that holds the ERC-20 behind the vault's claims.
     IPoolManager public immutable poolManager;
@@ -203,9 +227,9 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     /// @dev Most unused capacity, in raw units of `currency`, that a curator may hold across its unreleased
     ///      allocations. Zero means the curator can allocate nothing in that currency.
     mapping(address curator => mapping(Currency currency => uint256)) internal curatorCeiling;
-    /// @dev Unused capacity currently held by a curator's unreleased allocations, in raw units of `currency`. Moves
-    ///      in lockstep with `reserved`: raised by `reserveFor`, lowered by `exchange`, `release` and
-    ///      `cancelAllocation`.
+    /// @dev Unused capacity currently held by a curator's unreleased allocations, in raw units of `currency`, expired
+    ///      or not: raised by `reserveFor`, lowered by `exchange`, `release` and `cancelAllocation`. Unlike Q_a it is
+    ///      not lowered by expiry, so after an allocation expires it stays high until the allocation is closed.
     mapping(address curator => mapping(Currency currency => uint256)) internal curatorReserved;
 
     /// @dev B_a: ERC-6909 claims the vault has accounted for, in raw units of the asset.
@@ -244,8 +268,9 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
 
     /// @dev Unused capacity currently held by a hook's unreleased allocations, in raw units of `currency`. The
     ///      per-hook counterpart of `curatorReserved`, and like it the sum of maxOut - consumed over the hook's
-    ///      unreleased allocations: raised by `allocate`, lowered by `exchange` and `_close`. Summed over all hooks it
-    ///      equals Q_a. Used only for the hook-scope exposure cap.
+    ///      unreleased allocations, expired or not: raised by `reserveFor`, lowered by `exchange` and `_close`. Summed
+    ///      over all hooks it is at least Q_a (equal until a sweep recognizes an expiry). Used only for the hook-scope
+    ///      exposure cap.
     mapping(address consumer => mapping(Currency currency => uint256)) internal hookReserved;
     /// @dev Risk limits by keccak256(abi.encode(scope, account, currency)); see `RiskLimit` and
     ///      `VaultLens.getRiskLimit`.
@@ -271,6 +296,33 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     /// @dev kappa_a: how far below its target the holding of each asset may fall, pips of the target. Guardian may
     ///      only lower it.
     uint24[2] internal inventoryTolerancePips;
+
+    /// @dev One slot of an expiry ring.
+    /// @param bucket Tag: the bucket (expiry / _EXPIRY_BUCKET) whose capacity `amount` holds. A slot whose tag is
+    ///        not the bucket being looked up holds an older or a newer bucket, never this one.
+    /// @param amount Unused capacity, raw units, of the unreleased allocations expiring at the end of `bucket` that
+    ///        is still part of Q_a. Meaningful only while bucket > swept; a swept slot keeps its last value until it
+    ///        is reused.
+    struct ExpiryBucket {
+        uint64 bucket;
+        uint128 amount;
+    }
+
+    /// @dev Expiry ring of one asset. Representation invariant, after every external call:
+    ///      Q_a = sum of `amount` over the slots whose tag is greater than `swept`.
+    /// @param swept Every bucket <= swept has been subtracted from Q_a. Never above the current bucket.
+    /// @param maxBucket Largest bucket ever written. Once the current bucket reaches it, every recorded allocation
+    ///        has expired and Q_a is zero.
+    /// @param buckets Slot index (bucket % _EXPIRY_SLOTS) to slot.
+    struct ExpiryRing {
+        uint64 swept;
+        uint64 maxBucket;
+        mapping(uint256 index => ExpiryBucket) buckets;
+    }
+
+    /// @dev Expiry ring per asset; see "Expiry" in the contract documentation and `_sweep`. Starts all zero: the first
+    ///      sweep finds the current bucket at or past maxBucket = 0 and sets swept to it without walking.
+    mapping(Currency currency => ExpiryRing) internal _expiryRings;
 
     /// @dev Transient-storage (EIP-1153) slot of the reentrancy lock: keccak256 of
     ///      "porkfolio.SharedCommitmentVault.reentrancyLock". Transient storage is cleared at the end of every
@@ -375,8 +427,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
 
     /// @notice Register or revoke a hook as a consumer.
     /// @dev Revocation takes effect immediately: the hook's next `exchange` reverts. Its allocations stay
-    ///      reserved until they are released (by anyone after expiry, or early by the owner or guardian) or
-    ///      canceled by their curator. Owner may register and revoke; the guardian may only revoke.
+    ///      reserved until they expire (Q_a drops at the next sweep after expiry), are released (by anyone after
+    ///      expiry, or early by the owner or guardian) or are canceled by their curator. Owner may register and revoke; the guardian may only revoke.
     /// @param consumer Hook address. Must be non-zero.
     /// @param registered True to register, false to revoke.
     function setConsumer(address consumer, bool registered) external {
@@ -422,7 +474,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      curator's allocations keep their reservations in Q_a and `curatorReserved`, and registration and
     ///      generation are untouched. Keeping the reservations means an unfreeze can never leave an allocation
     ///      without backing; the cost is that LP exits treat that capacity as committed until the allocations are
-    ///      canceled, released by the owner or guardian, or expire (at most MAX_HORIZON). Reverts with
+    ///      canceled, released by the owner or guardian, or expire (at most MAX_HORIZON; Q_a then drops at the next
+    ///      sweep, while `curatorReserved` waits for the allocation to be closed). Reverts with
     ///      `InvalidCuratorTransition` unless the curator is currently unrestricted. Works while paused.
     /// @param curator Curator to freeze. Must be non-zero; it need not be registered.
     function freezeCurator(address curator) external {
@@ -780,6 +833,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
 
     /// @notice Redeem shares for their in-kind basket, instantly where possible and through the queue otherwise.
     /// @dev Works while paused. Steps:
+    ///      0. Sweep both assets' expiry rings (`_sweep`), so that capacity whose expiry has passed no longer counts
+    ///         against free inventory.
     ///      1. If any shares are pending, process up to INLINE_QUEUE_STEPS queue entries first (see
     ///         INLINE_QUEUE_STEPS for why).
     ///      2. Instant tier. Allowed only if nothing is pending after step 1, so a new redeemer can never overtake
@@ -816,6 +871,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         uint256 balance = sharesOf[msg.sender];
         if (shares > balance) revert InsufficientShares(shares, balance);
 
+        _sweep(asset0);
+        _sweep(asset1);
         // Queued LPs have priority over newly freed inventory. Serve them first (bounded), then allow an instant
         // exit only if nobody is still waiting. Without this step a deliverable-but-unprocessed request would
         // block every instant exit until someone called processQueue separately.
@@ -886,9 +943,15 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      Canceled or completed entries are skipped at the cost of one step each. A partial slice whose basket
     ///      rounds to zero in both assets is not finalized (that would burn shares for nothing); a whole request
     ///      that rounds to zero is finalized at zero so it cannot block the queue forever.
-    /// @param maxSteps Most queue entries to visit in this call, to bound gas. Zero does nothing.
+    ///
+    ///      Before visiting the queue, both assets' expiry rings are swept (`_sweep`), so expired capacity is
+    ///      available to the queue without anyone releasing it. With `maxSteps = 0` the call only sweeps: anyone can
+    ///      use it to bring Q_a up to date, 32 buckets per asset per call.
+    /// @param maxSteps Most queue entries to visit in this call, to bound gas. Zero visits none (and only sweeps).
     /// @return sharesFinalized Total shares converted into claimable assets in this call.
     function processQueue(uint256 maxSteps) external nonReentrant returns (uint256 sharesFinalized) {
+        _sweep(asset0);
+        _sweep(asset1);
         return _processQueue(maxSteps);
     }
 
@@ -1014,13 +1077,15 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      itself). Nothing else the module could say is trusted; every check below runs here on the vault's own
     ///      state. An allocation is a promise that the vault will keep this much of one asset available for the
     ///      named hook until `req.expiry`, at no worse than `req.minInPerOutX96`. No assets move; Q_a and the
-    ///      curator's and hook's reserved totals rise by `maxOut`.
+    ///      curator's and hook's reserved totals rise by `maxOut`, and `maxOut` is recorded in the expiry ring's
+    ///      bucket for `req.expiry`. The sold asset's ring is swept first, so admission and the vault-scope exposure
+    ///      cap see Q_a without the capacity that has already expired.
     ///
     ///      Checks, in order: caller is the installed module; curator neither frozen nor revoked; curator registered;
     ///      `generation` equals the curator's current generation; deadline not passed; consumer registered and equal
     ///      to `key.hooks`; pool currencies equal the vault's pair; `currencyOut` is one of them; direction
     ///      configured and not halted; curator floor >= vault floor; non-zero `maxOut` within MAX_AMOUNT; expiry in
-    ///      the future and within MAX_HORIZON; curator ceiling; the admission rules Q_a + maxOut + R_a + D_a <= N_a
+    ///      the future, a multiple of one hour and within MAX_HORIZON; curator ceiling; the admission rules Q_a + maxOut + R_a + D_a <= N_a
     ///      and, when the asset has an inventory target, Q_a + maxOut <= N_a - L_a; and the exposure caps of the
     ///      hook, the curator and the vault. Nonces are the module's: the vault does not
     ///      track them, and only reports `req.nonce` in `AllocationCreated`. Each allocation gets a new id, so two
@@ -1094,7 +1159,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         if (maxOut == 0) revert ZeroAmount();
         if (maxOut > MAX_AMOUNT) revert AmountTooLarge();
         uint64 expiry = req.expiry;
-        if (expiry <= block.timestamp) revert InvalidExpiry();
+        // An expiry on an hour boundary belongs to exactly one ring bucket, expiry / _EXPIRY_BUCKET.
+        if (expiry <= block.timestamp || expiry % _EXPIRY_BUCKET != 0) revert InvalidExpiry();
         if (expiry > block.timestamp + MAX_HORIZON) {
             revert HorizonExceeded(expiry, block.timestamp + MAX_HORIZON);
         }
@@ -1102,6 +1168,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         uint256 curatorAvailable = _sub0(curatorCeiling[curator][out], curatorReserved[curator][out]);
         if (maxOut > curatorAvailable) revert CuratorCeilingExceeded(maxOut, curatorAvailable);
 
+        _sweep(out);
         uint256 eligible = _eligibleBacking(out);
         uint256 admissible = _admissible(out, eligible);
         if (maxOut > admissible) revert InsufficientBacking(maxOut, admissible);
@@ -1109,7 +1176,7 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         _checkExposure(RiskScope.Curator, curator, out, curatorReserved[curator][out], maxOut, eligible);
         _checkExposure(RiskScope.Vault, address(0), out, reserved[out], maxOut, eligible);
 
-        reserved[out] += maxOut;
+        _addToBucket(out, expiry / _EXPIRY_BUCKET, maxOut); // Q_a += maxOut
         curatorReserved[curator][out] += maxOut;
         hookReserved[consumer][out] += maxOut;
 
@@ -1198,16 +1265,18 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     }
 
     /// @notice Close an allocation and return its unused capacity to free inventory.
-    /// @dev Expiry is lazy: time passing does not change any storage. An expired allocation can no longer be
-    ///      consumed, but its unused capacity stays in Q_a until someone calls this function. Who may call:
+    /// @dev An expired allocation can no longer be consumed. Its unused capacity leaves Q_a at the first sweep after
+    ///      its expiry (see "Expiry" in the contract documentation) whether or not this function is called; it stays
+    ///      in `curatorReserved` and `hookReserved` until the allocation is closed here or canceled. Who may call:
     ///        - anyone, once the allocation has expired;
     ///        - anyone, if its curator is revoked (permissionless cleanup: nobody can consume it any more);
     ///        - otherwise only the owner or the guardian, as an emergency measure, because an unexpired allocation
     ///          of a curator in good standing is a commitment to its consumer.
     ///      Works while paused and whatever the curator's state. The reason recorded in `AllocationReleased` is, in
     ///      this order of precedence: Expired, CuratorRevoked, Emergency.
-    ///      Accounting is `_close`: no assets move, Q_a and the curator's reserved total fall by maxOut - consumed,
-    ///      which raises F_a and can let queued redemptions progress. Capacity already consumed is never returned.
+    ///      Accounting is `_close`: no assets move, the curator's and hook's reserved totals fall by maxOut - consumed,
+    ///      and so does Q_a unless a sweep already removed that capacity, which raises F_a and can let queued
+    ///      redemptions progress. Capacity already consumed is never returned.
     /// @param allocationId Allocation to release. Must exist and not already be closed.
     function release(uint256 allocationId) external nonReentrant {
         Allocation storage a = _getLiveAllocation(allocationId);
@@ -1231,7 +1300,8 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      the allocation is closed and can never be consumed or reopened, and its id is never reused.
     ///      Accounting is `_close`: only the unconsumed remainder maxOut - consumed is released; output already
     ///      consumed was exchanged for input that belongs to all shares and is not touched. No assets move.
-    ///      Example: maxOut 10,000, consumed 3,500: Q_a and curatorReserved fall by 6,500 and `consumed` stays 3,500.
+    ///      Example: maxOut 10,000, consumed 3,500: curatorReserved falls by 6,500 and `consumed` stays 3,500; Q_a
+    ///      falls by 6,500 too, unless the allocation had expired and a sweep already took the 6,500 out.
     /// @param allocationId Allocation to cancel. Must exist and not already be closed.
     function cancelAllocation(uint256 allocationId) external nonReentrant {
         Allocation storage a = _getLiveAllocation(allocationId);
@@ -1257,7 +1327,9 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      transferred below, so the price is enforced on what actually moves, not on a hook's quote.
     ///
     ///      Accounting. On the output side, `consumed` rises by amountOut while Q_out and B_out both fall by it, so
-    ///      free inventory F_out is unchanged. On the input side B_in rises by amountIn, raising N_in and F_in.
+    ///      free inventory F_out is unchanged. Q_out falls through the allocation's expiry bucket, which is always
+    ///      still counted for a live allocation; no sweep runs here, so the swap path reads one ring slot and never
+    ///      loops. On the input side B_in rises by amountIn, raising N_in and F_in.
     ///      Shares, W_a and the queue are not touched; the trade's gain or loss reaches every outstanding share,
     ///      including queued ones, through N_a / S.
     ///
@@ -1320,12 +1392,13 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         _consumeFlow(RiskScope.Curator, curator, cout, amountOut, epoch);
         _consumeFlow(RiskScope.Vault, address(0), cout, amountOut, epoch);
 
-        // Effects. amountOut <= remaining <= reserved[out] <= backing[out] - claimable[out], so no underflow
-        // and claimable redemption assets are never paid to a hook. hookReserved and curatorReserved hold this
-        // allocation's remaining capacity, so they cannot underflow either.
+        // Effects. amountOut <= remaining <= the bucket's amount <= reserved[out] <= backing[out] - claimable[out]
+        // (a live allocation's bucket is resident and unswept, see `_addToBucket`), so no underflow and claimable
+        // redemption assets are never paid to a hook. hookReserved and curatorReserved hold this allocation's
+        // remaining capacity, so they cannot underflow either.
         // forge-lint: disable-next-line(unsafe-typecast) amountOut <= remaining <= maxOut (a uint128).
         a.consumed += uint128(amountOut);
-        reserved[cout] -= amountOut;
+        _removeFromBucket(cout, a.expiry / _EXPIRY_BUCKET, amountOut); // Q_out -= amountOut
         curatorReserved[curator][cout] -= amountOut;
         hookReserved[msg.sender][cout] -= amountOut;
         backing[cout] -= amountOut;
@@ -1521,20 +1594,116 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///      and `cancelAllocation`. Precondition: `a` was loaded with `_getLiveAllocation`, which reverts for an
     ///      unknown or already closed id, so each allocation passes through here at most once.
     ///
-    ///      Effects, in one step: `released` is set, then Q_out, curatorReserved[curator][out] and
-    ///      hookReserved[consumer][out] all fall by unused = maxOut - consumed. These are exactly this allocation's
-    ///      contribution to the three sums (each is maintained as the sum of maxOut - consumed over unreleased
-    ///      allocations), so none can underflow and no other allocation's share is touched. `consumed` is not
+    ///      Effects, in one step: `released` is set, then curatorReserved[curator][out] and
+    ///      hookReserved[consumer][out] fall by unused = maxOut - consumed, exactly this allocation's contribution to
+    ///      those sums (each is the sum of maxOut - consumed over unreleased allocations), so neither can underflow
+    ///      and no other allocation's share is touched. Q_out falls by `unused` through the allocation's expiry bucket
+    ///      only while that bucket is still counted: if a sweep (bucket <= swept) or a newer bucket in the same slot
+    ///      already took it out, Q_out is left alone, so no capacity is subtracted twice. `consumed` is not
     ///      changed, no claims, B_a, W_a, shares or queue entries move, and no flow usage is returned: closing
     ///      releases capacity that was never paid out, while output already paid stays counted in its window.
     function _close(uint256 allocationId, Allocation storage a, CloseReason reason) internal {
         uint256 unused = a.maxOut - a.consumed;
         a.released = true;
         Currency out = a.currencyOut;
-        reserved[out] -= unused;
+        uint256 bucket = a.expiry / _EXPIRY_BUCKET;
+        if (bucket > _expiryRings[out].swept) _removeFromBucket(out, bucket, unused);
         curatorReserved[a.curator][out] -= unused;
         hookReserved[a.consumer][out] -= unused;
         emit AllocationReleased(allocationId, msg.sender, unused, reason);
+    }
+
+    /// @dev Recognizes expired capacity of `currency`: subtracts from Q_a every ring bucket that has ended and is not
+    ///      yet subtracted, walking at most _SWEEP_STEPS buckets, and advances `swept`.
+    ///
+    ///      With c = block.timestamp / _EXPIRY_BUCKET (the current bucket; bucket b has expired iff b <= c):
+    ///        - c <= swept: nothing has ended since the last sweep; no write.
+    ///        - c >= maxBucket: every bucket ever written has ended, so by the ring's invariant nothing in Q_a is live:
+    ///          Q_a = 0 and swept = c in O(1), however long the vault was idle.
+    ///        - otherwise: buckets swept + 1 ... min(c, swept + _SWEEP_STEPS) are visited; a slot whose tag equals the
+    ///          visited bucket is subtracted, any other tag is a bucket that is not this one (already subtracted by
+    ///          an eviction, or not yet ended) and is skipped. swept becomes the last bucket visited.
+    ///      Each step removes only ended capacity, so afterwards live capacity <= Q_a <= the sum over unreleased
+    ///      allocations, whether or not the walk reached c. A sweep that stops short leaves Q_a too high (admission
+    ///      and exits stay conservative); later sweeping calls continue from `swept`.
+    ///
+    ///      Cost: one cold read of the ring header; in the walking case one cold read per visited bucket, whether or
+    ///      not it holds anything.
+    ///
+    ///      Widths: every recorded bucket is an expiry (a uint64) divided by 3,600, so it fits in uint64. The current
+    ///      bucket fits while block.timestamp < 2^64 * 3,600; past that no expiry can be in the future, so no
+    ///      allocation can exist or be created, maxBucket stays below the current bucket, and this function only ever
+    ///      takes the O(1) branch (Q_a = 0), where a truncated `swept` is harmless.
+    function _sweep(Currency currency) internal {
+        ExpiryRing storage ring = _expiryRings[currency];
+        uint256 swept = ring.swept;
+        uint256 current = block.timestamp / _EXPIRY_BUCKET;
+        if (current <= swept) return;
+        if (current >= ring.maxBucket) {
+            reserved[currency] = 0;
+            // forge-lint: disable-next-line(unsafe-typecast) see "Widths" above.
+            ring.swept = uint64(current);
+            return;
+        }
+        uint256 end = current - swept > _SWEEP_STEPS ? swept + _SWEEP_STEPS : current;
+        uint256 q = reserved[currency];
+        for (uint256 b = swept + 1; b <= end; ++b) {
+            ExpiryBucket storage slot = ring.buckets[b % _EXPIRY_SLOTS];
+            if (slot.bucket == b) q -= slot.amount;
+        }
+        reserved[currency] = q;
+        // forge-lint: disable-next-line(unsafe-typecast) end < maxBucket < 2^64 in this branch.
+        ring.swept = uint64(end);
+    }
+
+    /// @dev Adds `amount` of new capacity expiring at the end of `bucket` to Q_a of `currency`. Called by `reserveFor`
+    ///      after `_sweep`, with c < bucket <= c + _EXPIRY_SLOTS (expiry in the future, on an hour boundary, within
+    ///      MAX_HORIZON).
+    ///
+    ///      The slot of `bucket` either already holds `bucket` (add to it), or holds another tag b' (or is unused,
+    ///      tag 0). No live capacity is ever overwritten: b' is congruent to `bucket` modulo _EXPIRY_SLOTS and was
+    ///      written at some earlier bucket c' <= c with b' <= c' + _EXPIRY_SLOTS <= c + _EXPIRY_SLOTS; if b' were
+    ///      above `bucket` it would be at least bucket + _EXPIRY_SLOTS > c + _EXPIRY_SLOTS, so b' < bucket, hence
+    ///      b' <= bucket - _EXPIRY_SLOTS <= c: b' has ended. If b' > swept its capacity is still in Q_a and is
+    ///      subtracted here (eviction) before the slot is retagged; if b' <= swept a sweep already subtracted it.
+    ///      Either way it leaves Q_a exactly once.
+    ///
+    ///      `amount` and every slot amount are below 2^127: a slot holds only capacity counted in Q_a, and Q_a never
+    ///      exceeds N_a <= MAX_AMOUNT, so the uint128 casts are exact. `bucket` is a uint64 expiry divided by 3,600,
+    ///      so the uint64 casts are exact too.
+    function _addToBucket(Currency currency, uint256 bucket, uint256 amount) internal {
+        ExpiryRing storage ring = _expiryRings[currency];
+        ExpiryBucket storage slot = ring.buckets[bucket % _EXPIRY_SLOTS];
+        uint256 q = reserved[currency];
+        uint256 tag = slot.bucket;
+        // forge-lint: disable-start(unsafe-typecast) bucket < 2^64 and amounts < 2^127 (see above).
+        if (tag == bucket) {
+            slot.amount += uint128(amount);
+        } else {
+            if (tag > ring.swept) q -= slot.amount; // an ended bucket no sweep has reached yet
+            slot.bucket = uint64(bucket);
+            slot.amount = uint128(amount);
+        }
+        if (bucket > ring.maxBucket) ring.maxBucket = uint64(bucket);
+        // forge-lint: disable-end(unsafe-typecast)
+        reserved[currency] = q + amount;
+    }
+
+    /// @dev Removes `amount` (consumed output, or the remainder of a closed allocation) from bucket `bucket` and from
+    ///      Q_a of `currency`, if that bucket is still the slot's tag; otherwise a newer bucket evicted it and its
+    ///      capacity is already out of Q_a. `_close` calls it only while bucket > swept. `exchange` calls it for a live
+    ///      allocation, whose bucket is always above swept (sweeps never pass the current bucket) and still in its
+    ///      slot (`_addToBucket`), so there the removal always applies and no header read is needed.
+    ///
+    ///      `amount` is at most the slot's amount: the slot holds the sum of the unused capacity of its unreleased
+    ///      allocations, and `amount` is part of one of them. Q_a includes the slot, so neither subtraction
+    ///      underflows.
+    function _removeFromBucket(Currency currency, uint256 bucket, uint256 amount) internal {
+        ExpiryBucket storage slot = _expiryRings[currency].buckets[bucket % _EXPIRY_SLOTS];
+        if (slot.bucket != bucket) return;
+        // forge-lint: disable-next-line(unsafe-typecast) amount <= slot.amount < 2^128.
+        slot.amount -= uint128(amount);
+        reserved[currency] -= amount;
     }
 
     /// @dev Loads an allocation that exists and has not been released. Expiry is checked by the caller where it

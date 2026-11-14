@@ -141,13 +141,13 @@ contract ReentrancyTest is Test {
         vm.warp(block.timestamp + 2 hours);
 
         // A claimable request and a pending request of the agent: lock all asset1, queue, free, finalize, re-lock.
-        uint256 lock = _allocateAs(curator, key, c1, uint128(vault.admissibleCapacity(c1)), 1 days);
+        uint256 lock = _allocateAs(curator, key, c1, _lockable(c1), 1 days);
         claimableReq = _redeemQueued(address(agent), 5000 ether);
         vm.prank(owner);
         vault.release(lock);
         vault.processQueue(1);
         assertGt(vault.getRequest(claimableReq).claimable1, 0);
-        assetOneLock = _allocateAs(curator, key, c1, uint128(vault.admissibleCapacity(c1)), 1 days);
+        assetOneLock = _allocateAs(curator, key, c1, _lockable(c1), 1 days);
         pendingReq = _redeemQueued(address(agent), 5000 ether);
 
         // The agent's own allocations: one to cancel, one it can consume as its own consumer (it holds input claims
@@ -280,8 +280,11 @@ contract ReentrancyTest is Test {
         uint256 id = _allocateAs(curator, key, c0, 10_000 ether, 1 days);
         _fundAccount(address(hook), 100_000 ether);
         hook.exec(address(vault), abi.encodeCall(vault.deposit, (10_000 ether, 1e30, 1e30, address(hook))));
-        // The deposit added free asset1; commit it too so that the hook's redemption has to queue.
-        uint256 lock2 = _allocateAs(curator, key, c1, uint128(vault.admissibleCapacity(c1)), 1 days);
+        // The deposit added free asset1; commit it too so that the hook's redemption has to queue. Releasing the
+        // expired allocation first (anyone may) takes it out of the hook's reserved total, which keeps expired
+        // capacity until the close; otherwise the hook's exposure cap would leave 1,000 of asset1 uncommitted.
+        vault.release(expiredId);
+        uint256 lock2 = _allocateAs(curator, key, c1, _lockable(c1), 1 days);
         bytes memory r =
             hook.exec(address(vault), abi.encodeCall(vault.redeem, (1000 ether, 0, 0, address(hook), true)));
         (,,, uint256 req) = abi.decode(r, (uint256, uint256, uint256, uint256));
@@ -471,6 +474,19 @@ contract ReentrancyTest is Test {
         assertGt(requestId, 0);
     }
 
+    /// @dev Every unit of `out` an allocation on `key` can take now: the admission limit, or less where the hook's
+    ///      exposure cap binds first. The hook's reserved total still counts `expiredId` until it is released, while
+    ///      Q_a no longer does once a sweep has run, so the cap can be the tighter of the two here.
+    function _lockable(Currency out) internal view returns (uint128) {
+        uint256 cap = vault.admissibleCapacity(out);
+        uint256 bps = vault.getRiskLimit(ISharedCommitmentVault.RiskScope.Hook, address(key.hooks), out).maxReservedBps;
+        uint256 limit = bps * vault.eligibleBacking(out) / 10_000;
+        uint256 held = vault.hookReserved(address(key.hooks), out);
+        uint256 exposure = limit > held ? limit - held : 0;
+        // forge-lint: disable-next-line(unsafe-typecast) both bounds are below N_a <= MAX_AMOUNT < 2^128.
+        return uint128(exposure < cap ? exposure : cap);
+    }
+
     function _request(PoolKey memory k, Currency out, uint128 maxOut, uint256 lifetime)
         internal
         returns (ISharedCommitmentVault.AllocationRequest memory)
@@ -481,10 +497,19 @@ contract ReentrancyTest is Test {
             currencyOut: out,
             maxOut: maxOut,
             minInPerOutX96: PRICE_1_1_X96,
-            expiry: uint64(block.timestamp + lifetime),
+            expiry: _alignedExpiry(lifetime),
             nonce: nonce++,
             deadline: uint64(block.timestamp)
         });
+    }
+
+    /// @dev now + lifetime rounded down to an hour boundary (the vault accepts no other expiry), or the next boundary
+    ///      if that is not in the future. Never more than MAX_HORIZON ahead when lifetime is at most MAX_HORIZON.
+    function _alignedExpiry(uint256 lifetime) internal view returns (uint64) {
+        uint256 e = (block.timestamp + lifetime) / 1 hours * 1 hours;
+        if (e <= block.timestamp) e += 1 hours;
+        // forge-lint: disable-next-line(unsafe-typecast) test timestamps are far below 2^64.
+        return uint64(e);
     }
 
     function _allocateAs(address who, PoolKey memory k, Currency out, uint128 maxOut, uint256 lifetime)

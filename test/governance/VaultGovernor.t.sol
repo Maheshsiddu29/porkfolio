@@ -469,7 +469,7 @@ contract VaultGovernorTest is VaultTestBase {
         returns (uint256 instantShares, uint256 a0, uint256 a1, uint256 rid)
     {
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c0, uint128(vault.admissibleCapacity(c0)));
-        r.expiry = uint64(vm.getBlockTimestamp() + vault.MAX_HORIZON());
+        r.expiry = _hourAligned(vm.getBlockTimestamp() + vault.MAX_HORIZON());
         vm.prank(curator);
         _allocations.push(auth.activateDirect(r));
         (instantShares, a0, a1, rid) = _redeem(lp0, vault.sharesOf(lp0), true);

@@ -58,7 +58,7 @@ abstract contract AuthTestBase is VaultTestBase {
             zeroForOne: outIs1,
             maxOut: maxOut,
             minInPerOutX96: PRICE_1_1_X96,
-            expiry: uint64(now_ + 1 days),
+            expiry: _hourAligned(now_ + 1 days),
             validAfter: uint64(now_),
             deadline: uint64(now_ + 1 hours),
             nonce: nextNonce++

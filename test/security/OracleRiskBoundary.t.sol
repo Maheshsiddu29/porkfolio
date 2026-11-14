@@ -80,7 +80,7 @@ contract OracleRiskBoundaryTest is VaultTestBase {
     function _allocM(Currency out, uint128 maxOut, uint160 curatorFloor) internal returns (uint256 id) {
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyM, out, maxOut);
         r.minInPerOutX96 = curatorFloor;
-        r.expiry = uint64(block.timestamp + 30 days);
+        r.expiry = _hourAligned(block.timestamp + 30 days);
         vm.prank(curator);
         id = auth.activateDirect(r);
     }

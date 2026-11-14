@@ -34,7 +34,8 @@ interface ISharedCommitmentVault {
     /// @param minInPerOutX96  Curator's minimum price, Q64.96 raw input per raw output. Must be at least the vault's
     ///                        floor for this direction. Trades need amountIn >= ceil(amountOut * floor / 2^96).
     /// @param expiry          Unix time at which the allocation stops being consumable (consumable while
-    ///                        block.timestamp < expiry). At most MAX_HORIZON after creation.
+    ///                        block.timestamp < expiry). A multiple of 3,600 (an hour boundary, so that it falls in
+    ///                        exactly one expiry bucket), in the future and at most MAX_HORIZON after creation.
     /// @param nonce           Curator-scoped single-use value, consumed by the authorization module (signed and
     ///                        direct instructions share one bitmap per curator). The vault only reports it in
     ///                        `AllocationCreated`.
@@ -53,7 +54,8 @@ interface ISharedCommitmentVault {
     /// @notice Stored allocation state.
     /// @param curator        Curator that created the allocation; its reserved total tracks this allocation.
     /// @param consumer       The only hook that may consume it. Zero means the id does not exist.
-    /// @param expiry         Consumable while block.timestamp < expiry; releasable by anyone from then on.
+    /// @param expiry         Consumable while block.timestamp < expiry; releasable by anyone from then on. Its unused
+    ///                       capacity leaves Q_a at the first sweep from then on, with or without a release.
     /// @param released       Set when the allocation is closed (`release` or `cancelAllocation`). Never cleared: a
     ///                       closed allocation can never be consumed, released or canceled again.
     /// @param poolId         Pool the hook must be swapping on.
@@ -292,7 +294,7 @@ interface ISharedCommitmentVault {
     error CuratorCeilingExceeded(uint256 requested, uint256 available);
     /// @notice A currency argument is not one of the vault's two assets.
     error InvalidCurrency();
-    /// @notice The requested expiry is not in the future.
+    /// @notice The requested expiry is not in the future, or is not a multiple of one hour (3,600 seconds).
     error InvalidExpiry();
     /// @notice The requested expiry is more than MAX_HORIZON in the future.
     error HorizonExceeded(uint64 expiry, uint256 maxExpiry);

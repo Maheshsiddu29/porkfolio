@@ -8,6 +8,7 @@ import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVaul
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
 import {VaultGetterHarness} from "../utils/VaultGetterHarness.sol";
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
+import {VaultStateReader} from "../../src/libraries/VaultStateReader.sol";
 
 /// @notice Pins the vault's storage layout, which `VaultLens` decodes through `extsload`.
 /// @dev Every slot number and packed offset below is a literal written from `forge inspect
@@ -44,6 +45,10 @@ contract VaultStorageLayoutTest is VaultTestBase {
     uint256 internal constant S_RISK_PARAMS = 24;
     uint256 internal constant S_INVENTORY_TARGET = 25;
     uint256 internal constant S_INVENTORY_TOLERANCE = 27;
+    // _expiryRings: mapping(Currency => ExpiryRing). Entry base h = keccak256(abi.encode(currency, 28)); word h packs
+    // swept (uint64, bits 0-63) and maxBucket (uint64, bits 64-127); ring slot i is keccak256(abi.encode(i, h + 1)),
+    // packing bucket (uint64, bits 0-63) and amount (uint128, bits 64-191).
+    uint256 internal constant S_EXPIRY_RINGS = 28;
 
     address internal lp1 = makeAddr("lp1");
     address internal lp2 = makeAddr("lp2");
@@ -294,6 +299,100 @@ contract VaultStorageLayoutTest is VaultTestBase {
             abi.encode(_oldRiskLimit(ISharedCommitmentVault.RiskScope.Curator, curator, c0)),
             "riskLimit"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Expiry ring (slot 28)
+    // ------------------------------------------------------------------
+
+    function _ringBase(Currency c) internal pure returns (uint256) {
+        return _map(bytes32(uint256(uint160(Currency.unwrap(c)))), S_EXPIRY_RINGS);
+    }
+
+    function _ringSlot(Currency c, uint256 index) internal pure returns (uint256) {
+        return uint256(keccak256(abi.encode(index, _ringBase(c) + 1)));
+    }
+
+    /// @dev Raw words at the literal ring slots of `c` decode, with the literal offsets, to what the by-name getters
+    ///      and the lens report, for the header and for slot `index`.
+    function _checkRingSlots(Currency c, uint256 index) internal view {
+        uint256 h = _load(_ringBase(c));
+        (uint64 sw, uint64 mb) = ref.oldExpiryRing(c);
+        assertEq(uint64(h), sw, "header bits 0-63: swept");
+        assertEq(uint64(h >> 64), mb, "header bits 64-127: maxBucket");
+        assertEq(h >> 128, 0, "header: nothing above bit 127");
+        (uint64 lsw, uint64 lmb) = lens.expiryRing(vault, c);
+        assertEq(lsw, sw, "lens swept");
+        assertEq(lmb, mb, "lens maxBucket");
+        uint256 w = _load(_ringSlot(c, index));
+        (uint64 tag, uint128 amount) = ref.oldExpiryBucket(c, index);
+        assertEq(uint64(w), tag, "slot bits 0-63: bucket");
+        assertEq(uint128(w >> 64), amount, "slot bits 64-191: amount");
+        assertEq(w >> 192, 0, "slot: nothing above bit 191");
+        (uint64 ltag, uint128 lamount) = lens.expiryBucket(vault, c, index);
+        assertEq(ltag, tag, "lens bucket");
+        assertEq(lamount, amount, "lens amount");
+    }
+
+    /// @notice The ring's literal slots hold what the transitions wrote: populated slots with non-zero tags and
+    ///         amounts, a header whose maxBucket is the far end of the horizon, and a slot reused 720 buckets later
+    ///         (wrap-around), retagged with the newer bucket. Existing slots 5-27 are pinned above, so the ring is the
+    ///         only addition to the layout.
+    function test_layout_expiryRing_populatedAndWrapped() public {
+        // setUp left allocations on asset1 expiring one day after T0 (rounded down to the hour).
+        uint64 b1 = uint64(ref.oldGetAllocation(allocationId).expiry / 1 hours);
+        _checkRingSlots(c1, b1 % 720);
+        (uint64 tag1, uint128 amount1) = lens.expiryBucket(vault, c1, b1 % 720);
+        assertEq(tag1, b1, "populated tag");
+        assertGt(amount1, 0, "populated amount");
+
+        // Asset0: one bucket a day out, then the same slot index 720 buckets later.
+        uint256 id = _allocate(keyA, c0, 1000 ether);
+        uint64 b0 = uint64(ref.oldGetAllocation(id).expiry / 1 hours);
+        _checkRingSlots(c0, b0 % 720);
+        (, uint64 mb) = lens.expiryRing(vault, c0);
+        assertEq(mb, b0, "maxBucket");
+
+        vm.warp(uint256(b0) * 1 hours + 1); // b0 has just ended; b0 + 720 is now exactly within MAX_HORIZON
+        ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c0, 2000 ether);
+        r.expiry = uint64(uint256(b0 + 720) * 1 hours);
+        r.deadline = uint64(block.timestamp);
+        vm.prank(curator);
+        auth.activateDirect(r);
+        (uint64 tagW, uint128 amountW) = lens.expiryBucket(vault, c0, b0 % 720);
+        assertEq(tagW, b0 + 720, "slot retagged with the newer bucket");
+        assertEq(amountW, 2000 ether, "the expired bucket's amount is not carried over");
+        (uint64 sw, uint64 mbW) = lens.expiryRing(vault, c0);
+        assertEq(sw, b0, "the sweep before the write reached the ended bucket");
+        assertEq(mbW, b0 + 720, "maxBucket moved to the far end");
+        _checkRingSlots(c0, b0 % 720);
+    }
+
+    /// @notice Any word written into the ring header or a ring slot decodes the same through the lens as through the
+    ///         by-name getters, at every bit.
+    function testFuzz_layout_ringWordsDecodeLikeGetters(bytes32 w0, bytes32 w1, uint256 index) public {
+        index = bound(index, 0, 719);
+        vm.store(address(vault), bytes32(_ringBase(c0)), w0);
+        vm.store(address(vault), bytes32(_ringSlot(c0, index)), w1);
+        (uint64 sw, uint64 mb) = lens.expiryRing(vault, c0);
+        (uint64 oldSw, uint64 oldMb) = ref.oldExpiryRing(c0);
+        assertEq(sw, oldSw, "swept");
+        assertEq(mb, oldMb, "maxBucket");
+        (uint64 tag, uint128 amount) = lens.expiryBucket(vault, c0, index);
+        (uint64 oldTag, uint128 oldAmount) = ref.oldExpiryBucket(c0, index);
+        assertEq(tag, oldTag, "bucket");
+        assertEq(amount, oldAmount, "amount");
+    }
+
+    /// @notice The reader's ring constants are the vault's: slot 28, one-hour buckets, 720 slots (MAX_HORIZON / 1 h),
+    ///         32 buckets per sweep. The bucket width and slot count are also what the vault enforces (an expiry one
+    ///         second off an hour boundary is refused; the horizon is exactly 720 buckets).
+    function test_layout_readerRingConstants() public view {
+        assertEq(VaultStateReader.EXPIRY_RINGS_SLOT, S_EXPIRY_RINGS);
+        assertEq(VaultStateReader.EXPIRY_BUCKET, 1 hours);
+        assertEq(VaultStateReader.EXPIRY_SLOTS, 720);
+        assertEq(VaultStateReader.EXPIRY_SLOTS * VaultStateReader.EXPIRY_BUCKET, vault.MAX_HORIZON());
+        assertEq(VaultStateReader.SWEEP_STEPS, 32);
     }
 
     /// @notice Out-of-range array indices revert with the same panic as a public array getter.

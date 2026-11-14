@@ -415,7 +415,7 @@ contract MultiLpAccountingTest is VaultTestBase {
         uint256 cap = vault.admissibleCapacity(c1);
         if (cap > 0) {
             ISharedCommitmentVault.AllocationRequest memory r = _request(keyB, c1, uint128(later < cap ? later : cap));
-            r.expiry = uint64(block.timestamp + 20 days);
+            r.expiry = _hourAligned(block.timestamp + 20 days);
             vm.prank(curator);
             auth.activateDirect(r);
         }

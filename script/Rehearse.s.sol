@@ -97,7 +97,7 @@ contract Rehearse is Script {
             zeroForOne: true,
             maxOut: uint128(v.backing(Currency.wrap(d.token1)) / 400),
             minInPerOutX96: 1,
-            expiry: uint64(block.timestamp + 1 days),
+            expiry: uint64((block.timestamp + 1 days) / 1 hours * 1 hours), // the vault requires an hour boundary
             validAfter: uint64(block.timestamp),
             deadline: uint64(block.timestamp + 1 hours),
             nonce: uint256(keccak256(abi.encode("rehearsal-signed", block.timestamp)))
@@ -113,7 +113,7 @@ contract Rehearse is Script {
             currencyOut: Currency.wrap(d.token1),
             maxOut: uint128(v.backing(Currency.wrap(d.token1)) / 400),
             minInPerOutX96: 1,
-            expiry: uint64(block.timestamp + 1 days),
+            expiry: uint64((block.timestamp + 1 days) / 1 hours * 1 hours), // the vault requires an hour boundary
             nonce: uint256(keccak256(abi.encode("rehearsal-direct", block.timestamp))),
             deadline: uint64(block.timestamp + 1 hours)
         });

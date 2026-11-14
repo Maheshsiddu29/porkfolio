@@ -112,7 +112,7 @@ contract OracleFailureExecutionTest is VaultTestBase {
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyM, out, maxOut);
         r.minInPerOutX96 = curatorFloor;
         // via-IR may reuse a block.timestamp read from before vm.warp; the cheatcode reads the current one.
-        r.expiry = uint64(vm.getBlockTimestamp() + 30 days);
+        r.expiry = _hourAligned(vm.getBlockTimestamp() + 30 days);
         r.deadline = uint64(vm.getBlockTimestamp() + 1 hours);
         vm.prank(curator);
         id = auth.activateDirect(r);

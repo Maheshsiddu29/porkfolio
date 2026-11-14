@@ -47,12 +47,57 @@ contract VaultLens {
         return VaultStateReader.backing(vault, currency);
     }
 
-    /// @notice Q_a: unused capacity of all unreleased allocations selling `currency`.
+    /// @notice Q_a as stored: unused capacity of the unreleased allocations selling `currency` whose expiry no sweep
+    ///         has recognized yet. Between `liveReserved` and the sum over all unreleased allocations.
     /// @param vault Vault to read.
     /// @param currency Asset to read; any other currency returns 0.
     /// @return Raw units of `currency`.
     function reserved(IVaultState vault, Currency currency) public view returns (uint256) {
         return VaultStateReader.reserved(vault, currency);
+    }
+
+    /// @notice Q^live_a: unused capacity of the unreleased allocations selling `currency` that have not expired, exact,
+    ///         as of this block, whether or not a sweep has run.
+    /// @dev Reads at most 720 ring slots (see `VaultStateReader.liveReserved`), usually far fewer. Nothing on-chain
+    ///      calls it.
+    /// @param vault Vault to read.
+    /// @param currency Asset to read.
+    /// @return Raw units of `currency`.
+    function liveReserved(IVaultState vault, Currency currency) external view returns (uint256) {
+        return VaultStateReader.liveReserved(vault, currency);
+    }
+
+    /// @notice Q_a as the next sweeping call (`reserveFor`, `redeem`, `processQueue`) will see it: the stored value
+    ///         minus the expired buckets that call's sweep subtracts (at most 32, or all once every recorded expiry
+    ///         has passed).
+    /// @param vault Vault to read.
+    /// @param currency Asset to read.
+    /// @return Raw units of `currency`.
+    function sweptReserved(IVaultState vault, Currency currency) public view returns (uint256) {
+        return VaultStateReader.sweptReserved(vault, currency);
+    }
+
+    /// @notice Expiry ring header of `currency`.
+    /// @param vault Vault to read.
+    /// @param currency Asset to read.
+    /// @return swept Every bucket (expiry / 3,600) up to this one has been subtracted from the stored Q_a.
+    /// @return maxBucket Largest bucket any allocation of this asset was ever recorded in.
+    function expiryRing(IVaultState vault, Currency currency) external view returns (uint64 swept, uint64 maxBucket) {
+        return VaultStateReader.expiryRing(vault, currency);
+    }
+
+    /// @notice One slot of the expiry ring of `currency`.
+    /// @param vault Vault to read.
+    /// @param currency Asset to read.
+    /// @param index Slot index, 0 to 719 (bucket % 720).
+    /// @return bucket The bucket the slot is tagged with (0: never used).
+    /// @return amount Capacity it holds, raw units; part of the stored Q_a only while `bucket` > swept.
+    function expiryBucket(IVaultState vault, Currency currency, uint256 index)
+        external
+        view
+        returns (uint64 bucket, uint128 amount)
+    {
+        return VaultStateReader.expiryBucket(vault, currency, index);
     }
 
     /// @notice R_a: inventory that new allocations must leave unreserved.
@@ -240,14 +285,15 @@ contract VaultLens {
         return VaultStateReader.netAssets(vault, currency);
     }
 
-    /// @notice F_a = B_a - W_a - Q_a: inventory that can be paid out now without breaking a live commitment or
-    ///         touching assets owed to finalized requests.
-    /// @dev Cannot underflow while the vault maintains Q_a + W_a <= B_a.
+    /// @notice F_a = B_a - W_a - Q_a: inventory that the next `redeem` or `processQueue` can pay out without breaking a
+    ///         commitment or touching assets owed to finalized requests.
+    /// @dev Q_a is `sweptReserved`, the value those calls compute after their own sweep. Cannot underflow while the
+    ///      vault maintains Q_a + W_a <= B_a.
     /// @param vault Vault to read.
     /// @param currency asset0 or asset1. Any other currency returns 0.
     /// @return Raw units of `currency`.
     function freeInventory(IVaultState vault, Currency currency) external view returns (uint256) {
-        return netAssets(vault, currency) - reserved(vault, currency);
+        return netAssets(vault, currency) - sweptReserved(vault, currency);
     }
 
     /// @notice D_a = ceil(P * N_a / S): what the pending queue would be owed in `currency` if it were finalized now.
@@ -265,7 +311,7 @@ contract VaultLens {
     ///         N_a - Q_a - R_a - D_a and, when the asset has an inventory target, the room above the inventory floor
     ///         left by existing commitments, N_a - L_a - Q_a; 0 if either is negative.
     /// @dev Same as the vault's `_admissible(currency, _eligibleBacking(currency))`, the limit `reserveFor`
-    ///      enforces. Example: N_a = 1,000, Q_a = 300, R_a = 100 and D_a = 150 give 450 without a target, and 50
+    ///      enforces, with Q_a after `reserveFor`'s sweep (`sweptReserved`). Example: N_a = 1,000, Q_a = 300, R_a = 100 and D_a = 150 give 450 without a target, and 50
     ///      with L_a = 650. This does not include the curator's own ceiling or the exposure caps, which `reserveFor`
     ///      checks separately.
     ///
@@ -283,8 +329,9 @@ contract VaultLens {
     }
 
     /// @notice Largest number of shares whose in-kind basket free inventory could pay right now.
-    /// @dev Same as the vault's `_deliverableShares`: min over both assets of floor(F_a * S / N_a), skipping an asset
-    ///      with N_a = 0, and type(uint256).max if both are zero. Example: S = 2,000, N0 = 1,000 with Q0 = 400, and
+    /// @dev Same as the vault's `_deliverableShares` after the sweep that `redeem` and `processQueue` run first: min
+    ///      over both assets of floor(F_a * S / N_a) with F_a = N_a - `sweptReserved`, skipping an asset with N_a = 0,
+    ///      and type(uint256).max if both are zero. Example: S = 2,000, N0 = 1,000 with Q0 = 400, and
     ///      N1 = 500 with Q1 = 0 give min(1,200, 2,000) = 1,200. This ignores queue priority: `redeem` pays
     ///      instantly only when nothing is pending, so while P > 0 an instant exit is not possible whatever this
     ///      returns.
@@ -296,11 +343,11 @@ contract VaultLens {
         cap = type(uint256).max;
         Currency a0 = vault.asset0();
         uint256 n0 = netAssets(vault, a0);
-        if (n0 != 0) cap = FullMath.mulDiv(n0 - reserved(vault, a0), supply, n0);
+        if (n0 != 0) cap = FullMath.mulDiv(n0 - sweptReserved(vault, a0), supply, n0);
         Currency a1 = vault.asset1();
         uint256 n1 = netAssets(vault, a1);
         if (n1 != 0) {
-            uint256 c1 = FullMath.mulDiv(n1 - reserved(vault, a1), supply, n1);
+            uint256 c1 = FullMath.mulDiv(n1 - sweptReserved(vault, a1), supply, n1);
             if (c1 < cap) cap = c1;
         }
     }
@@ -459,8 +506,10 @@ contract VaultLens {
 
     /// @notice Largest new allocation one scope's exposure cap accepts right now:
     ///         max(0, floor(maxReservedBps * E_a / 10,000) - held), and 0 for an unconfigured record.
-    /// @dev `held` is hookReserved, curatorReserved or Q_a for the Hook, Curator and Vault scopes. `reserveFor` also
-    ///      applies the admission rule, the curator ceiling and the other two scopes' caps.
+    /// @dev `held` is hookReserved, curatorReserved or Q_a (after `reserveFor`'s sweep, `sweptReserved`) for the Hook,
+    ///      Curator and Vault scopes. hookReserved and curatorReserved still include expired capacity until the
+    ///      allocation is closed. `reserveFor` also applies the admission rule, the curator ceiling and the other two
+    ///      scopes' caps.
     /// @param vault Vault to read.
     /// @param scope Hook, Curator or Vault.
     /// @param account The hook or curator; address(0) for the vault scope.
@@ -478,7 +527,7 @@ contract VaultLens {
             ? hookReserved(vault, account, currency)
             : scope == ISharedCommitmentVault.RiskScope.Curator
                 ? curatorReserved(vault, account, currency)
-                : reserved(vault, currency);
+                : sweptReserved(vault, currency);
         uint256 limit = uint256(l.maxReservedBps) * eligibleBacking(vault, currency) / 10_000;
         return limit > held ? limit - held : 0;
     }

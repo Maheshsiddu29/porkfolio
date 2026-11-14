@@ -264,9 +264,12 @@ contract VaultSecurityTest is VaultTestBase {
         auth.activateDirect(req);
     }
 
+    /// @notice Expiries must be in the future, on an hour boundary and within MAX_HORIZON. The fixture's clock (T0) is
+    ///         not on an hour boundary, so `now + 30 days` is not an admissible expiry itself: the last boundary before
+    ///         it is, and the next boundary is past the horizon.
     function test_horizonAndPastExpiry() public {
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyA, c1, QUOTA);
-        req.expiry = uint64(block.timestamp + 30 days + 1);
+        req.expiry = _hourAligned(block.timestamp + 30 days) + 1 hours; // first boundary after the horizon
         vm.prank(curator);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -275,7 +278,7 @@ contract VaultSecurityTest is VaultTestBase {
         );
         auth.activateDirect(req);
 
-        req.expiry = type(uint64).max;
+        req.expiry = _hourAligned(type(uint64).max);
         vm.prank(curator);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -294,7 +297,13 @@ contract VaultSecurityTest is VaultTestBase {
         );
         auth.activateDirect(req);
 
-        req.expiry = uint64(block.timestamp + 30 days); // exactly at horizon is allowed
+        // Within the horizon but not on an hour boundary: refused by the vault.
+        req.expiry = _hourAligned(block.timestamp + 1 days) + 1;
+        vm.prank(curator);
+        vm.expectRevert(ISharedCommitmentVault.InvalidExpiry.selector);
+        auth.activateDirect(req);
+
+        req.expiry = _hourAligned(block.timestamp + 30 days); // the last boundary inside the horizon is allowed
         vm.prank(curator);
         auth.activateDirect(req);
     }
@@ -331,8 +340,11 @@ contract VaultSecurityTest is VaultTestBase {
         auth.activateDirect(req); // same nonce, different curator: independent
     }
 
-    /// @notice Lazy expiry: time passing changes nothing on-chain; capacity returns only on `release`.
-    function test_lazyRelease() public {
+    /// @notice Expiry without a keeper: time passing writes nothing, but the next sweeping call (here
+    ///         `processQueue(0)`, callable by anyone) takes the expired capacity out of Q_a without any `release`. The
+    ///         curator's and hook's totals keep it until the allocation is closed; a release after the sweep lowers
+    ///         them and leaves Q_a alone (nothing is subtracted twice).
+    function test_expiryLeavesQAtSweep_releaseOnlyCleansScopeTotals() public {
         uint256 id = _allocate(keyA, c1, QUOTA);
         _swap(keyA, true, 1000 ether, id);
         uint256 unused = QUOTA - vault.getAllocation(id).consumed;
@@ -343,12 +355,19 @@ contract VaultSecurityTest is VaultTestBase {
         vault.release(id);
 
         vm.warp(expiry + 365 days);
-        assertEq(vault.reserved(c1), unused, "expiry must not release capacity by itself");
+        assertEq(vault.reserved(c1), unused, "no call, no write");
+        assertEq(lens.liveReserved(vault, c1), 0, "but nothing live");
+        vm.prank(attacker);
+        vault.processQueue(0); // a permissionless sweep
+        assertEq(vault.reserved(c1), 0, "expired capacity left Q without a release");
+        assertEq(vault.curatorReserved(curator, c1), unused, "scope totals wait for the close");
+        assertEq(vault.hookReserved(address(hookA), c1), unused);
 
         vm.prank(attacker); // permissionless after expiry
         vault.release(id);
-        assertEq(vault.reserved(c1), 0);
+        assertEq(vault.reserved(c1), 0, "release after the sweep subtracts nothing more");
         assertEq(vault.curatorReserved(curator, c1), 0);
+        assertEq(vault.hookReserved(address(hookA), c1), 0);
 
         vm.expectRevert(abi.encodeWithSelector(ISharedCommitmentVault.AllocationAlreadyReleased.selector, id));
         vault.release(id);

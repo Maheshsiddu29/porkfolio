@@ -39,10 +39,11 @@ contract ActivationSafetyTest is AuthTestBase {
     /// @notice Boundaries of the window bound and of the activation window, all inclusive where the rule says <=:
     ///         a window of exactly one day activates at both ends; one second longer is refused at any time; a
     ///         zero-length window activates in exactly its one second; an allocation may expire one second after the
-    ///         deadline and is then live for exactly that second when activated at the deadline.
+    ///         deadline and is then live for exactly that second when activated at the deadline (the vault requires the
+    ///         expiry on an hour boundary, so that second is the last one before a boundary).
     function test_ST_windowBoundaries() public {
         uint64 t = uint64(block.timestamp);
-        ICuratorAuthorization.AllocationAuthorization memory a = _timed(t, t + WINDOW, t + 2 days);
+        ICuratorAuthorization.AllocationAuthorization memory a = _timed(t, t + WINDOW, _hourAligned(t + 2 days));
         bytes memory sig = _sign(signerKey, a);
         uint256 snap = vm.snapshotState();
         _activate(a, keyA, sig);
@@ -60,21 +61,22 @@ contract ActivationSafetyTest is AuthTestBase {
         _activate(tooLong, keyA, sigLong);
         vm.revertToState(snap);
 
-        ICuratorAuthorization.AllocationAuthorization memory point = _timed(t + 10, t + 10, t + 11);
+        uint64 e = _hourAligned(t) + 1 hours; // the next hour boundary
+        ICuratorAuthorization.AllocationAuthorization memory point = _timed(e - 1, e - 1, e);
         bytes memory sigPoint = _sign(signerKey, point);
-        vm.warp(t + 9);
-        vm.expectRevert(abi.encodeWithSelector(ICuratorAuthorization.AuthorizationNotYetValid.selector, t + 10));
+        vm.warp(e - 2);
+        vm.expectRevert(abi.encodeWithSelector(ICuratorAuthorization.AuthorizationNotYetValid.selector, e - 1));
         _activate(point, keyA, sigPoint);
-        vm.warp(t + 11);
-        vm.expectRevert(abi.encodeWithSelector(ICuratorAuthorization.AuthorizationExpired.selector, t + 10));
+        vm.warp(e);
+        vm.expectRevert(abi.encodeWithSelector(ICuratorAuthorization.AuthorizationExpired.selector, e - 1));
         _activate(point, keyA, sigPoint);
-        vm.warp(t + 10);
+        vm.warp(e - 1);
         uint256 id = _activate(point, keyA, sigPoint);
-        assertEq(vault.getAllocation(id).expiry, t + 11, "live for exactly one second");
+        assertEq(vault.getAllocation(id).expiry, e, "live for exactly one second");
         _swap(keyA, true, 100 ether, id);
-        vm.warp(t + 11);
+        vm.warp(e);
         _expectSwapRevert(
-            address(hookA), abi.encodeWithSelector(ISharedCommitmentVault.AllocationExpired.selector, id, t + 11)
+            address(hookA), abi.encodeWithSelector(ISharedCommitmentVault.AllocationExpired.selector, id, e)
         );
         _swapRaw(keyA, true, -int256(100 ether), abi.encode(id));
     }
@@ -124,7 +126,8 @@ contract ActivationSafetyTest is AuthTestBase {
     function test_ST_futureDatedSignature() public {
         uint64 t = uint64(block.timestamp);
         uint64 opens = t + 365 days;
-        ICuratorAuthorization.AllocationAuthorization memory a = _timed(opens, opens + 1 hours, opens + 2 days);
+        ICuratorAuthorization.AllocationAuthorization memory a =
+            _timed(opens, opens + 1 hours, _hourAligned(opens + 2 days));
         bytes memory sig = _sign(signerKey, a);
         vm.expectRevert(abi.encodeWithSelector(ICuratorAuthorization.AuthorizationNotYetValid.selector, opens));
         _activate(a, keyA, sig);
@@ -163,13 +166,13 @@ contract ActivationSafetyTest is AuthTestBase {
     ///         with a new window.
     function test_ST_expiredSignature() public {
         uint64 t = uint64(block.timestamp);
-        ICuratorAuthorization.AllocationAuthorization memory a = _timed(t, t + 1 hours, t + 1 days);
+        ICuratorAuthorization.AllocationAuthorization memory a = _timed(t, t + 1 hours, _hourAligned(t + 1 days));
         bytes memory sig = _sign(signerKey, a);
         vm.warp(t + 1 hours + 1);
         vm.expectRevert(abi.encodeWithSelector(ICuratorAuthorization.AuthorizationExpired.selector, t + 1 hours));
         _activate(a, keyA, sig);
         assertEq(auth.nonceBitmap(signer, a.nonce >> 8), 0);
-        (a.validAfter, a.deadline, a.expiry) = (t + 1 hours, t + 2 hours, t + 1 days);
+        (a.validAfter, a.deadline, a.expiry) = (t + 1 hours, t + 2 hours, _hourAligned(t + 1 days));
         _activate(a, keyA, _sign(signerKey, a));
         assertTrue(auth.isNonceUsed(signer, a.nonce));
     }
@@ -177,12 +180,15 @@ contract ActivationSafetyTest is AuthTestBase {
     /// @notice The module and the vault together against a reference list of the time rules, in order. Times are
     ///         drawn around the activation time so that every rule is reached: validAfter within two days before to
     ///         one day after it, the window from one hour negative to two days, the lifetime from one hour negative to
-    ///         31 days past the deadline. The activation time ranges up to 40 days below type(uint64).max.
+    ///         31 days past the deadline. The activation time ranges up to 40 days below type(uint64).max. Three
+    ///         expiries in four are rounded down to an hour boundary, so that the vault's alignment rule is both met
+    ///         and broken.
     function testFuzz_ST_timeRulesMatchReference(uint64 at, uint256 vaOff, uint256 winOff, uint256 lifeOff) public {
         at = uint64(bound(at, block.timestamp, type(uint64).max - 40 days));
         uint64 va = uint64(at - 2 days + bound(vaOff, 0, 3 days));
         uint64 dl = uint64(va - 1 hours + bound(winOff, 0, 2 days + 1 hours));
         uint64 ex = uint64(dl - 1 hours + bound(lifeOff, 0, 31 days + 2 hours));
+        if (lifeOff % 4 != 0) ex = _hourAligned(ex);
         vm.warp(at);
         ICuratorAuthorization.AllocationAuthorization memory a = _timed(va, dl, ex);
         bytes memory sig = _sign(signerKey, a);
@@ -198,6 +204,8 @@ contract ActivationSafetyTest is AuthTestBase {
             expected = abi.encodeWithSelector(ICuratorAuthorization.AuthorizationNotYetValid.selector, va);
         } else if (at > dl) {
             expected = abi.encodeWithSelector(ICuratorAuthorization.AuthorizationExpired.selector, dl);
+        } else if (ex % 1 hours != 0) {
+            expected = abi.encodeWithSelector(ISharedCommitmentVault.InvalidExpiry.selector);
         } else if (ex > uint256(at) + 30 days) {
             expected =
                 abi.encodeWithSelector(ISharedCommitmentVault.HorizonExceeded.selector, ex, uint256(at) + 30 days);
@@ -237,7 +245,7 @@ contract ActivationSafetyTest is AuthTestBase {
             assertFalse(ok);
         }
         ICuratorAuthorization.AllocationAuthorization memory good =
-            _timedFor(address(wallet), t, t + 1 hours, t + 1 days);
+            _timedFor(address(wallet), t, t + 1 hours, _hourAligned(t + 1 days));
         wallet.approve(auth.hashAuthorization(good), true);
         _activate(good, keyB, "");
     }

@@ -75,6 +75,20 @@ library VaultStateReader {
     uint256 internal constant INVENTORY_TARGET_SLOT = 25;
     /// @dev `inventoryTolerancePips`: uint24[2] packed in slot 27, element i in bytes 3i to 3i + 2.
     uint256 internal constant INVENTORY_TOLERANCE_SLOT = 27;
+    /// @dev `_expiryRings`: mapping(Currency => ExpiryRing). Entry base h = keccak256(abi.encode(currency, 28)):
+    ///      word h holds `swept` (uint64, bits 0-63) and `maxBucket` (uint64, bits 64-127); slot i of the ring is the
+    ///      word keccak256(abi.encode(i, h + 1)), holding `bucket` (uint64, bits 0-63) and `amount` (uint128, bits
+    ///      64-191). See `expiryRing` and `expiryBucket`.
+    uint256 internal constant EXPIRY_RINGS_SLOT = 28;
+
+    // The vault's expiry ring parameters (internal constants there; pinned by test/unit/VaultStorageLayout.t.sol).
+
+    /// @dev Width of one expiry bucket, seconds: allocation expiries are multiples of it.
+    uint256 internal constant EXPIRY_BUCKET = 1 hours;
+    /// @dev Ring slots per asset (MAX_HORIZON / EXPIRY_BUCKET).
+    uint256 internal constant EXPIRY_SLOTS = 720;
+    /// @dev Most buckets one vault sweep walks per asset.
+    uint256 internal constant SWEEP_STEPS = 32;
 
     // The narrowing casts below extract packed fields from a storage word: truncating to the field's width (after
     // shifting it to bit 0) is the decoding, exactly as the compiler's own getter does.
@@ -245,7 +259,71 @@ library VaultStateReader {
         l.maxReservedBps = uint16(uint256(vault.extsload(bytes32(b + 1))));
     }
 
+    /// @dev Expiry ring header of `currency`: every bucket <= `swept` has been subtracted from the stored Q_a;
+    ///      `maxBucket` is the largest bucket ever written. Both zero before the first sweep.
+    function expiryRing(IVaultState vault, Currency currency) internal view returns (uint64 swept, uint64 maxBucket) {
+        uint256 w = uint256(vault.extsload(bytes32(_ringBase(currency))));
+        swept = uint64(w);
+        maxBucket = uint64(w >> 64);
+    }
+
+    /// @dev Ring slot `index` (0 .. EXPIRY_SLOTS - 1) of `currency`: the bucket it is tagged with and the capacity it
+    ///      holds, raw units. The amount counts in Q_a only while `bucket > swept`.
+    function expiryBucket(IVaultState vault, Currency currency, uint256 index)
+        internal
+        view
+        returns (uint64 bucket, uint128 amount)
+    {
+        uint256 w = uint256(vault.extsload(keccak256(abi.encode(index, _ringBase(currency) + 1))));
+        bucket = uint64(w);
+        amount = uint128(w >> 64);
+    }
+
     // forge-lint: disable-end(unsafe-typecast)
+
+    /// @dev Q^live_a, raw units: unused capacity of the unreleased allocations of `currency` that have not expired
+    ///      (block.timestamp < expiry). Exact: the stored Q_a minus every bucket that has ended (bucket <= c, with c the
+    ///      current bucket) and is still counted (bucket > swept, still in its slot).
+    ///
+    ///      Reads: none if nothing has ended since the last sweep (c <= swept), none if everything ever written has
+    ///      ended (c >= maxBucket; the result is 0), else the min(c - swept, EXPIRY_SLOTS) slots that can hold an
+    ///      ended, counted bucket: each bucket swept + 1 .. c, or, when that gap is longer than the ring, the whole
+    ///      ring once (any slot tagged in (swept, c]). A view for off-chain callers; the vault itself never computes
+    ///      it, and `exchange` does not depend on it.
+    function liveReserved(IVaultState vault, Currency currency) internal view returns (uint256 q) {
+        q = reserved(vault, currency);
+        (uint256 swept, uint256 maxBucket) = expiryRing(vault, currency);
+        uint256 c = block.timestamp / EXPIRY_BUCKET;
+        if (c <= swept) return q;
+        if (c >= maxBucket) return 0;
+        if (c - swept <= EXPIRY_SLOTS) {
+            for (uint256 b = swept + 1; b <= c; ++b) {
+                (uint256 tag, uint256 amount) = expiryBucket(vault, currency, b % EXPIRY_SLOTS);
+                if (tag == b) q -= amount;
+            }
+        } else {
+            for (uint256 i; i < EXPIRY_SLOTS; ++i) {
+                (uint256 tag, uint256 amount) = expiryBucket(vault, currency, i);
+                if (tag > swept && tag <= c) q -= amount;
+            }
+        }
+    }
+
+    /// @dev Q_a as the next sweeping call (`reserveFor`, `redeem`, `processQueue`) will leave it before it reads it,
+    ///      raw units: the vault's `_sweep` without the writes, so at most SWEEP_STEPS buckets past `swept`, or 0 once
+    ///      every bucket ever written has ended. Between Q^live_a and the stored Q_a.
+    function sweptReserved(IVaultState vault, Currency currency) internal view returns (uint256 q) {
+        q = reserved(vault, currency);
+        (uint256 swept, uint256 maxBucket) = expiryRing(vault, currency);
+        uint256 c = block.timestamp / EXPIRY_BUCKET;
+        if (c <= swept) return q;
+        if (c >= maxBucket) return 0;
+        uint256 end = c - swept > SWEEP_STEPS ? swept + SWEEP_STEPS : c;
+        for (uint256 b = swept + 1; b <= end; ++b) {
+            (uint256 tag, uint256 amount) = expiryBucket(vault, currency, b % EXPIRY_SLOTS);
+            if (tag == b) q -= amount;
+        }
+    }
 
     /// @dev N_a = B_a - W_a, raw units: assets owned by outstanding shares, including committed capacity Q_a. The
     ///      vault's `_netAssets`. Cannot underflow while the vault maintains W_a <= B_a.
@@ -271,7 +349,7 @@ library VaultStateReader {
 
     /// @dev Admission limit, raw units: the largest new allocation `reserveFor`'s admission rules accept now (the
     ///      curator ceiling and the exposure caps are separate). The vault's `_admissible(currency,
-    ///      _eligibleBacking(currency))`:
+    ///      _eligibleBacking(currency))` after `reserveFor`'s sweep, so Q_a here is `sweptReserved`:
     ///
     ///          min( max(0, N_a - Q_a - R_a - D_a),  max(0, N_a - L_a - Q_a) )
     ///
@@ -281,7 +359,7 @@ library VaultStateReader {
     ///      can overflow because R_a has no upper bound. Example: N_a = 1,000, Q_a = 300, R_a = 100 and D_a = 150
     ///      give 450 without a target; with L_a = 650 the room term is 50 and the limit is 50.
     function admissibleCapacity(IVaultState vault, Currency currency) internal view returns (uint256 limit) {
-        uint256 q = reserved(vault, currency);
+        uint256 q = sweptReserved(vault, currency);
         limit = _sub0(_sub0(eligibleBacking(vault, currency), q), bufferFloor(vault, currency));
         uint256 i = currency == vault.asset1() ? 1 : 0;
         uint256 target = inventoryTargetPerShare(vault, i);
@@ -306,6 +384,11 @@ library VaultStateReader {
     /// @dev Address-keyed overload of `_mapSlot`; an address key is encoded as the same left-padded word.
     function _mapSlot(address key, uint256 slot) private pure returns (bytes32) {
         return keccak256(abi.encode(key, slot));
+    }
+
+    /// @dev Base slot of `_expiryRings[currency]` (the header word; the slot mapping is declared at base + 1).
+    function _ringBase(Currency currency) private pure returns (uint256) {
+        return uint256(_mapSlot(Currency.unwrap(currency), EXPIRY_RINGS_SLOT));
     }
 
     /// @dev Slot of `mapping[outer][currency]` for a nested mapping declared at `slot`: the outer key is hashed with

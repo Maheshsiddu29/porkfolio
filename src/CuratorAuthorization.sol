@@ -60,7 +60,7 @@ import {IVaultState} from "./interfaces/IVaultState.sol";
 /// is still live when the activation window closes, and once an instruction becomes valid it stays usable for at
 /// most one day. Example: validAfter = 1,000, deadline = 4,600 and expiry = 90,000 is accepted at any time from 1,000
 /// to 4,600; deadline = 87,401 (window one second over a day) is rejected, as is expiry = 4,600. The vault then
-/// requires expiry <= activation time + MAX_HORIZON. The direct path applies only deadline < expiry: the curator is
+/// requires expiry <= activation time + MAX_HORIZON and an expiry on an hour boundary. The direct path applies only deadline < expiry: the curator is
 /// the caller, so there is no instruction for anyone else to hold.
 ///
 /// What the window bound does not cover. The contract cannot know when an instruction was signed: all three times

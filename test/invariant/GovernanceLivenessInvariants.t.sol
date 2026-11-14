@@ -253,7 +253,7 @@ contract GovernanceLivenessHandler is Test {
             currencyOut: out,
             maxOut: uint128(cap),
             minInPerOutX96: uint160(1 << 96),
-            expiry: uint64(_now() + bound(horizonSeed, 1 hours, 30 days)),
+            expiry: uint64((_now() + bound(horizonSeed, 1 hours, 30 days)) / 1 hours * 1 hours), // hour boundary
             nonce: nonce++,
             deadline: uint64(_now())
         });

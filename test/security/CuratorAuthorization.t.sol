@@ -418,7 +418,7 @@ contract CuratorAuthorizationTest is AuthTestBase {
     function test_CA_validityWindowAndExpiry() public {
         uint256 t = block.timestamp;
         ICuratorAuthorization.AllocationAuthorization memory a = _authz(signer, keyA, c1, 1000 ether);
-        (a.validAfter, a.deadline, a.expiry) = (uint64(t + 100), uint64(t + 200), uint64(t + 1 days));
+        (a.validAfter, a.deadline, a.expiry) = (uint64(t + 100), uint64(t + 200), _hourAligned(t + 1 days));
         bytes memory sig = _sign(signerKey, a);
         vm.warp(t + 99);
         vm.expectRevert(abi.encodeWithSelector(ICuratorAuthorization.AuthorizationNotYetValid.selector, t + 100));
@@ -438,7 +438,7 @@ contract CuratorAuthorizationTest is AuthTestBase {
         // window (the window itself is at most MAX_VALIDITY_WINDOW = one day).
         uint256 now_ = vm.getBlockTimestamp(); // via-IR may reuse a block.timestamp read from before vm.warp
         ICuratorAuthorization.AllocationAuthorization memory b = _authz(signer, keyA, c1, 1000 ether);
-        (b.deadline, b.expiry) = (uint64(now_ + 1 days), uint64(now_ + 30 days + 12 hours));
+        (b.deadline, b.expiry) = (uint64(now_ + 1 days), _hourAligned(now_ + 30 days + 12 hours)); // > horizon now
         bytes memory sigB = _sign(signerKey, b);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -710,7 +710,9 @@ contract CuratorAuthorizationTest is AuthTestBase {
         Currency out = seed & 2 == 0 ? c1 : c0;
         maxOut = uint128(bound(maxOut, 0, VAULT_FUNDING * 2));
         ICuratorAuthorization.AllocationAuthorization memory a = _authz(signer, key, out, maxOut);
-        a.expiry = uint64(block.timestamp + bound(lifetime, 0, 32 days));
+        // An hour boundary (the vault requires one), or one second past it when seed bit 2 is set, so that both paths
+        // are also compared on the vault's alignment refusal.
+        a.expiry = _hourAligned(block.timestamp + bound(lifetime, 0, 32 days)) + uint64((seed >> 2) & 1);
         a.minInPerOutX96 = PRICE_1_1_X96 - 2 + uint160(bound(floorBump, 0, 4)); // around the vault floor
         bytes memory sig = _sign(signerKey, a);
 

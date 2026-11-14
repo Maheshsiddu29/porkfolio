@@ -162,13 +162,16 @@ contract VaultFundingTest is VaultTestBase {
         assertEq(lens.freeInventory(vault, c1), 0);
         assertEq(vault.pendingShares(), lpShares - instant);
 
-        // After expiry the capacity is NOT returned until someone calls release (lazy expiry).
-        vm.warp(vault.getAllocation(id).expiry);
+        // One second before expiry the capacity is still committed: nothing can be finalized.
+        vm.warp(vault.getAllocation(id).expiry - 1);
         assertEq(vault.processQueue(10), 0);
         assertEq(uint8(lens.requestStatus(vault, requestId)), uint8(ISharedCommitmentVault.RequestStatus.Pending));
 
-        vault.release(id);
+        // At expiry, processQueue's own sweep takes the capacity out of Q_1 and the queue is finalized, with no
+        // release (the expiry ring). The release afterwards only closes the record.
+        vm.warp(vault.getAllocation(id).expiry);
         assertEq(vault.processQueue(10), lpShares - instant);
+        vault.release(id);
         vm.prank(lp0);
         (uint256 c0Out, uint256 c1Out) = vault.claim(requestId);
         assertEq(c0Out, lpShares - instant);

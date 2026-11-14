@@ -232,7 +232,7 @@ contract VaultLensParityTest is VaultTestBase {
     // Parity
     // ------------------------------------------------------------------
 
-    function _assertParity() internal view {
+    function _assertParity() internal {
         Currency[3] memory cs = [c0, c1, Currency.wrap(address(0xDEAD))];
         address[6] memory accounts = [curator, address(hookA), address(hookB), lp0, lp1, address(0)];
 
@@ -254,7 +254,22 @@ contract VaultLensParityTest is VaultTestBase {
             assertEq(lens.reserved(vault, c), ref.oldReserved(c), "reserved");
             assertEq(lens.bufferFloor(vault, c), ref.oldBufferFloor(c), "bufferFloor");
             assertEq(lens.claimableAssets(vault, c), ref.oldClaimableAssets(c), "claimableAssets");
-            assertEq(lens.admissibleCapacity(vault, c), ref.oldAdmissibleCapacity(c), "admissibleCapacity");
+            // The lens predicts reserveFor's own sweep; compare with the vault actually sweeping, then undo it.
+            uint256 lensAdmissible = lens.admissibleCapacity(vault, c);
+            uint256 lensSwept = lens.sweptReserved(vault, c);
+            uint256 snap = vm.snapshotState();
+            assertEq(lensAdmissible, ref.sweptAdmissibleCapacity(c), "admissibleCapacity");
+            assertEq(lensSwept, ref.sweptReservedNow(c), "sweptReserved");
+            vm.revertToState(snap);
+            (uint64 sw, uint64 mb) = lens.expiryRing(vault, c);
+            (uint64 oldSw, uint64 oldMb) = ref.oldExpiryRing(c);
+            assertEq(sw, oldSw, "ring.swept");
+            assertEq(mb, oldMb, "ring.maxBucket");
+            uint256 slot = (block.timestamp / 1 hours + 1 + i * 97) % 720; // a slot near the current bucket
+            (uint64 bk, uint128 am) = lens.expiryBucket(vault, c, slot);
+            (uint64 oldBk, uint128 oldAm) = ref.oldExpiryBucket(c, slot);
+            assertEq(bk, oldBk, "bucket.tag");
+            assertEq(am, oldAm, "bucket.amount");
             (uint160 f, bool h) = lens.sellPolicy(vault, c);
             (uint160 oldF, bool oldH) = ref.oldSellPolicy(c);
             assertEq(f, oldF, "sellPolicy.minInPerOutX96");

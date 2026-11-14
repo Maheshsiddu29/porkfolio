@@ -261,7 +261,7 @@ abstract contract VaultTestBase is Test {
             currencyOut: out,
             maxOut: maxOut,
             minInPerOutX96: PRICE_1_1_X96, // curator floor = vault floor (it may not be lower)
-            expiry: uint64(block.timestamp + 1 days),
+            expiry: _hourAligned(block.timestamp + 1 days),
             nonce: nextNonce++,
             deadline: uint64(block.timestamp + 1 hours)
         });
@@ -289,6 +289,13 @@ abstract contract VaultTestBase is Test {
         vm.prank(vault.owner());
         // forge-lint: disable-next-line(unsafe-typecast) tolerances were read from uint24 fields.
         vault.setInventoryBounds(saved[0], saved[1], uint24(saved[2]), uint24(saved[3]));
+    }
+
+    /// @dev `t` rounded down to an hour boundary: the vault accepts only expiries that are multiples of 3,600 s. For
+    ///      t = now + d with d >= 1 hour the result is still in the future.
+    function _hourAligned(uint256 t) internal pure returns (uint64) {
+        // forge-lint: disable-next-line(unsafe-typecast) test timestamps are far below 2^64.
+        return uint64(t - t % 1 hours);
     }
 
     function _allocate(PoolKey memory key, Currency out, uint128 maxOut) internal returns (uint256 id) {
@@ -380,6 +387,22 @@ abstract contract VaultTestBase is Test {
         _assertEquationsWith(0, 0);
     }
 
+    /// @dev Q^live <= swept Q <= stored Q <= Q^lazy, `liveReserved` exact, and stored Q + W <= B; returns the swept Q
+    ///      (what the next sweeping call computes F and admission from).
+    function _assertReservedBounds(Currency c, uint256 lazyQ, uint256 liveQ, uint256 w, uint256 b)
+        internal
+        view
+        returns (uint256 q)
+    {
+        uint256 stored = lens.reserved(vault, c);
+        assertLe(stored, lazyQ, "Q > sum of unreleased allocations");
+        assertEq(lens.liveReserved(vault, c), liveQ, "liveReserved != sum of live allocations");
+        q = lens.sweptReserved(vault, c);
+        assertLe(liveQ, q, "swept Q < live");
+        assertLe(q, stored, "swept Q > stored Q");
+        assertLe(stored + w, b, "Q + W > B");
+    }
+
     /// @dev As `_assertEquations`, with B_a = PM balance - donated_a.
     function _assertEquationsWith(uint256 don0, uint256 don1) internal view {
         uint256[2] memory don = [don0, don1];
@@ -392,11 +415,15 @@ abstract contract VaultTestBase is Test {
             W[0] += r.claimable0;
             W[1] += r.claimable1;
         }
-        uint256[2] memory Q;
+        // Q^lazy: every unreleased allocation; Q^live: those not yet expired. The stored Q lies between them (the ring
+        // takes expired capacity out at sweeps); the next sweeping call's Q (`sweptReserved`) too.
+        uint256[2] memory lazyQ;
+        uint256[2] memory liveQ;
         for (uint256 id = 1; id < lens.nextAllocationId(vault); ++id) {
             ISharedCommitmentVault.Allocation memory a = lens.getAllocation(vault, id);
             if (a.released) continue;
-            Q[a.currencyOut == c0 ? 0 : 1] += a.maxOut - a.consumed;
+            lazyQ[a.currencyOut == c0 ? 0 : 1] += a.maxOut - a.consumed;
+            if (vm.getBlockTimestamp() < a.expiry) liveQ[a.currencyOut == c0 ? 0 : 1] += a.maxOut - a.consumed;
         }
         assertEq(vault.pendingShares(), P, "P != sum pending");
 
@@ -407,25 +434,24 @@ abstract contract VaultTestBase is Test {
             uint256 B = _claims(address(vault), c) - don[i];
             assertEq(lens.backing(vault, c), B, "B != PM balance - donations");
             assertEq(lens.claimableAssets(vault, c), W[i], "W != sum claimable");
-            assertEq(lens.reserved(vault, c), Q[i], "Q != sum allocations");
-            assertLe(Q[i] + W[i], B, "Q + W > B");
+            uint256 q = _assertReservedBounds(c, lazyQ[i], liveQ[i], W[i], B);
             uint256 N = B - W[i];
             nSum += N;
             assertEq(lens.netAssets(vault, c), N, "N != B - W");
-            assertEq(lens.freeInventory(vault, c), N - Q[i], "F != N - Q");
+            assertEq(lens.freeInventory(vault, c), N - q, "F != N - Q");
             uint256 D = P == 0 ? 0 : FullMath.mulDivRoundingUp(P, N, S);
             assertEq(lens.pendingDemand(vault, c), D, "D != ceil(P*N/S)");
             assertLe(D, N, "D > N");
             // Q + D <= 2N < 2^129 cannot overflow. R is unbounded (the guardian may raise it to type(uint256).max),
             // so it is compared against what is left rather than added to Q + D.
-            uint256 qd = Q[i] + D;
+            uint256 qd = q + D;
             uint256 R = lens.bufferFloor(vault, c);
             uint256 expected = N > qd && N - qd > R ? N - qd - R : 0;
             // Room rule: with a target, also at most N - L - Q, L = ceil(S * tau * (1e6 - kappa) / 1e24).
             uint256 tau = lens.inventoryTargetPerShare(vault, i);
             if (tau != 0) {
                 uint256 L = FullMath.mulDivRoundingUp(S * tau, 1e6 - lens.inventoryTolerancePips(vault, i), 1e24);
-                uint256 room = N > L + Q[i] ? N - L - Q[i] : 0;
+                uint256 room = N > L + q ? N - L - q : 0;
                 if (room < expected) expected = room;
             }
             assertEq(lens.admissibleCapacity(vault, c), expected, "admission != min(N - Q - R - D, N - L - Q)");

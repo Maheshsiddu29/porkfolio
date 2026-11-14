@@ -197,7 +197,7 @@ contract OracleRiskHandler is Test {
             currencyOut: c,
             maxOut: uint128(out),
             minInPerOutX96: 1,
-            expiry: uint64(block.timestamp + 2 hours),
+            expiry: uint64((block.timestamp + 2 hours) / 1 hours * 1 hours), // hour boundary, at least 1 hour out
             nonce: nonce++,
             deadline: uint64(block.timestamp + 1 hours)
         });

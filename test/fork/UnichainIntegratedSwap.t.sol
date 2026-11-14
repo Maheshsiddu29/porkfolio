@@ -169,7 +169,7 @@ contract UnichainIntegratedSwapForkTest is Test {
             currencyOut: out,
             maxOut: uint128(vault.backing(out) / 10),
             minInPerOutX96: floor,
-            expiry: uint64(block.timestamp + 1 days),
+            expiry: uint64((block.timestamp + 1 days) / 1 hours * 1 hours), // hour boundary, as the vault requires
             nonce: nonce++,
             deadline: uint64(block.timestamp + 1 hours)
         });

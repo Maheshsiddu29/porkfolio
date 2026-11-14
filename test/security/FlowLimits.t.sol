@@ -335,8 +335,8 @@ contract FlowLimitsTest is VaultTestBase {
         uint256 t = uint256(type(uint64).max) - 30 days;
         vm.warp(t);
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyE1, c1, 1000 ether);
-        req.expiry = type(uint64).max;
-        req.deadline = type(uint64).max - 1; // the module requires deadline < expiry
+        req.expiry = _hourAligned(type(uint64).max); // the last hour boundary of 64-bit time
+        req.deadline = req.expiry - 1; // the module requires deadline < expiry
         vm.prank(curator);
         uint256 id = auth.activateDirect(req);
         _expectSwapRevert(e1, abi.encodeWithSelector(ISharedCommitmentVault.FlowEpochOutOfRange.selector, t / W));
@@ -439,10 +439,10 @@ contract FlowLimitsTest is VaultTestBase {
         vm.prank(owner);
         vault.release(b);
         ISharedCommitmentVault.AllocationRequest memory req = _request(keyE1, c1, 100 ether);
-        (req.deadline, req.expiry) = (uint64(block.timestamp), uint64(block.timestamp + 1));
+        (req.deadline, req.expiry) = (uint64(block.timestamp), _hourAligned(block.timestamp) + 1 hours);
         vm.prank(curator);
         uint256 d = auth.activateDirect(req);
-        vm.warp(block.timestamp + 1);
+        vm.warp(req.expiry);
         vault.release(d);
         assertEq(_snap(), snap, "closes moved no flow record");
         _swapFlowReverts(keyE2, c, 101 ether, VAULT, address(0), 100 ether);
@@ -705,7 +705,7 @@ contract FlowLimitsTest is VaultTestBase {
 
     function _alloc(address who, PoolKey memory key, Currency out, uint128 maxOut) internal returns (uint256) {
         ISharedCommitmentVault.AllocationRequest memory req = _request(key, out, maxOut);
-        req.expiry = uint64(block.timestamp + 30 days);
+        req.expiry = _hourAligned(block.timestamp + 30 days);
         req.deadline = uint64(block.timestamp);
         vm.prank(who);
         return auth.activateDirect(req);

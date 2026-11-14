@@ -853,11 +853,18 @@ contract VaultHandler is Test {
     // ------------------------------------------------------------------
 
     /// @dev Checks one successful close against the values read just before it: the allocation was not closed
-    ///      before, and Q_out and the curator's reserved total fell by exactly maxOut - consumed.
+    ///      before, the curator's reserved total fell by exactly maxOut - consumed, and Q_out fell by the same amount
+    ///      if the allocation's expiry bucket was still counted (above `swept` and still the tag of its slot), by
+    ///      zero otherwise (a sweep or a newer bucket already took it out). A close changes neither `swept` nor any
+    ///      tag, so reading them after the close gives the state the close saw.
     function _recordClose(uint256 id, ISharedCommitmentVault.Allocation memory a, uint256 q, uint256 cr) internal {
         if (ghostClosed[id] || a.released) closeMismatch = true;
         uint256 unused = a.maxOut - a.consumed;
-        if (q - vault.reserved(a.currencyOut) != unused) closeMismatch = true;
+        uint256 bucket = a.expiry / 1 hours;
+        (uint64 swept,) = lens.expiryRing(vault, a.currencyOut);
+        (uint64 tag,) = lens.expiryBucket(vault, a.currencyOut, bucket % 720);
+        uint256 expectedDrop = bucket > swept && tag == bucket ? unused : 0;
+        if (q - vault.reserved(a.currencyOut) != expectedDrop) closeMismatch = true;
         if (cr - vault.curatorReserved(a.curator, a.currencyOut) != unused) closeMismatch = true;
         if (!vault.getAllocation(id).released) closeMismatch = true;
         ghostClosed[id] = true;
@@ -998,7 +1005,7 @@ contract VaultHandler is Test {
             // forge-lint: disable-next-line(unsafe-typecast)
             maxOut: uint128(bound(maxOut, 1 ether, 1_500_000 ether)),
             minInPerOutX96: _curatorFloor(out),
-            expiry: uint64(block.timestamp + bound(lifetime, 1, 30 days)),
+            expiry: _alignedExpiry(bound(lifetime, 1, 30 days)),
             validAfter: uint64(block.timestamp),
             deadline: uint64(block.timestamp),
             nonce: n
@@ -1022,7 +1029,7 @@ contract VaultHandler is Test {
             if (
                 a.validAfter > block.timestamp || block.timestamp > a.deadline
                     || a.deadline - a.validAfter > m.MAX_VALIDITY_WINDOW() || a.expiry <= a.deadline
-                    || a.expiry > block.timestamp + vault.MAX_HORIZON()
+                    || a.expiry > block.timestamp + vault.MAX_HORIZON() || a.expiry % 1 hours != 0
             ) timeRuleBroken = true;
             if (usedBefore || ghostNonceUsed[_nonceKey(address(m), who, n)]) nonceReused = true;
             _markNonce(address(m), who, n);
@@ -1123,7 +1130,16 @@ contract VaultHandler is Test {
         uint256 r = uint256(keccak256(abi.encode(seed, nonceSeed)));
         va = uint64(block.timestamp - 2 days + r % 3 days);
         dl = uint64(va - 1 hours + (r >> 64) % (2 days + 1 hours));
-        ex = uint64(dl - 1 hours + (r >> 128) % (31 days + 1 hours));
+        ex = uint64((dl - 1 hours + (r >> 128) % (31 days + 1 hours)) / 1 hours * 1 hours); // hour boundary
+    }
+
+    /// @dev now + lifetime rounded down to an hour boundary (the vault accepts no other expiry), or the next boundary
+    ///      if that is not in the future. Never more than MAX_HORIZON ahead when lifetime is at most MAX_HORIZON.
+    function _alignedExpiry(uint256 lifetime) internal view returns (uint64) {
+        uint256 e = (block.timestamp + lifetime) / 1 hours * 1 hours;
+        if (e <= block.timestamp) e += 1 hours;
+        // forge-lint: disable-next-line(unsafe-typecast) test timestamps are far below 2^64.
+        return uint64(e);
     }
 
     /// @dev The installed module, or the most recent one while the vault has none (calls through it must fail).
@@ -1328,7 +1344,7 @@ contract VaultHandler is Test {
             // forge-lint: disable-next-line(unsafe-typecast)
             maxOut: uint128(maxOut),
             minInPerOutX96: _curatorFloor(out), // must be >= the live vault floor or reserveFor reverts
-            expiry: uint64(block.timestamp + lifetime),
+            expiry: _alignedExpiry(lifetime),
             nonce: _takeNonce(),
             deadline: uint64(block.timestamp)
         });
@@ -1647,12 +1663,14 @@ contract VaultInvariantsTest is VaultTestBase {
         assertEq(vault.backing(c1), handler.ghostBacking(c1));
     }
 
-    /// Q_a == Σ over unreleased allocations of (maxOut - consumed), each curator's reserved total is the same sum
-    /// over its own allocations (INV-A2), and Q_a + W_a <= B_a. Frozen and revoked curators' unreleased
-    /// allocations are included: their capacity stays reserved until each one is closed.
+    /// V-3: Q^live_a <= Q_a <= Q^lazy_a, where Q^lazy_a is the sum over unreleased allocations of (maxOut - consumed)
+    /// and Q^live_a the same sum over those not yet expired; `liveReserved` equals Q^live_a exactly. Each curator's
+    /// reserved total is exactly its own lazy sum (INV-A2): it keeps expired capacity until the close. Q_a + W_a <= B_a.
+    /// Frozen and revoked curators' unreleased allocations are included.
     function invariant_reservedIsExactAndBacked() public view {
         uint256 sum0;
         uint256 sum1;
+        uint256[2] memory live;
         uint256 nc = handler.curatorCount();
         uint256[2][] memory perCurator = new uint256[2][](nc);
         uint256 n = handler.allocationCount();
@@ -1664,12 +1682,17 @@ contract VaultInvariantsTest is VaultTestBase {
             uint256 k = a.currencyOut == c0 ? 0 : 1;
             if (k == 0) sum0 += unused;
             else sum1 += unused;
+            if (vm.getBlockTimestamp() < a.expiry) live[k] += unused;
             for (uint256 j; j < nc; ++j) {
                 if (handler.curators(j) == a.curator) perCurator[j][k] += unused;
             }
         }
-        assertEq(vault.reserved(c0), sum0, "reserved0");
-        assertEq(vault.reserved(c1), sum1, "reserved1");
+        assertLe(vault.reserved(c0), sum0, "reserved0 above the lazy sum");
+        assertLe(vault.reserved(c1), sum1, "reserved1 above the lazy sum");
+        assertGe(vault.reserved(c0), live[0], "reserved0 below the live sum");
+        assertGe(vault.reserved(c1), live[1], "reserved1 below the live sum");
+        assertEq(lens.liveReserved(vault, c0), live[0], "liveReserved0");
+        assertEq(lens.liveReserved(vault, c1), live[1], "liveReserved1");
         for (uint256 j; j < nc; ++j) {
             assertEq(vault.curatorReserved(handler.curators(j), c0), perCurator[j][0], "curatorReserved0");
             assertEq(vault.curatorReserved(handler.curators(j), c1), perCurator[j][1], "curatorReserved1");
@@ -1927,8 +1950,9 @@ contract VaultInvariantsTest is VaultTestBase {
         }
     }
 
-    /// INV-E1: hookReserved is exact per hook and sums to Q_a; every successful allocation respected all three
-    /// exposure caps at the moment it was made; the guardian never loosened a risk limit.
+    /// INV-E1: hookReserved is exact per hook (the lazy sum: expired capacity stays until the close) and sums to
+    /// Q^lazy_a >= Q_a; every successful allocation respected all three exposure caps at the moment it was made; the
+    /// guardian never loosened a risk limit.
     function invariant_exposureAndHookReserved() public view {
         address[3] memory hooks = [address(keyA.hooks), address(keyB.hooks), address(keyE.hooks)];
         uint256[2][3] memory perHook;
@@ -1947,7 +1971,7 @@ contract VaultInvariantsTest is VaultTestBase {
                 assertEq(vault.hookReserved(hooks[j], c), perHook[j][k], "hookReserved != sum of allocations");
                 sum += perHook[j][k];
             }
-            assertEq(sum, vault.reserved(c), "sum of hookReserved != Q");
+            assertGe(sum, vault.reserved(c), "sum of hookReserved below Q");
         }
         assertFalse(handler.exposureViolated(), "allocation exceeded an exposure cap");
         assertFalse(handler.guardianLoosenedRisk(), "guardian loosened a risk limit");
@@ -1990,7 +2014,8 @@ contract VaultInvariantsTest is VaultTestBase {
     }
 
     /// INV-T1: every signed activation that succeeded met every time rule at that moment: validAfter <= now <=
-    /// deadline, deadline - validAfter <= MAX_VALIDITY_WINDOW, deadline < expiry <= now + MAX_HORIZON.
+    /// deadline, deadline - validAfter <= MAX_VALIDITY_WINDOW, deadline < expiry <= now + MAX_HORIZON, expiry on an hour
+    /// boundary.
     function invariant_signedActivationTimeRules() public view {
         assertFalse(handler.timeRuleBroken());
     }

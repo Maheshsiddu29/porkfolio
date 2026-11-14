@@ -127,7 +127,7 @@ contract GovernanceLivenessTest is VaultTestBase {
     /// @dev The honest fixture curator commits every admissible unit of asset0 for `horizon` seconds.
     function _commitAll(uint256 horizon) internal returns (uint256 id) {
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c0, uint128(vault.admissibleCapacity(c0)));
-        r.expiry = uint64(vm.getBlockTimestamp() + horizon);
+        r.expiry = _hourAligned(vm.getBlockTimestamp() + horizon);
         vm.prank(curator);
         id = auth.activateDirect(r);
     }
@@ -155,12 +155,13 @@ contract GovernanceLivenessTest is VaultTestBase {
         vm.warp(eta);
         _assertBlocked(loosen);
 
-        vm.warp(t0 + 35 days); // expired, not yet released
-        (bool ok, bytes memory err) = _tryExecute(loosen, false);
-        assertFalse(ok);
-        assertEq(err, abi.encodeWithSelector(VaultGovernor.PendingWithdrawals.selector, 1), "lazy expiry still blocks");
+        vm.warp(t0 + 35 days); // expired, not released
         assertEq(_expired()[0], id);
-        _assertExecutes(loosen); // the same batch with the release included
+        // No release needed: the batch's processQueue sweeps the expired commitment out of Q_0 first, finalizes the
+        // share, and the change executes (before the expiry ring this failed with PendingWithdrawals until a release).
+        (bool ok,) = _tryExecute(loosen, false);
+        assertTrue(ok, "expiry alone unblocks the queue");
+        assertEq(vault.pendingShares(), 0);
         assertEq(vault.inventoryTolerancePips(0), 100_000);
     }
 
@@ -191,7 +192,7 @@ contract GovernanceLivenessTest is VaultTestBase {
         vm.warp(eta - 1 days);
         uint256 cap = lens.exposureAvailable(vault, ISharedCommitmentVault.RiskScope.Vault, address(0), c0);
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c0, uint128(cap));
-        r.expiry = uint64(vm.getBlockTimestamp() + 30 days);
+        r.expiry = _hourAligned(vm.getBlockTimestamp() + 30 days);
         vm.prank(curator);
         auth.activateDirect(r);
 
@@ -300,7 +301,10 @@ contract GovernanceLivenessTest is VaultTestBase {
 
             vm.warp(eta);
             assertLe(lastExpiry, eta);
-            griefer.queue(1); // front-runs the admin in the same block
+            // The coalition tries to front-run the admin in the same block, but can no longer queue: the redemption
+            // sweeps the expired commitment out of Q_0 and is paid at once.
+            vm.expectRevert(bytes("not queued"));
+            griefer.queue(1);
             _assertExecutes(loosen);
             vm.revertToState(snap);
         }
@@ -402,7 +406,7 @@ contract GovernanceLivenessTest is VaultTestBase {
         vm.warp(eta - 20 days);
         uint256 quarter = vault.admissibleCapacity(c0) / 4;
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c0, uint128(quarter));
-        r.expiry = uint64(vm.getBlockTimestamp() + 10 days); // expires before eta
+        r.expiry = _hourAligned(vm.getBlockTimestamp() + 10 days); // expires before eta
         vm.prank(curator);
         auth.activateDirect(r);
         _commitAll(30 days); // the rest: expires after the window
@@ -497,18 +501,26 @@ contract GovernanceLivenessTest is VaultTestBase {
 
     /// @notice The original operation survives a lever only if the lever comes early enough: every commitment made
     ///         before it must expire inside the window, i.e. lever time + MAX_HORIZON <= eta + GRACE. With 32 / 7 / 30
-    ///         days that is 9 days after queuing. A full-horizon commitment made at that second, with the lever right
-    ///         after it, expires at eta + GRACE exactly and the operation executes at its last executable second; made
-    ///         one second later, it expires one second too late.
+    ///         days that is 9 days after queuing. Expiries are hour boundaries, so the bound is safe but not tight: the
+    ///         tight one is the last second before a full-horizon commitment can reach the first boundary after
+    ///         eta + GRACE (at most an hour later). Made at that second, with the lever right after it, the commitment
+    ///         expires inside the window and the operation executes at its last executable second; made one second
+    ///         later, it expires one boundary too late.
     function test_leverDeadline_isQueueTimePlusNineDays() public {
         _depositShares(lpA, 1000 ether);
         uint256 queuedAt = vm.getBlockTimestamp();
         uint256 eta = _queueGov(loosen);
         uint256 deadline = eta + gov.GRACE() - vault.MAX_HORIZON();
         assertEq(deadline, queuedAt + 9 days);
+        // Expiries are hour boundaries, so a commitment made at time t lasts at most until floor((t + 30 days) / 1 h).
+        // The first moment a commitment can outlast eta + GRACE is the first boundary after it, minus MAX_HORIZON:
+        // up to an hour after `deadline`, never before it, so queuedAt + 9 days stays a safe deadline for the lever.
+        uint256 firstBlocking = (eta + gov.GRACE()) / 1 hours * 1 hours + 1 hours - vault.MAX_HORIZON();
+        assertGe(firstBlocking, deadline);
+        assertLe(firstBlocking, deadline + 1 hours);
         for (uint256 late; late < 2; ++late) {
             uint256 snap = vm.snapshotState();
-            vm.warp(deadline + late);
+            vm.warp(firstBlocking - 1 + late);
             _commitAll(30 days);
             _redeem(lpA, 1000 ether, true);
             vm.prank(guardian);

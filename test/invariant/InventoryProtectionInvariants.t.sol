@@ -368,7 +368,7 @@ contract InventoryProtectionHandler is Test {
             currencyOut: out,
             maxOut: uint128(maxOut),
             minInPerOutX96: 1,
-            expiry: uint64(block.timestamp + hours_ * 1 hours),
+            expiry: uint64((block.timestamp + hours_ * 1 hours) / 1 hours * 1 hours), // hour boundary
             nonce: nonce++,
             deadline: uint64(block.timestamp + 1 hours)
         });

@@ -74,7 +74,7 @@ contract QueueGriefer {
             currencyOut: out,
             maxOut: uint128(vault.admissibleCapacity(out)),
             minInPerOutX96: uint160(FixedPoint96.Q96),
-            expiry: uint64(block.timestamp + horizon),
+            expiry: uint64((block.timestamp + horizon) / 1 hours * 1 hours), // hour boundary, as the vault requires
             nonce: nonce++,
             deadline: uint64(block.timestamp)
         });

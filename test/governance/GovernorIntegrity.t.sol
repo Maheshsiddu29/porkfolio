@@ -108,7 +108,7 @@ contract GovernorIntegrityTest is VaultTestBase {
     ///      whole-balance redemption reaches past free inventory.
     function _queueLpBehindCommitment(uint256 expiry) internal returns (uint256 rid) {
         ISharedCommitmentVault.AllocationRequest memory r = _request(keyA, c0, uint128(vault.admissibleCapacity(c0)));
-        r.expiry = uint64(expiry);
+        r.expiry = _hourAligned(expiry);
         vm.prank(curator);
         auth.activateDirect(r);
         (,,, rid) = _redeem(lp0, vault.sharesOf(lp0), true);

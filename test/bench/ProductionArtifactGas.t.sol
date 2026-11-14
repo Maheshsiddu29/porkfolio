@@ -633,7 +633,7 @@ contract ProductionArtifactGasTest is Test {
             currencyOut: out,
             maxOut: maxOut,
             minInPerOutX96: PRICE_1_1_X96,
-            expiry: uint64(block.timestamp + 1 days),
+            expiry: uint64((block.timestamp + 1 days) / 1 hours * 1 hours), // hour boundary, as the vault requires
             nonce: nextNonce++,
             deadline: uint64(block.timestamp + 1 hours)
         });
@@ -700,7 +700,7 @@ contract ProductionArtifactGasTest is Test {
             zeroForOne: out == key.currency1,
             maxOut: maxOut,
             minInPerOutX96: PRICE_1_1_X96,
-            expiry: uint64(block.timestamp + 1 days),
+            expiry: uint64((block.timestamp + 1 days) / 1 hours * 1 hours), // hour boundary, as the vault requires
             validAfter: uint64(block.timestamp),
             deadline: uint64(block.timestamp + 1 hours),
             nonce: nextNonce++
