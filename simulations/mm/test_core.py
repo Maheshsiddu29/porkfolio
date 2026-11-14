@@ -373,8 +373,16 @@ class BracketReference(unittest.TestCase):
             bracket_reference([a, a], 2_000)
         self.assertEqual(e.exception.name, "InsufficientSources")
         with self.assertRaises(Revert) as e:
-            bracket_reference([a, a], 200, sequencer=SequencerStatus(False, 0))
+            bracket_reference([a, a], 200, sequencer=SequencerStatus(False, 100))
         self.assertEqual(e.exception.name, "SequencerDown")
+        for since in (0, 201):
+            with self.assertRaises(Revert) as e:
+                bracket_reference([a, a], 200, sequencer=SequencerStatus(True, since))
+            self.assertEqual(e.exception.name, "SequencerUnusable")
+        with self.assertRaises(Revert) as e:
+            bracket_reference([a, a], 3_700, sequencer=SequencerStatus(True, 100), grace=3_600)  # exactly the grace
+        self.assertEqual(e.exception.name, "SequencerGracePeriod")
+        bracket_reference([a, a], 1_000, sequencer=SequencerStatus(True, 100), grace=899)  # one second past it
         with self.assertRaises(Revert) as e:
             bracket_reference([a, a], 200, sequencer=SequencerStatus(True, 150), grace=3_600)
         self.assertEqual(e.exception.name, "SequencerGracePeriod")

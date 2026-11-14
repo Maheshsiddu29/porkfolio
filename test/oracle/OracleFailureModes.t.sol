@@ -83,24 +83,55 @@ contract OracleFailureModesTest is Test {
     // Scenario 6: malformed sequencer answers
     // ------------------------------------------------------------------
 
-    /// @notice The sequencer feed must answer 0 (up) or 1 (down); anything else is unusable. A restart time in the
-    ///         future keeps the grace period running. An answer of "up since time 0" is accepted as up for decades:
-    ///         the adapter does not treat `startedAt == 0` as an invalid round, so the deployment must confirm the
-    ///         configured sequencer feed is initialized (Unichain's reported 1,793,291,075 on 2026-11-10).
-    function test_sequencerMalformedAnswers() public {
+    /// @notice The sequencer check, case by case, with the one-hour grace:
+    ///         - up since a valid time well past the grace: reads;
+    ///         - down: `SequencerUnavailable`;
+    ///         - uninitialized (`startedAt` 0, what Chainlink documents for an Arbitrum uptime contract before its
+    ///           first round): `FeedUnusable`, where the adapter used to read it as "up since 1970";
+    ///         - `startedAt` in the future: `FeedUnusable`;
+    ///         - recovered 10 s ago: `SequencerUnavailable`;
+    ///         - recovered exactly `sequencerGrace` seconds ago: still `SequencerUnavailable` (Chainlink's reference
+    ///           consumer refuses while `now - startedAt <= grace`); one second later it reads;
+    ///         - a status other than 0 or 1: `FeedUnusable`.
+    function test_sequencer_initializationAndGrace() public {
         PriceRiskAdapter a = _deploy(2, 0, 0);
-        int256[2] memory bad = [int256(2), -1];
-        for (uint256 k; k < 2; ++k) {
-            seq.setStatus(bad[k], T - 1_000_000);
-            vm.expectRevert(abi.encodeWithSelector(PriceRiskAdapter.FeedUnusable.selector, address(seq)));
-            a.currentReference();
-        }
-        seq.setStatus(0, T + 100);
-        vm.expectRevert(PriceRiskAdapter.SequencerUnavailable.selector);
+        bytes memory unusable = abi.encodeWithSelector(PriceRiskAdapter.FeedUnusable.selector, address(seq));
+        bytes memory unavailable = abi.encodeWithSelector(PriceRiskAdapter.SequencerUnavailable.selector);
+
+        seq.setStatus(0, T - 1_000_000);
+        assertEq(a.currentReference().liveSources, 2, "up");
+
+        seq.setStatus(1, T - 1_000_000);
+        vm.expectRevert(unavailable);
         a.currentReference();
 
         seq.setStatus(0, 0);
-        assertEq(a.currentReference().liveSources, 2, "startedAt = 0 reads as up since 1970");
+        vm.expectRevert(unusable);
+        a.currentReference();
+        seq.setStatus(1, 0);
+        vm.expectRevert(unusable);
+        a.currentReference();
+
+        seq.setStatus(0, T + 1);
+        vm.expectRevert(unusable);
+        a.currentReference();
+
+        seq.setStatus(0, T - 10);
+        vm.expectRevert(unavailable);
+        a.currentReference();
+
+        seq.setStatus(0, T - 3600);
+        vm.expectRevert(unavailable);
+        a.currentReference();
+        seq.setStatus(0, T - 3601);
+        assertEq(a.currentReference().liveSources, 2, "one second past the grace");
+
+        int256[2] memory bad = [int256(2), -1];
+        for (uint256 k; k < 2; ++k) {
+            seq.setStatus(bad[k], T - 1_000_000);
+            vm.expectRevert(unusable);
+            a.currentReference();
+        }
     }
 
     // ------------------------------------------------------------------

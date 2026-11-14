@@ -33,8 +33,12 @@ import {ReferenceBracket} from "./ReferenceBracket.sol";
 ///      rejects older timestamps); it can only choose when to submit, within the provider's own rules.
 ///
 ///      Sequencer. On an L2 a feed can look fresh while the sequencer has been down. If a sequencer uptime feed is
-///      configured, the read reverts while it reports down (answer 1) and for `sequencerGrace` seconds after it came
-///      back up.
+///      configured, the read reverts while it reports down (answer 1) and while no more than `sequencerGrace` seconds
+///      have passed since it came back up (`now - startedAt <= sequencerGrace`, the comparison of Chainlink's reference
+///      consumer). A status round with `startedAt` of zero (an uninitialized uptime contract, which Chainlink documents
+///      for Arbitrum) or in the future is malformed and reverts with `FeedUnusable`; it never reads as "up since 1970".
+///      Chainlink lists uptime feeds only for some networks and no longer adds new ones; whether a chain has a usable
+///      feed is a deployment fact, not something this contract can check.
 ///
 ///      Trust and calls. The adapter trusts the configured feeds for their answers and nothing else. It makes only
 ///      `staticcall`s, so neither a feed nor the adapter can change state or re-enter a caller. A feed can still make
@@ -107,10 +111,11 @@ contract PriceRiskAdapter is IMarketRiskAdapter {
 
     /// @notice Configuration rejected at deployment.
     error InvalidConfig();
-    /// @notice A leg reverted or returned an unusable answer (zero, negative, above 2^128, or a future timestamp).
+    /// @notice A feed reverted or returned an unusable answer: for a price leg zero, negative, above 2^128, or a zero
+    ///         or future timestamp; for the sequencer feed a status other than 0 or 1, or a zero or future `startedAt`.
     /// @param feed The leg.
     error FeedUnusable(address feed);
-    /// @notice The sequencer is down, or came back up less than `sequencerGrace` seconds ago.
+    /// @notice The sequencer is down, or came back up no more than `sequencerGrace` seconds ago.
     error SequencerUnavailable();
 
     /// @dev Reads each leg's decimals once and derives the decimal shifts. Reverts with `InvalidConfig` if a feed is
@@ -181,7 +186,8 @@ contract PriceRiskAdapter is IMarketRiskAdapter {
     function currentReference() external view override returns (Reading memory r) {
         if (address(sequencerFeed) != address(0)) {
             (, int256 status, uint256 since,) = _read(sequencerFeed, true);
-            if (status != 0 || block.timestamp < since + sequencerGrace) revert SequencerUnavailable();
+            // since <= now (checked by _read): no underflow.
+            if (status != 0 || block.timestamp - since <= sequencerGrace) revert SequencerUnavailable();
         }
         uint256 low;
         uint256 high = type(uint256).max;
@@ -259,8 +265,9 @@ contract PriceRiskAdapter is IMarketRiskAdapter {
     /// @dev `latestRoundData` through a staticcall that copies at most 160 bytes back, so a feed cannot force a large
     ///      return-data copy. The 4-byte calldata is written at the free-memory pointer and overwritten by the answer;
     ///      the pointer is not advanced because nothing else is allocated before the words are read. Price legs
-    ///      (`isStatus = false`) must answer in (0, 2^128) with `updatedAt <= now`; the sequencer feed
-    ///      (`isStatus = true`) must answer 0 or 1. Anything else reverts with `FeedUnusable`.
+    ///      (`isStatus = false`) must answer in (0, 2^128) with `0 < updatedAt <= now`; the sequencer feed
+    ///      (`isStatus = true`) must answer 0 or 1 with `0 < startedAt <= now`. Anything else reverts with
+    ///      `FeedUnusable`.
     function _read(IAggregatorV3 feed, bool isStatus)
         internal
         view
@@ -283,7 +290,9 @@ contract PriceRiskAdapter is IMarketRiskAdapter {
         // forge-lint: disable-next-line(unsafe-typecast) checked above.
         roundId = uint80(rid);
         if (isStatus) {
-            if (answer != 0 && answer != 1) revert FeedUnusable(address(feed));
+            if ((answer != 0 && answer != 1) || startedAt == 0 || startedAt > block.timestamp) {
+                revert FeedUnusable(address(feed));
+            }
         } else if (answer <= 0 || answer >= int256(1 << 128) || updatedAt > block.timestamp || updatedAt == 0) {
             revert FeedUnusable(address(feed));
         }

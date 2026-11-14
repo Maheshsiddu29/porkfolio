@@ -65,10 +65,10 @@ contract PriceRiskAdapterTest is Test {
         seq.setStatus(1, T - 10);
         vm.expectRevert(PriceRiskAdapter.SequencerUnavailable.selector);
         adapter.currentReference();
-        seq.setStatus(0, T - 3599);
+        seq.setStatus(0, T - 3600); // exactly the grace: still refused (now - startedAt <= grace)
         vm.expectRevert(PriceRiskAdapter.SequencerUnavailable.selector);
         adapter.currentReference();
-        seq.setStatus(0, T - 3600);
+        seq.setStatus(0, T - 3601);
         adapter.currentReference();
     }
 

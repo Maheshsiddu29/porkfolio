@@ -521,12 +521,16 @@ def bracket_reference(sources: list[BracketSource], now: int, min_sources: int =
     both d = 50 bps: brackets [2,038.15, 2,058.63] and [2,040.06, 2,060.56]; L = 2,040.06, H = 2,058.63, M = 2,049.35,
     u = 4,553 pips (45.5 bps; 4,532 measured from M alone). Two sources 1.1% apart with d = 50 bps each: refused.
 
-    Refusals: SequencerDown, SequencerGracePeriod, ReferenceUnavailable (no answer or a future timestamp),
+    Refusals: SequencerUnusable (restart time 0 or in the future), SequencerDown, SequencerGracePeriod (up for no more
+    than `grace` seconds), ReferenceUnavailable (no answer or a future timestamp),
     InsufficientSources (fewer than `min_sources` fresh), ReferenceDivergence (empty intersection)."""
     if sequencer is not None:
+        # A status round with no restart time (uninitialized) or one in the future is malformed (G04).
+        if sequencer.since == 0 or sequencer.since > now:
+            raise Revert("SequencerUnusable")
         if not sequencer.up:
             raise Revert("SequencerDown")
-        if now - sequencer.since < grace:
+        if now - sequencer.since <= grace:
             raise Revert("SequencerGracePeriod")
     lo = hi = None
     n = 0
