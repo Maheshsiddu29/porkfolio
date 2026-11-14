@@ -1,7 +1,9 @@
 # C02: Time-bound commitment ledger (room-aware admission and the expiry ring)
 
-**Status: implemented locally, awaiting owner review.** §1–§9 are the plan as committed before any production change
-(`03aa331`) and stay as written. Results, measured numbers and every deviation from the plan are in §10.
+**Status: implemented locally, closeout corrections applied, awaiting owner review.** §1–§9 are the plan as committed
+before any production change (`03aa331`) and stay as written. Results, measured numbers and every deviation from the
+plan are in §10. §11 records the corrections made after the owner's review; where it differs from §10 (the adapter-mode
+row of §10.2, the `queuedOk` figures of §10.6, the sizes and test counts of §10.8 and §10.11), §11 is current.
 
 Basis:
 - `docs/architecture/G05_V2_ARCHITECTURE.md` (the ADR) is the specification, in particular §3.2–§3.6 (reservation
@@ -651,3 +653,210 @@ Review of C02 (`03aa331` … this commit). Decisions for the owner: §9.1 (refus
 asset has no target), §9.2 (dedicated `ExpiryNotAligned` error and a sweep event, both cost bytes and an ABI change),
 §9.3 (a separate `sweep` entry: not needed, `processQueue(0)` serves), whether to recalibrate the `queuedOk` gate, and
 the C03 byte budget. C03 does not start before that review.
+
+## 11. Closeout corrections
+
+Two items from the owner's review of `03aa331` … `822bde1`, plus the coverage margin left open in §10.6. Baseline for
+every comparison in this section: `822bde1`. The ring is unchanged, so the 10,000-run differential campaign (§10.5) was
+not repeated.
+
+### 11.1 Commits
+
+| Commit | Content |
+|---|---|
+| `5cc1932` | adapter-mode admission refusal (§11.2); reader and lens; test migrations |
+| `b7b1846` | G02 liveness under configured targets (§11.3); `QueueGriefer` additions; special-case fixtures marked |
+| `730671c` | vault handler: `queueBehindCommitment` within exposure headroom (§11.4) |
+| this commit | this section |
+
+### 11.2 Oracle-mode admission (owner item §9.1: refuse)
+
+**Before** (`822bde1`, reproduced by the then-existing `test_adapterMode_zeroTarget_admittedButNeverFillable`): with an
+adapter installed and τ₀ = 0, a reservation of 600,000 asset0 was admitted, and every fill of it was refused with
+`InventoryBoundsNotConfigured` by `_floorForFill`. The capacity stayed reserved, counted in Q₀, in the curator and hook
+totals and against admission, until expiry or release, without any possible fill.
+
+**Correction** (`5cc1932`), one branch in `_admissible`, which `reserveFor` calls after its sweep:
+
+```solidity
+        if (target != 0) {
+            ... // room rule, unchanged
+        } else if (address(riskAdapter) != address(0)) {
+            revert InventoryBoundsNotConfigured();
+        }
+```
+
+The error is the existing one fills of such an asset already raise; its NatSpec now names allocations as well. No new
+error, event or function: the vault ABI is identical to `822bde1`. `VaultStateReader.admissibleCapacity` (and the
+lens) returns 0 for the same case, so off-chain callers see nothing admissible. A refusal reverts the whole call,
+including the sweep `reserveFor` runs before admission and the module's nonce bit.
+
+**After**:
+
+| Case | Behaviour | Evidence (`RoomAwareAdmission.t.sol` unless noted) |
+|---|---|---|
+| adapter, τ = 0, either asset (target on the other one only) | refused, `InventoryBoundsNotConfigured`, for 1 unit and for 600,000; reader and lens 0; the other asset admits its room and fills | `test_adapterMode_zeroTarget_refusedAtAdmission_bothAssets` |
+| refused attempt | no change to Q, allocation counter, curator and hook totals, ring header, the request's ring slot or the nonce bit | `_expectRefusedNoState`, used by the three adapter tests |
+| refused attempt over an expired, unswept bucket | stored Q unchanged afterwards: the sweep is rolled back | `test_adapterMode_zeroTarget_refusalRollsBackTheSweep_staticRuleUnchanged` |
+| adapter, τ ≠ 0, both assets, different targets | room left after an earlier reservation admitted exactly; +1 refused (`InsufficientBacking(left + 1, left)`), no state change; admitted amount fills to the last unit at the adapter's price | `test_adapterMode_targetsSet_exactBoundaryBothAssets` |
+| adapter, random τ (zero one time in four), κ, earlier reservation, asset | τ = 0: nothing admissible, refused; τ ≠ 0: reader limit = independent formula, that amount admitted and filled in full | `testFuzz_adapterMode_everythingAdmittedIsFillable` (1,000 runs default, 10,000 ci) |
+| static, τ = 0 | unchanged: N − Q − R − D, the whole asset reservable; also after removing the adapter | `test_zeroTargetOrFullTolerance_noRoomRule`, `..._staticRuleUnchanged`, `testFuzz_limitIsExact…` |
+| capacity admitted with a target, then the target cleared (owner) | fills refused at fill time, as before | `OracleRiskBoundary.test_adapterMode_requiresInventoryTarget` |
+| adapter removed, asset without a target | refused while the adapter is installed; reservable and tradable without a floor after removal (DELAY, not LONG_DELAY: G04 finding, unchanged) | `OracleFailureExecution.test_adapterRemoval_assetWithoutTarget_losesInventoryFloor` |
+
+Not covered by admission, by design: capacity admitted before the adapter is installed, or before the owner clears a
+target, stays reserved and unfillable until it expires or is released. That is a configuration change after admission,
+the same class as CE-2 and guardian tightening.
+
+Test migrations in `5cc1932`: `_suspendInventoryFloor` (`VaultTestBase`) and the two `_allocateWithoutFloor` helpers
+(inventory and oracle campaigns) lifted the floor for one admission by zeroing the targets (DV-5); they now set both
+tolerances to 10⁶ (L = 0) and keep the targets, which admits the same amount in static mode and is still accepted in
+adapter mode. `_assertEquations`' independent admission formula has the new case. Three tests that created an adapter-mode
+zero-target reservation now expect the refusal at admission (above); `GovernanceLiveness.test_oracleFailure_…` gives
+asset0 a target with κ = 100%, which keeps it unfloored.
+
+### 11.3 Governance liveness under configured inventory targets
+
+**Fixtures changed in C02**, reviewed:
+
+| Fixture | C02 change | Decision |
+|---|---|---|
+| `GovernanceLiveness.t.sol` | τ₀ = 0 (static mode) | kept as the explicit unfloored special case, now marked as such; G02's worst case |
+| `GovernanceLivenessInvariants.t.sol` | τ₀ = 0, static; half the batches release nothing | kept, marked the same way |
+| `VaultGovernor.t.sol`, `GovernorIntegrity.t.sol` | targets kept (κ = 5%); lp0 redeems its whole balance | kept: these test the governor's queue check, which needs a queue; with a 5% room only a redemption of nearly all shares queues, as §11.3 predicts |
+| `GovernanceActors.sol` | expiries on the hour | `commitAll` now also caps at the curator's remaining ceiling (no change under the G02 fixture's unlimited ceilings); `redeem` and `rotateWithCapital` added |
+
+**New scenario**, `test/governance/GovernanceLivenessConfigured.t.sol` (`b7b1846`): targets on both assets at the
+seeded holding per share (τ = 10¹⁸) and the defaults of `script/DeploySystem.s.sol` with seed 1,000,000: adapter mode,
+κ = 1%, buffer floor 100,000, exposure caps 50% on the vault, both hooks and both curators, curator ceilings 200,000,
+flow caps 400,000. Governor delays as in G02 (3 / 32 / 7 days). The change under test widens κ to 2% (LONG_DELAY).
+
+| Requirement | Result | Test |
+|---|---|---|
+| 1. admitted while sellable | lpA brings N to 10,000,000; room 100,000 = κN; committed; Q = N − L exactly | `test_configured_admittedWhileSellable_exitsShrinkRoom_admissionConstrained` |
+| 2. LP exits reduce future sellable capacity | lpA's full exit is paid at once; room falls to 10,000 under the 100,000 reservation (CE-2) | same |
+| 3. later reservations constrained | admissible 0; one unit refused `InsufficientBacking(1, 0)`; other LPs still exit at once; at expiry the room is admissible again with no release | same |
+| 4. rotation / blocking attempts | G02's one-share and curator-LP rotation constructions fail ("not queued"); the change executes at eta with the commitment live | `test_configured_g02ConstructionsRefused_changeExecutesWhileCommitted` |
+| | a coalition with 99× the vault and both curators at their ceilings (Q = 400,000) cannot hold 1,000,000 of honest backing; also fuzzed over capital and commitment sizes | `test_configured_honestBackingAboveCeilings_cannotBeHeld`, `testFuzz_configured_noQueueWhileOutsideBackingCoversCeilings` |
+| | with honest backing reduced to 50,000: depositing 10,000,000, committing the room (100,500) and redeeming queues 50,500 of the coalition's own shares; rotating without fresh capital reverts; rotating with it every 9 days keeps pendingShares above zero and the change is refused at eta | `test_configured_heldOnlyWithFreshCapital_leverAndExpiryRecoverWithoutRelease` |
+| 5. recovery after new commitments stop | guardian sets the buffer floor to the maximum; the admin cancels and re-queues (fresh LONG_DELAY ≥ MAX_HORIZON after the last commitment); further rotations revert | same |
+| 6. finalization after expired capacity is recognized | at the new eta, live Q = 0 while stored Q > 0; the batch's `processQueue` sweeps, finalizes every entry, the change executes | same |
+| 7. no per-allocation release | the batch contains no `release`; the last allocation is still unreleased afterwards | same |
+
+**Findings.**
+
+- **F-5 (exact queuing condition).** `_deliverableShares` pays at most floor((N_a − Q_a)·S/N_a) shares in each asset, so a
+  redemption of s shares queues iff, for some asset, Q_a > N_a − s·N_a/S: the live commitments exceed the backing of
+  the shares not being redeemed. The buffer floor plays no part in exits.
+- **F-6 (G02's constructions are no longer reachable under configured targets).** Right after any admission Q_a ≤
+  N_a − L_a. With τ_a at the holding per share, L_a ≈ (1 − κ)·N_a, so about (1 − κ) of all shares can exit at once
+  and a single share is always paid. G02's "one share holds the change" and the curator-LP rotation need the committed
+  asset without a target (the static special case) or exits after the admission.
+- **F-7 (bound by curator ceilings).** Q_a ≤ Σ curatorReserved ≤ Σ ceilings (the per-curator totals are lazy, so they
+  are at least Q_a). By F-5, backing outside the redeeming set that is at least the sum of the curator ceilings of that
+  asset can never be held, whatever capital the coalition brings. Under the deployment defaults with one curator that
+  is 20% of the seed per asset.
+- **F-8 (what remains possible).** Below that bound the queue can still be held, and indefinitely: holders of more than
+  1 − Q_a/N_a of the shares exit after the admission, and each rotation repeats it with fresh capital, about Q_a/κ
+  deposited and redeemed in one transaction (10,000,000 to hold 50,000 of honest backing at κ = 1%; the coalition's
+  own 50,500 queued shares are locked until the next rotation finalizes them). The capital is transient, so a flash
+  loan could supply it; this was not tested against any lending protocol.
+
+**The narrower liveness property**, replacing G02 L-2's "commit everything, queue one share" premise for vaults with
+targets on every committed asset: (a) a redemption is held only while F-5's condition holds, so honest backing above
+the sum of the curator ceilings is never held (F-7); (b) after the guardian stops new commitments, every commitment ends
+within MAX_HORIZON and the admin's batch (`processQueue`, `execute`) finalizes the queue and executes without a
+release (unchanged from §10.7). Assumptions: the guardian applies a lever; the change is queued, or re-queued, at or
+after the lever, so that its eta is at least MAX_HORIZON after the last commitment; ceilings are set by the owner's
+review; τ is near the holding per share (a lower τ raises the room, N − τ(1 − κ)S, and with it the capital a single
+admission can withhold).
+
+### 11.4 Coverage (non-vacuity)
+
+Diagnosis at `822bde1`'s handler, vault campaign, 64 seeds, base 13 (temporary counters, not committed):
+`queueBehindCommitment` was called 285 times. 70 calls found nothing admissible; 104 were refused at allocation (39
+`NotAuthModule`: module retired by lifecycle actions; 30 `ExposureCapExceeded`; 24 `DirectionHalted`; the rest backing
+or ceiling); 74 picked an LP with no shares; 57 committed, of which 13 queued nothing. The retired module and the halted
+direction are real vault states and were left alone.
+
+Change (`730671c`): the action commits the admission limit capped by the hook, curator and vault exposure headroom and
+the curator's remaining ceiling, and redeems the first LP from `lpSeed` on that still holds shares. A second variant,
+in which further LPs also exited until one queued, brought `queuedOk` to 0.14–0.33 but pushed `allocationsOk` to 0.11 at
+base 101 (gate 0.20) and moved `expirySweeps` and `roomRefusals` toward their gates. It was rejected. The exit path it
+modelled is covered deterministically in §11.3.
+
+`queuedOk`, vault campaign, zero-run fraction / successful queue events in 64 runs, depth 128 (`coverage.py --campaign
+vault --seed-base b`):
+
+| Seed base | `822bde1` | `730671c` |
+|---|---|---|
+| 13 | 0.33 / 110 | 0.34 / 126 |
+| 101 | 0.41 / 105 | 0.36 / 126 |
+| 4001 | 0.36 / 86 | 0.23 / 120 |
+| 65537 | 0.36 / 81 | 0.28 / 127 |
+
+The gate stays at 0.50. The worst fraction fell from 0.41 to 0.36, about 2.3 standard deviations below the gate
+(binomial, 64 runs), still short of the four the G01 method asks for. The gate was not changed. The other vault
+counters stay inside their §10.6 ranges (`allocationsOk` 0.02–0.05, `swapsOk` 0.14–0.19, `finalizedOk` 0.56–0.61,
+`claimsOk` 0.38–0.53, `roomRefusals` 0.86–0.89).
+
+Full gate, `python3 test/invariant/coverage.py` (four campaigns, 64 seeds, depth 128, base 13), final tree: every gate
+passed, 2 min 18 s. Vault `queuedOk` 0.34 (126 events), `finalizedOk` 0.58, `claimsOk` 0.53; liveness `queuedOk` 0.33
+(95), `restrictedWithoutRelease` 0.70, `longBlocked` 0.80.
+
+### 11.5 Size and gas
+
+| Measure (production profile, `test/bench/run.sh`) | `822bde1` | final | Δ |
+|---|---|---|---|
+| `SharedCommitmentVault` runtime | 21,449 | **21,477** | +28 |
+| `SharedCommitmentVault` init code | 22,093 | 22,121 | +28 |
+| margin under EIP-170 | 3,127 | **3,099** | policy ≥ 2,048: pass |
+| headroom before the size policy (22,528) | 1,079 | **1,051** | −28 |
+| `VaultLens` runtime | 14,377 | 14,414 | +37 |
+| hooks, authorizer, governor, `PriceRiskAdapter` | — | deployed-bytecode sha256 identical | 0 |
+
+`VaultLens` at `822bde1` measures 14,377 B with this command; §10.8 recorded 14,344 B.
+
+Gas (`test/bench/run.sh` on the final tree; the same `forge test --match-path test/bench/ProductionArtifactGas.t.sol
+--isolate` on a `git archive` of `822bde1`): 58 of 76 rows identical. Every `reserveFor` row is +2,147 (allocate first /
+steady, activate signed EOA / ERC-1271, the four ring reserve rows). The bench fixture is static mode without a
+target, so `_admissible` now reads the adapter slot (cold `SLOAD`, 2,100 gas). With a target set, the deployment case,
+the branch is not reached. Deploy vault +5,977; deploy lens +7,992; `initialDeposit` −1. Swap, redeem, queue, release,
+claim and governor rows are unchanged.
+
+ABI of the vault identical to `822bde1`. Storage layout identical (31 entries; labels, slots, offsets and types, AST
+ids ignored). `forge lint src`: 17 block-timestamp, 2 incorrect-shift, 16 unsafe-typecast, identical to `822bde1`.
+
+### 11.6 Validation
+
+| Check | Command | Result |
+|---|---|---|
+| format | `forge fmt --check` | clean |
+| targeted admission | `forge test --match-contract RoomAwareAdmissionTest` | 11 / 11 (two fuzz tests at 1,000 runs) |
+| targeted G02 | `--match-contract "GovernanceLiveness(Configured)?Test\|VaultGovernorTest\|GovernorIntegrityTest"` | 5 + 15 + 22 + 15 pass |
+| oracle suites touched | `--match-contract "OracleRiskBoundaryTest\|OracleFailureExecutionTest"` | 14 + 7 pass |
+| ring invariants, final handler | `FOUNDRY_PROFILE=ci forge test --match-contract "^VaultInvariantsTest$"` | 39 / 39 (incl. `invariant_ringMatchesGhostModel`, `invariant_liveBucketsResident`, `invariant_commitmentLedgerRules`; 128 × 128) |
+| default suite | `forge test` | **740 passed, 0 failed, 8 skipped** (fork tests, no RPC); C02 ended at 732 |
+| CI security profile | `test/bench/security.sh` | exit 0, 10 min 12 s: size gate ok; `ProductionBuilds` 3/3; `ProductionArtifactSecurity` 25/25; suite **740 / 0 / 8** at 10,000 fuzz runs and 128 × 128 invariants. Run before `730671c`'s final handler (the rejected variant of §11.4 was in place); the vault invariant suite was re-run under the CI profile with the final handler (row above) |
+| coverage gate | `python3 test/invariant/coverage.py` | every gate passed (§11.4) |
+| sizes, gas | `test/bench/run.sh` | exit 0 (§11.5) |
+| intermediate commit | `forge test` on a `git archive` of `5cc1932` | 735 passed, 0 failed, 8 skipped (the five tests of `b7b1846` not yet present) |
+
+### 11.7 Residual risks and what was not run
+
+- **F-8 stands.** Under configured targets a coalition with transient capital of about Q/κ per rotation, and
+  commitments larger than the honest backing left, can still hold the queue, and with it LONG_DELAY changes, until the
+  guardian acts. A per-vault TVL or deposit cap (C03's C-1), or curator ceilings kept below expected honest backing,
+  would bound it. Neither is implemented here.
+- **Configuration after admission.** Capacity admitted before an adapter is installed or a target is cleared stays
+  unfillable until expiry or release (§11.2).
+- **Coverage margin.** `queuedOk` improved but is still about 2.3 σ from its gate (§11.4).
+- **Gas.** +2,147 per `reserveFor` in static mode without a target.
+- **Bytes.** 1,051 B left before the size policy for C03 (G05 prototype F + T: 777 B).
+- Not run: the 10,000-run ring differential (ring unchanged), the full historical deep suite, mutation testing, Slither,
+  fork tests (no RPC), any broadcast. No independent review; nothing formally verified.
+
+### 11.8 Status
+
+C02: **PASS** (local), subject to owner review. Next action requiring approval: review of `5cc1932` … this commit, the
+F-8 decision (accept with the guardian lever as the remedy, or bound it in C03), and the C03 byte budget.
