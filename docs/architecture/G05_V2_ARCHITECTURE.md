@@ -83,9 +83,9 @@ Sources read in full or in the parts cited: `SharedCommitmentVault.sol`, `IShare
    VaultLens (stateless reads through extsload)          PoolManager (canonical v4; holds every claim)
 ```
 
-No arrow leaves the vault towards the escrow except `deposit`'s `realize()` call; no LP exit, no `exchange` and no
-`release` calls the escrow, the authorizer or the adapter-free paths' modules. The adapter is read only by `exchange`
-and by core-mode hooks, as today.
+No arrow leaves the vault towards the escrow except `deposit`'s `realize()` call: no LP exit, no `exchange` and no
+`release` calls the escrow or the authorizer. The adapter is read only by `exchange` and by core-mode hooks, as
+today.
 
 ## 2. Contract responsibilities and interfaces
 
@@ -144,7 +144,7 @@ alignment check on `expiry`).
 
 | Call | Caller | Effect |
 |---|---|---|
-| `vault.realizeFee(Currency a, uint256 x)` | only `vault.feeEscrow()` | `B_a += x`, pulls exactly `x` claims of `a` from the escrow; mints no shares; lock-free |
+| `vault.realizeFee(Currency a, uint256 x)` | only `vault.feeEscrow()` | `B_a += x`, pulls exactly `x` claims of `a` from the escrow (the escrow first sets an ERC-6909 allowance of exactly `x`); mints no shares; lock-free; no PoolManager unlock needed |
 | `escrow.realize()` | anyone; `vault.deposit` before pricing | moves fees earned and not yet realized into the vault (§5.4) |
 | `escrow.post(allocationId, payer, maxRate)` | only `vault.authModule()` | records the bond for an allocation created in the same transaction (§5.2) |
 | `vault.getCurator`, `vault.extsload` | escrow, lens, anyone | reads |
@@ -795,8 +795,8 @@ Method: each candidate change applied to a scratch copy of `src/` by `docs/propo
 with the production profile (vault at 200 runs, via-IR, `bytecode_hash = none`), `forge build --sizes
 src/SharedCommitmentVault.sol`. `src/` in the repository was never modified. The combined A + C + F + X prototype is
 `docs/proposals/g05-v2-vault-size-probe.patch` (applies to `5701e9c`). The code is the smallest that exercises each
-change, without final NatSpec-free details such as events and error names; the real implementation will differ, most
-likely upward.
+change, without the events, custom errors and extra checks a final implementation may add, so the real implementation
+will differ, most likely upward.
 
 | Variant | Runtime B | Under EIP-170 | Δ vs today |
 |---|---|---|---|
@@ -1001,3 +1001,105 @@ Each milestone stops for owner review. None starts before the owner accepts this
 | **C03** bonds | `BondEscrow`, `CommitmentAuthorizer`, vault `realizeFee` and `deposit` → `realize`, governor target extension | V-11 … V-16 on the real contracts; differential test against `BondLedgerModel`; reentrancy tests of `realizeFee` during deposit and payouts |
 | **C04** integration | Hook C test (§2.4); interface documentation for hooks, curators, payers; C-1 TVL cap if approved | B-G5-3; bytecode hash unchanged by Hook C |
 | **C05** validation | ci and deep campaigns, coverage gate, mutation of all new code, benchmarks regenerated, deployment scripts and gates | B-G5-4 … B-G5-6; report for B-G5-7 |
+
+## 12. Financial invariants and acceptance tests
+
+### 12.1 Invariants
+
+"Evidence now" names what exists at the end of G05; "required" is what the implementing milestone must add.
+Statements are per asset `a` and hold after every external call unless stated.
+
+| Id | Invariant | Evidence now | Required (milestone) |
+|---|---|---|---|
+| **Per-asset solvency** | | | |
+| V-1 | `PM.balanceOf(vault, a) = B_a + X_a`, `X_a ≥ 0`, `X_a` changes only by direct transfers; every change of `B_a` is paired with an equal claim movement, `realizeFee` included | `invariant_backingEqualsRealClaims` (today's paths) | add `realizeFee` and the escrow to the handler (C03) |
+| V-2 | `Q_a + W_a ≤ B_a`, with `Q_a` the stored, swept total | `invariant_reservedIsExactAndBacked` (lazy `Q`) | re-state for the ring (C02) |
+| **No double allocation** | | | |
+| V-3 | `Q^live_a ≤ Q_a ≤ Q^lazy_a`, and `liveReserved(a) = Q^live_a` exactly | `testFuzz_ringMatchesReference` (model) | ghost-ledger invariant on the real vault (C02) |
+| V-4 | `Σ_live r_j = Q^live_a`; each allocation closes once; consumption ≤ remainder; a ring slot is never subtracted twice (tags, eviction) | `invariant_closedIsTerminal`; ring model eviction tests | the same with sweeps, evictions and closes interleaved (C02) |
+| V-5 | right after every admission: `Q_a ≤ N_a − R_a − D_a`, and `Q_a ≤ N_a − L_a` when `τ_a ≠ 0` | `test_roomAwareAdmission_refusesCE1` (arithmetic) | ghost check at each `reserveFor` in the campaign; boundary `q = room − Q` admitted, `+1` refused (C02) |
+| **Exclusive commitments** | | | |
+| V-6 | a fill lowers only its own allocation's remainder; no exit, claim, other fill or configuration change lowers any remainder | `test_twoHooksOneAsset_noDoubleCounting` | per-allocation ghost remainders in the campaign; Hook C test (C02, C04) |
+| **Expiration and release** | | | |
+| V-7 | no fill at `now ≥ expiry`; `Q^live` excludes an allocation from its expiry second with no call; the stored `Q` excludes it after sweeps; a release after the sweep leaves `Q` unchanged; per-scope totals ≥ their live part | ring model boundary tests | exact-second, gap (0, 1, 32, 33, K − 1, K, K + 1 buckets) and wrap tests on the vault (C02) |
+| V-8 | if new admissions stop, `Q_a = 0` after `MAX_HORIZON` and at most one sweeping call once `now ≥ maxBucket`; the queue is then deliverable without any `release` | argued (§7.4) | re-prove G02 L-2 with the ring; liveness campaign (C02) |
+| **Withdrawal priority** | | | |
+| V-9 | right after admission `F_a ≥ R_a + D_a`; FIFO; `W` outside `N`; exits, queue processing, cancel and claim call no adapter, escrow or authorizer and are not stopped by pause, halts or caps | G03 G-5, G-6, G-11; `invariant_lpPathsIndependentOfAdapter` | extend the independence invariant to a reverting escrow and authorizer (C03) |
+| V-10 | a fill never lowers deliverable shares (G-12); an exit may lower the room (CE-2, disclosed) | `testFuzz_exchangeNeverReducesDeliverableShares`; `testFuzz_freeInventoryExit_shrinksRoomBelowReserved` | keep both (C02) |
+| **Bond escrow solvency** | | | |
+| V-11 | `escrow + realized = refunds owed + protocol owed + Σ_open Y + settled charges` and `realized − settled ≤ ⌊Agg/1e18⌋ ≤ Σ_open Y`, per asset | `testFuzz_aggregateIsExactAndEscrowSolvent` (model) | invariant on the real escrow with the vault (C03) |
+| V-12 | `charge_j ≤ Y_j`; `refund_j = Y_j − charge_j`; settle once; `charge_j = ⌈max(I_j, I_min)/1e18⌉` on the synced remainder | model fuzz; `test_lazySync_overchargeIsExact` | differential test against `BondLedgerModel` (C03) |
+| V-13 | no escrow claim is ever in `B_a`; admission reads no escrow state; a bond larger than `N_a` adds no capacity | `test_bondIsNeverBacking` (G03 model) | on the real contracts (C03) |
+| **LP fee attribution** | | | |
+| V-14 | LP fees enter `N_a` only through `realizeFee` and mint no shares; a deposit is priced after realization (JIT gain ≤ 1 raw unit); an exit before realization forfeits exactly its pro-rata part of `U_a` | `test_jitDeposit_buysNoPastFees`, `test_exitBeforeRealization_forfeitsProRata` | on the real contracts; mutation: drop the `realize` call in `deposit` must be killed (C03) |
+| V-15 | `Agg_a = Σ_open I_j` exactly; realization frequency changes no total; `target_a` never decreases | `testFuzz_realizationFrequencyIsIrrelevant` | differential (C03) |
+| V-16 | a reservation's `ρ` never changes after creation and is ≤ its signed `maxRate` | — | unit tests (C03) |
+| **Oracle-dependent execution** | | | |
+| V-17 | G04 O-1 … O-8 and G04 §7 hold unchanged; admission, posting, sync, settlement and realization read no price | G04 suite | re-run G04's campaigns on the V2 build (C05) |
+| **External-yield custody** | | | |
+| V-18 | no V2 contract holds, values or calls an ERC-4626; `B_a` counts only PoolManager claims | by construction (Model A) | a test that no V2 contract has a strategy address (C03); Model B invariants are in design note §3 if ever adopted |
+| **Rounding and conservation** | | | |
+| V-19 | payouts down, deposits up, `D` up, caps down (unchanged); bond up, charge up, aggregate down, protocol down on cumulative totals; `Σ bonds = LP fees + protocol fees + refunds` exactly after settlement | G03 `LpRounding`; bond model end-of-schedule identities | the same on the real escrow (C03) |
+| **Authority** | | | |
+| V-20 | no role moves funds outside §7.1; the guardian never loosens; `realizeFee` only from `feeEscrow`; `post` only from `authModule()`; escrow setters only from the vault owner | `Roles.t.sol`, `GovernorIntegrity.t.sol` (today) | role matrix including escrow and authorizer (C03) |
+
+### 12.2 Boundary cases the implementation tests must include
+
+- Expiry: misaligned (refused); `≤ now` (refused); exactly `now + 30 d` on a boundary (bucket `c + K`); a fill at
+  `expiry − 1` (accepted) and at `expiry` (refused).
+- Sweep gaps of 0, 1, 32, 33, `K − 1`, `K`, `K + 1` buckets; `now = maxBucket·δ` exactly; the deployment bucket.
+- Slot reuse: buckets `b` and `b + K`; eviction of an unswept bucket; close before a sweep, after a sweep, after an
+  eviction.
+- Admission at `q = room − Q` and `+1`; `τ_a = 0` in static mode; adapter mode with `τ_a = 0` (fills refused); `P > 0`
+  (it is inside `S` for `L` and drives `D`).
+- Bonds: `rate = 0`; `T_min` longer than the duration; a one-bucket reservation; `A = 2^127 − 1` with the rate cap;
+  settle at `t_1` exactly; close and settle in one block; sync after expiry; a curator cancel never synced.
+- Realization: nothing earned; behind the walk cap (deposit reverts with `EscrowBehind`); `feeEscrow` unset; `π = 0`
+  and `π` at its cap; `realizeFee` at `MAX_AMOUNT − B`.
+- Refunds to a recipient that refuses the token; claiming to another address.
+- Reentrancy: `realizeFee` from inside a deposit's `realize` call and from inside a payout's token transfer.
+
+### 12.3 Counterexamples and conflicts
+
+| Id | Statement | Evidence | Status in V2 |
+|---|---|---|---|
+| CE-1 | admission ignored the floor | `test_admissionIgnoresInventoryFloor` | **removed** by room-aware admission; the test must flip to a refusal in C02 |
+| CE-2 | LP exits shrink the room under existing reservations | G03 test; `testFuzz_freeInventoryExit_shrinksRoomBelowReserved` | **remains** (§3.3, PROVEN unavoidable with exits on `F` and the floor) |
+| CE-3 … CE-5 | slice rounding, zero slices, fixed receivers | G03 | unchanged |
+| CE-O8 | an unexecutable reservation withholds inventory during an outage | G04 | unchanged while live; at expiry it now leaves `Q` without a call |
+| CE-G5-1 | a pro-rata per-fill cap on shrunken room is not stable (25 → 16) | `test_proRataFillCap_isNotStable` | why V2 shares room first come, first served |
+| CE-G5-2 | keeping reservations sellable through exits holds back `≈ 1/κ` times as many shares (50% vs 97.5% exitable) | `test_hardExecutableRule_costsOneOverKappa` | why G-R4 is not offered |
+| CE-G5-3 | a late sync charges `x·ρ·Δt` more | `test_lazySync_overchargeIsExact` | accepted, payer-controlled |
+| CE-G5-4 | an exit before realization forfeits its part of `U_a` | `test_exitBeforeRealization_forfeitsProRata` | accepted, bounded |
+| CE-G5-5 | a capped sweep leaves `Q` above `Q^live` | `test_readerCap_isConservative` | accepted, conservative |
+| CE-G5-6 | a realization raises `N_1` and so moves core-mode hook quotes; anyone can choose the moment | ARGUED | accepted: the amount is earned fees, not attacker-sized; bounded by `U_a` |
+| CE-G5-7 | replacing the escrow with open bonds strands their LP fees | ARGUED | procedure (§7.5) |
+| CE-G5-8 | flow caps can make a reservation impossible to fill in full before expiry | ARGUED | disclosed; DEFERRED-7 |
+| CE-G5-9 | without a byte reclaim the V2 vault exceeds the policy (A + C + F: 132 B) or EIP-170 (A + B + C: −8 B) | §8.1 | V2-1 |
+
+## 13. Validation of G05
+
+### 13.1 Commands and results
+
+| Command | Result |
+|---|---|
+| `git status --short --branch`; `git log`; `git merge-base --is-ancestor 4dbe6b9 main`; same for the G04 and G02 tips | clean except `?? AGENTS.md`; G02, G03 and G04 are in `main` (`5701e9c`) |
+| `forge build --sizes` at `5701e9c` | vault 22,440 B (2,136 B under EIP-170); hooks 14,341 / 14,601; adapter 5,581; governor 4,152; authorizer 7,409; lens 8,902 |
+| `forge test --match-path "test/model/*.t.sol"` | 36 passed: ring 8, conflicts 4, bond ledger 7 (new); reservation-bond 9 and idle-yield 8 (G03, unchanged) |
+| `forge test --match-test test_gas_operations -vv` | §8.2 figures |
+| `forge test --match-test test_schedulesExerciseEveryOperation --match-path test/model/BondLedgerModel.t.sol -vv` | §5.4 counts |
+| size probe: scratch copy of `src/` + `g05-vault-size-probe.py <flags>` + `forge build --sizes src/SharedCommitmentVault.sol`, for base, A, B, C, CS, E, F, G, T, X and the combinations in §8.1, and base / A + C + F at `optimizer_runs = 1` | §8.1; the base variant reproduces 22,440 B |
+| `git apply --check docs/proposals/g05-v2-vault-size-probe.patch` at `5701e9c` | applies |
+| `forge fmt --check` | clean |
+| `forge test` (default profile) | **688 passed, 0 failed, 8 skipped** (fork tests without an RPC), 69 suites; G04 ended at 669, +19 new model tests |
+| `git diff 5701e9c -- src` | empty: no production contract, ABI, storage layout or bytecode changed |
+
+Fuzz runs: the default profile (1,000 runs, seed `0x5eed`). The model suites were not run at the ci profile.
+
+### 13.2 Deliberately not run
+
+- The deep suite, the ci campaigns, the coverage gate, mutation testing, Slither, benchmarks and fork tests: no
+  production contract changed, and the brief excludes the deep suite and unrelated benchmarks.
+- No vault-level gas was measured for the V2 changes; §8.2's vault figures are estimates from the model harness.
+- The size probe's prototype code was not tested for behaviour; it exists only to be measured.
+- No formal verification; the PROVEN items are hand proofs.
