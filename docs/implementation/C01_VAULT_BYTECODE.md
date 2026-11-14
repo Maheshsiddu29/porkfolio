@@ -1,7 +1,7 @@
 # C01: Vault read-surface reclaim (getters behind `extsload`)
 
-**Status: implementation plan.** Written before any production change. Results, measured numbers and deviations go
-into §10 as the steps complete; nothing below is a result until §10 says so.
+**Status: implemented locally, awaiting owner review.** §1–§9 are the plan as committed before any production
+change (`5898a3f`); they are left as written. Results, measured numbers and every deviation from the plan are in §10.
 
 Basis:
 - `docs/architecture/G05_V2_ARCHITECTURE.md` (the ADR), accepted by the owner as the basis for C01. The parts used
@@ -248,4 +248,116 @@ Completion:
 
 ## 10. Results
 
-Filled in step 4.
+### 10.1 Commits
+
+| Step | Commit | Content |
+|---|---|---|
+| 1 | `5898a3f` | this plan |
+| 2 | `14407e8` | `extsload` on the vault; `VaultStateReader`; lens reads through it; layout and parity tests (getters still present) |
+| 3 | `adfe668` | getters internal, four views removed, interfaces reduced, tests and scripts migrated, harness |
+| 4 | this commit | results, proposals README |
+
+Baseline for every comparison: `5898a3f` (production `src/` identical to `5a12067`).
+
+### 10.2 What changed
+
+Vault (`src/SharedCommitmentVault.sol`): 18 state variables `public` → `internal` (§3.3; NatSpec `@notice` → `@dev`,
+which solc requires on internal variables); `getAllocation`, `getRequest`, `getRiskLimit`, `admissibleCapacity`
+removed; `extsload(bytes32)` added; the overflow argument of `admissibleCapacity` moved onto `_admissible`. No function
+that writes storage changed (`git diff 5898a3f -- src/SharedCommitmentVault.sol`, non-comment lines: visibility, the
+four removed views, `extsload`).
+
+Reads that stay on the vault: §3.2 exactly. `IVaultState` now declares `asset0`, `asset1`, `pendingShares`,
+`getCurator`, `authModule`, `FLOW_WINDOW`, `coreInputs`, `extsload`; `ISharedCommitmentVault` no longer declares
+`getAllocation`.
+
+New `src/libraries/VaultStateReader.sol` (internal library): slot constants, decoders for every value in §3.3, and the
+admission formulas N_a, D_a, E_a and the admission limit. `VaultLens` serves all of them as external functions with
+the vault as first argument and keeps its derived functions; they now read through the library.
+
+### 10.3 Deviations from the plan
+
+| # | Plan | Done instead | Why |
+|---|---|---|---|
+| DV-1 | slot constants and decoders in `VaultLens` (§2.3) | in a new internal library, `VaultStateReader`, which the lens calls | the scripts read state inside `view` functions and cannot deploy a lens; one copy of the layout serves lens, scripts and tests |
+| DV-2 | each test read rewritten `vault.x(a)` → `lens.x(vault, a)` (E-1) | a file-level `using VaultStateReader for SharedCommitmentVault;` (bench: `for IBenchVault`) in 49 test and script files; call sites unchanged | about 1,000 call sites; no assertion, bound or expected value had to be touched. Consequence: most suites read through the library, which is the code the lens runs, not through the deployed lens artifact. The deployed lens is exercised by `VaultLens.t.sol`, `VaultLensParity.t.sol`, `VaultStorageLayout.t.sol`, `VaultTestBase._assertEquationsWith`, the invariant handler and the bench |
+| DV-3 | admission limit computed in the lens | `netAssets`, `pendingDemand`, `eligibleBacking`, `admissibleCapacity` in the library, lens delegates | tests call `vault.admissibleCapacity` 69 times; one copy of the formula |
+| DV-4 | — | `AdmissibleCapacity.t.sol` `_write` uses `vm.store` at the library's slot constants instead of `stdstore` | `stdstore` finds a slot by calling the getter, which no longer exists |
+| DV-5 | — | `VaultTestBase._assertEquationsWith` reads through the deployed lens | the inlined library calls made that function exceed the via-IR stack limit; the lens calls are external |
+| DV-6 | — | `VaultInvariants` handler: `try vault.admissibleCapacity(c)` → `try lens.admissibleCapacity(vault, c)` | `try` needs an external call |
+| DV-7 | — | `test/research/HookBRootCause.t.sol` reader uses the library; its logged figure updated (19,549 → 17,445 cold gas) | the research measurement now reads five storage words through `extsload` |
+| DV-8 | — | `GovernorIntegrity.test_delayClass_everyVaultFunction` pin: 69 → 70 (step 2) → 48 functions, hash updated | the test asks for this review: `extsload` falls in the default DELAY class like every view; a view called through the governor moves nothing |
+| DV-9 | — | `VaultTestBase._newVault()` (virtual) and test-only `test/utils/VaultGetterHarness.sol` | E-4: the parity and layout tests need by-name reads after the getters are gone |
+
+Docs not changed: earlier phase reports and specs (`HOT_PATH_GAS.md`, `ORACLE_RISK_BOUNDARY_SPEC.md`,
+`PHASE1B4_3_REPORT.md`, `G02_GOVERNANCE_LIVENESS.md`) name vault getters as they existed then; they are history. The
+current read path is documented in the vault, `IVaultState`, `VaultStateReader` and `VaultLens` NatSpec.
+
+### 10.4 Validation
+
+| Criterion (§7) | Command | Result |
+|---|---|---|
+| 1 | `forge fmt --check` | clean |
+| 2 | `forge build --sizes` | vault **20,220 B** runtime (target ≤ 20,400), 20,857 B init, **4,356 B under EIP-170** (MEASURED; G05 prototype: 20,220 B). Lens 12,530 B (9,301 B at 200 runs) |
+| 3 | `forge test` (default profile) | **695 passed, 0 failed, 8 skipped** (fork tests, no RPC) at `14407e8` and at `adfe668`; baseline 688 / 0 / 8. +7: layout 4, parity 3 |
+| 4 | same run, invariant suites | every invariant line (runs, calls, reverts) identical to the baseline run; `test_handler_reachesEveryBranch` and the other non-vacuity tests pass |
+| 5, 6 | `test/bench/security.sh` (`FOUNDRY_PROFILE=ci`: size gate, production builds, production-artifact security, complete suite at 10,000 fuzz runs and 128 × 128 invariants) | exit 0 at `adfe668` (only `docs/` uncommitted): every size gate ok (vault margin 4,356 ≥ 2,048); `ProductionBuilds.t.sol` and `ProductionArtifactSecurity.t.sol` pass; complete suite at ci **695 passed, 0 failed, 8 skipped**, including the new parity (1,000 runs) and layout fuzz tests (10,000 runs). Wall time 9 min |
+| 6 | `test/bench/run.sh` | size gate ok (vault margin 4,356); gas in §10.5 |
+| 7 | `forge inspect src/SharedCommitmentVault.sol:SharedCommitmentVault storageLayout --json` (AST ids stripped), baseline vs `adfe668` | identical: every slot, offset, type and struct member |
+| 8 | `out/SharedCommitmentVault.sol/SharedCommitmentVault.json` `methodIdentifiers` and `abi` | 69 → 48 functions: removed exactly the 22 reads of §3.3, added `extsload(bytes32)` (`0x1e2eaeaf`, the selector of v4's `IExtsload.extsload(bytes32)`); events and errors identical |
+| 9 | `forge build --force` of baseline and `adfe668` at the same scratch path; sha256 of `deployedBytecode.object` | Hook A, Hook B, `CuratorAuthorization`, `VaultGovernor`, `PriceRiskAdapter`: identical at both optimizer profiles (default and the 200-run `vault` profile). Only the vault and the lens changed |
+| 10 | `forge build` (includes `script/`); `test/script/DeployScripts.t.sol` | compiles; passes (in the 695) |
+| 11 | `git diff 5898a3f -- src` | the changes of §10.2 only (DV-1, DV-3 add the library) |
+| — | `forge lint` | warning counts identical to the baseline (17 block-timestamp, 2 incorrect-shift, 20 unsafe-typecast); the library's packed-field casts are inside a justified `forge-lint: disable` block |
+| — | new tests, operation coverage | `test_sequence_reachesEveryOperation`: over 64 seeds every operation kind of the parity generator changes state (queued redemption 14, queue finalization 3, claim 3, request cancel 6, swap 29, …) |
+
+Equivalence evidence (§5): E-1 (assertions unchanged; the only test-side changes are DV-2 … DV-9), E-2 and E-8
+(`testFuzz_lensMatchesGetters`, 256 runs default / 1,000 ci; `test_admissibleCapacity_maxBufferAndQueue`), E-3
+(`testFuzz_layout_packedWordsDecodeLikeGetters`), E-4 (both run against `VaultGetterHarness` after step 3), E-5
+(`test_layout_slotsHoldGetterValues`, literal slots), E-6 (criterion 4), E-7 (criterion 8), E-9 (`coreInputs`
+unchanged, hook bytecode identical, `SharedCoreHooks` and `OracleBandHooks` pass).
+
+### 10.5 Gas (`test/bench/run.sh`, production artifacts, `--isolate`)
+
+No vault operation is more than 0.5% dearer (target §6). The only increase is `unfreezeCurator`, +22 gas (+0.07%).
+Most operations are slightly cheaper, from the smaller function dispatch.
+
+| Operation | Baseline | C01 | Δ |
+|---|---|---|---|
+| swap hookA (router + PM + hook + vault) | 270,181 | 269,697 | −484 |
+| swap hookB (router + PM + hook + vault) | 252,313 | 251,829 | −484 |
+| quote hookA | 29,021 | 28,735 | −286 |
+| deposit (new LP) | 149,964 | 149,304 | −660 |
+| redeem instant | 160,833 | 160,601 | −232 |
+| redeem queued | 148,225 | 147,624 | −601 |
+| processQueue(1) | 122,337 | 121,919 | −418 |
+| claim | 135,954 | 135,756 | −198 |
+| allocate (steady state, new curator) | 294,576 | 294,096 | −480 |
+| activate signed (EOA, steady state) | 314,631 | 314,349 | −282 |
+| cancelAllocation (after partial consumption) | 44,209 | 44,121 | −88 |
+| release (owner, before expiry) | 47,618 | 47,618 | 0 |
+| setRiskLimit (change configured record) | 46,971 | 46,685 | −286 |
+| unfreezeCurator | 33,255 | 33,277 | +22 |
+| deploy vault (CREATE) | 5,027,680 | 4,547,503 | −480,177 |
+| deploy lens (CREATE) | 1,994,735 | 2,779,631 | +784,896 |
+
+All 51 rows of the bench were compared; the rows not shown changed by between −4,840 (ten split swaps) and 0.
+
+Reading through the lens costs more than the old getters for struct reads: `getAllocation` is seven `extsload`
+calls instead of one call. No on-chain path of the system reads through the lens (hooks use `coreInputs`), so this
+affects off-chain callers and third-party contracts that choose the lens.
+
+### 10.6 Residual risks and what was not run
+
+- The storage layout is now part of the read interface (ADR §9 limitation 10). Any later change to the vault's state
+  variables (C02's ring, C03's escrow address) must update `VaultStateReader` and the literals in
+  `VaultStorageLayout.t.sol`; the layout test fails until both are updated.
+- Third-party contracts that called the removed getters break; they must use the lens or the library. No deployed
+  instance exists, so nothing on-chain is affected.
+- The parity fuzz covers the states its generator reaches (§10.4 coverage counts); the packed-word fuzz covers every
+  bit pattern of every packed slot. Equivalence on unreached states rests on the structural argument of §5.
+- Not run: deep profile, coverage gate, mutation testing, Slither, fork tests (no RPC), any broadcast.
+
+### 10.7 Next action requiring owner approval
+
+Review of C01 (`5898a3f..` this commit). C02 (commitment ledger) does not start before that review.
