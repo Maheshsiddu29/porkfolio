@@ -16,6 +16,9 @@ import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {BondEscrow} from "../../src/BondEscrow.sol";
+import {CommitmentAuthorizer} from "../../src/CommitmentAuthorizer.sol";
+import {IBondEscrow} from "../../src/interfaces/IBondEscrow.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
 import {CuratorAuthorization} from "../../src/CuratorAuthorization.sol";
 import {ICuratorAuthorization} from "../../src/interfaces/ICuratorAuthorization.sol";
@@ -181,6 +184,55 @@ contract ReentrancyTest is Test {
             _assertBackingMatchesClaims();
             vm.revertToState(snap);
         }
+    }
+
+    /// @notice A pair token calls back into the escrow during the bond pull and the refund payout. Both inner calls
+    ///         reach the escrow while its lock is held and fail with `ReentrantCall`; the outer operations complete and
+    ///         the PoolManager claim balance still matches the escrow's liabilities.
+    function test_RE_bondPostAndRefundPayout_holdEscrowLock() public {
+        vm.prank(owner);
+        vault.release(assetOneLock);
+        BondEscrow escrow = BondEscrow(
+            deployCode(
+                ProductionArtifacts.escrow(),
+                abi.encode(
+                    IVaultState(address(vault)), uint256(1e9), uint256(1e9), uint256(1 hours), uint256(1000), owner
+                )
+            )
+        );
+        CommitmentAuthorizer bonded = CommitmentAuthorizer(
+            deployCode(
+                ProductionArtifacts.commitmentAuthorizer(),
+                abi.encode(IVaultState(address(vault)), IBondEscrow(address(escrow)))
+            )
+        );
+        vm.startPrank(owner);
+        vault.setFeeEscrow(address(escrow));
+        vault.setAuthModule(address(bonded));
+        vm.stopPrank();
+        _fund(curator, 1000 ether);
+        vm.prank(curator);
+        t1.approve(address(escrow), type(uint256).max);
+
+        ISharedCommitmentVault.AllocationRequest memory req = _request(key, c1, 1000 ether, 2 days);
+        uint256 id = vault.nextAllocationId();
+        t1.arm(address(escrow), abi.encodeWithSignature("realize()"));
+        vm.prank(curator);
+        assertEq(bonded.activateDirectBonded(req, 1e9), id);
+        assertEq(t1.lastSelector(), IBondEscrow.ReentrantCall.selector, "post callback reached the lock");
+        uint256 posted = escrow.getBond(id).bond;
+        assertEq(manager.balanceOf(address(escrow), c1.toId()), posted);
+
+        vm.prank(curator);
+        vault.cancelAllocation(id);
+        (uint256 charge, uint256 refund) = escrow.settle(id);
+        assertEq(charge + refund, posted);
+        t1.arm(address(escrow), abi.encodeCall(escrow.claimRefund, (curator)));
+        vm.prank(curator);
+        (, uint256 paid) = escrow.claimRefund(curator);
+        assertEq(paid, refund);
+        assertEq(t1.lastSelector(), IBondEscrow.ReentrantCall.selector, "refund callback reached the lock");
+        assertEq(manager.balanceOf(address(escrow), c1.toId()), charge);
     }
 
     /// @notice Inside an instant redemption's payout (`take` -> ERC-20 `transfer` to the receiver), the receiver

@@ -28,6 +28,22 @@ import sys
 
 # campaign -> (contract regex, one invariant to run, {counter: max fraction of runs with zero})
 CAMPAIGNS = {
+    "bond": (
+        "^BondEscrowInvariantsTest$",
+        "invariant_escrowConservationAndAggregate",
+        {
+            # C03: 64 seeds, depth 128, base 13 measured zero-run fractions of 0.00, 0.02, 0.08, 0.00,
+            # 0.05, 0.00 and 0.05 in this order. Gates allow sampling variation without admitting a campaign
+            # where a financial action is almost always skipped.
+            "bondsPosted": 0.10,
+            "fills": 0.15,
+            "lateSyncs": 0.25,
+            "settlements": 0.10,
+            "realizations": 0.20,
+            "refundsClaimed": 0.10,
+            "depositsRealized": 0.20,
+        },
+    ),
     "vault": (
         "^VaultInvariantsTest$",
         "invariant_ghostLedgerConservation",
