@@ -63,7 +63,7 @@ if [ "${#vault_artifacts[@]}" -ne 1 ]; then
 fi
 for f in "${vault_artifacts[@]}"; do artifact_row "$f" "$vault_runs"; done
 
-for c in HookA_DynamicFee HookB_BoundedImpact VaultLens CuratorAuthorization; do
+for c in HookA_DynamicFee HookB_BoundedImpact VaultLens CuratorAuthorization CommitmentAuthorizer BondEscrow; do
   [ -d "out/$c.sol" ] || continue
   found=0
   for f in out/"$c".sol/*.json; do
@@ -82,6 +82,11 @@ if bench="$(forge test --match-path test/bench/ProductionArtifactGas.t.sol --iso
   grep -E "BENCH" <<<"$bench" | sed -E 's/^ *BENCH //'
 else
   grep -E "FAIL|Error" <<<"$bench"; echo "FAIL: benchmark tests failed"; fail=1
+fi
+if bond_bench="$(forge test --match-path test/bench/BondGas.t.sol --isolate -vv 2>&1)"; then
+  grep -E "BENCH" <<<"$bond_bench" | sed -E 's/^ *BENCH //'
+else
+  grep -E "FAIL|Error" <<<"$bond_bench"; echo "FAIL: bond benchmark tests failed"; fail=1
 fi
 
 exit "$fail"
