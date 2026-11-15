@@ -7,6 +7,7 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {ISharedCommitmentVault} from "./interfaces/ISharedCommitmentVault.sol";
 import {IVaultState} from "./interfaces/IVaultState.sol";
 import {IMarketRiskAdapter} from "./interfaces/IMarketRiskAdapter.sol";
+import {IBondEscrow} from "./interfaces/IBondEscrow.sol";
 import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
 import {VaultStateReader} from "./libraries/VaultStateReader.sol";
 
@@ -25,7 +26,8 @@ import {VaultStateReader} from "./libraries/VaultStateReader.sol";
 ///      layout change in the vault breaks that test instead of silently returning wrong values here.
 ///
 ///      Trust model. The lens has no storage, no constructor, no owner and no ERC-6909 claims or approvals. Every
-///      function takes the vault as an argument and only calls view functions on it. The vault never calls the
+///      function takes the vault as an argument and only calls view functions on it (and, in `previewDeposit`, the
+///      `unrealized` view of the fee escrow the vault names). The vault never calls the
 ///      lens, so the lens is not on any deposit, swap, allocation or redemption path, and a bug here cannot change
 ///      what the vault accepts or pays. A wrong result can mislead a caller, for example into a slippage bound that
 ///      makes their own transaction revert. Results are only as trustworthy as the `vault` argument: pointing the
@@ -199,6 +201,14 @@ contract VaultLens {
         return VaultStateReader.riskAdapter(vault);
     }
 
+    /// @notice The installed fee escrow: the only caller of the vault's `realizeFee`, and the contract `deposit`
+    ///         realizes through. Zero when none is installed.
+    /// @param vault Vault to read.
+    /// @return The escrow address.
+    function feeEscrow(IVaultState vault) external view returns (address) {
+        return VaultStateReader.feeEscrow(vault);
+    }
+
     /// @notice e: the vault's edge beyond the adapter's reference band.
     /// @param vault Vault to read.
     /// @return Pips.
@@ -353,9 +363,14 @@ contract VaultLens {
         }
     }
 
-    /// @notice Amounts `deposit` would charge for `shares` in the current state: ceil(shares * N_a / S) per asset.
+    /// @notice Amounts `deposit` would charge for `shares` in the current state: ceil(shares * N_a / S) per asset,
+    ///         with N_a including the reservation fees the vault's fee escrow would realize first.
     /// @dev Same formula and rounding as the vault's `deposit`. Example: S = 1,000, N0 = 2,000 and N1 = 501 price
-    ///      10 shares at 20 of asset0 and ceil(5.01) = 6 of asset1. Reverts with `NotInitialized` before the first
+    ///      10 shares at 20 of asset0 and ceil(5.01) = 6 of asset1. With a fee escrow installed, `deposit` first has it
+    ///      realize everything earned, which raises N_a by the LP part before pricing; this adds the escrow's
+    ///      `unrealized(a).lpPart` to N_a so the preview matches (one more external view call, to the escrow named in
+    ///      the vault's storage). If the escrow is too far behind for its deposit-path walk, `deposit` reverts with the
+    ///      escrow's `EscrowBehind` even though this returns a price. Reverts with `NotInitialized` before the first
     ///      deposit and with `NoAssets` if both N_a are zero, as `deposit` does. A trade between this call and the
     ///      deposit can change the price, so pass the result as `maxAmount0/1` with whatever tolerance you accept.
     /// @param vault Vault to read.
@@ -371,6 +386,13 @@ contract VaultLens {
         if (supply == 0) revert ISharedCommitmentVault.NotInitialized();
         uint256 n0 = netAssets(vault, vault.asset0());
         uint256 n1 = netAssets(vault, vault.asset1());
+        address escrow = VaultStateReader.feeEscrow(vault);
+        if (escrow != address(0)) {
+            (uint256 f0,) = IBondEscrow(escrow).unrealized(vault.asset0());
+            (uint256 f1,) = IBondEscrow(escrow).unrealized(vault.asset1());
+            n0 += f0;
+            n1 += f1;
+        }
         if (n0 == 0 && n1 == 0) revert ISharedCommitmentVault.NoAssets();
         amount0 = FullMath.mulDivRoundingUp(shares, n0, supply);
         amount1 = FullMath.mulDivRoundingUp(shares, n1, supply);

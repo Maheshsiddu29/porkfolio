@@ -116,8 +116,21 @@ contract CuratorAuthorization is ICuratorAuthorization, EIP712 {
     ///      undoes the nonce bit. The vault's checks are listed on `reserveFor`.
     function activate(AllocationAuthorization calldata auth, PoolKey calldata key, bytes calldata signature)
         external
+        virtual
         returns (uint256 allocationId)
     {
+        return _activateSigned(auth, key, _digest(auth), signature);
+    }
+
+    /// @dev The signed path of `activate`, with the digest the signature must cover passed in, so that a module that
+    ///      signs a larger message embedding `auth` (a bonded instruction) runs exactly these checks: every check listed
+    ///      on `activate`, then the nonce bit, then `reserveFor`, then the `Activated` event.
+    function _activateSigned(
+        AllocationAuthorization calldata auth,
+        PoolKey calldata key,
+        bytes32 digest,
+        bytes calldata signature
+    ) internal returns (uint256 allocationId) {
         if (auth.vault != address(vault)) revert WrongVault(auth.vault);
         // The time fields must be consistent before the clock is consulted. The subtraction cannot underflow: the
         // first check guarantees deadline >= validAfter.
@@ -134,7 +147,7 @@ contract CuratorAuthorization is ICuratorAuthorization, EIP712 {
         bool backward = auth.currencyIn == key.currency1 && auth.currencyOut == key.currency0;
         if (auth.zeroForOne ? !forward : !backward) revert DirectionMismatch();
 
-        if (!SignatureChecker.isValidSignatureNow(auth.curator, _digest(auth), signature)) revert InvalidSignature();
+        if (!SignatureChecker.isValidSignatureNow(auth.curator, digest, signature)) revert InvalidSignature();
         _useNonce(auth.curator, auth.nonce);
 
         allocationId = vault.reserveFor(
@@ -167,6 +180,15 @@ contract CuratorAuthorization is ICuratorAuthorization, EIP712 {
     ///      `req.deadline` is checked against the clock by the vault.
     function activateDirect(ISharedCommitmentVault.AllocationRequest calldata req)
         external
+        virtual
+        returns (uint256 allocationId)
+    {
+        return _activateDirect(req);
+    }
+
+    /// @dev The direct path of `activateDirect`: the caller is the curator.
+    function _activateDirect(ISharedCommitmentVault.AllocationRequest calldata req)
+        internal
         returns (uint256 allocationId)
     {
         _requireExpiryAfterDeadline(req.expiry, req.deadline);

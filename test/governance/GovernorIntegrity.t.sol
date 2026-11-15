@@ -133,10 +133,10 @@ contract GovernorIntegrityTest is VaultTestBase {
                 || h == keccak256("transferOwnership(address)");
             assertEq(gov.delayFor(v, data), long ? 32 days : 3 days, sigs[i]);
         }
-        assertEq(sigs.length, 48, "vault ABI changed: review VaultGovernor's delay classes");
+        assertEq(sigs.length, 50, "vault ABI changed: review VaultGovernor's delay classes");
         assertEq(
             keccak256(joined),
-            0x193ed0291b4e3c64f88907f35a83485f0874cb1bafc0a407f8bbe1ba2544a3a5,
+            0x80cd625f1d41ac33a9e5df79c4625cd5fae219475b70b3d3a07ebf1bfb4ee130,
             "vault ABI changed: review VaultGovernor's delay classes"
         );
     }

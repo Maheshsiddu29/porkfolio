@@ -18,6 +18,10 @@ contract VaultGetterHarness is SharedCommitmentVault {
         SharedCommitmentVault(poolManager_, owner_, asset0_, asset1_)
     {}
 
+    function oldFeeEscrow() external view returns (address) {
+        return _feeEscrow;
+    }
+
     function oldBacking(Currency c) external view returns (uint256) {
         return backing[c];
     }

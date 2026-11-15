@@ -7,7 +7,10 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 
 import {SharedCommitmentVault} from "../../src/SharedCommitmentVault.sol";
+import {BondEscrow} from "../../src/BondEscrow.sol";
 import {ISharedCommitmentVault} from "../../src/interfaces/ISharedCommitmentVault.sol";
+import {IBondEscrow} from "../../src/interfaces/IBondEscrow.sol";
+import {IVaultState} from "../../src/interfaces/IVaultState.sol";
 import {IMarketRiskAdapter} from "../../src/interfaces/IMarketRiskAdapter.sol";
 import {VaultGovernor} from "../../src/governance/VaultGovernor.sol";
 import {BaseCompatibleHook} from "../../src/hooks/BaseCompatibleHook.sol";
@@ -39,6 +42,17 @@ contract ReenteringFakeHook {
         lastError = err;
         (ok,) = msg.sender.call(abi.encodeCall(VaultGovernor.acceptVaultOwnership, ()));
         require(!ok, "accept re-entry succeeded");
+    }
+}
+
+/// @dev A target that answers the governor's escrow getters with independently chosen addresses.
+contract EscrowTargetLookalike {
+    address public immutable owner;
+    address public immutable vault;
+
+    constructor(address owner_, address vault_) {
+        owner = owner_;
+        vault = vault_;
     }
 }
 
@@ -167,6 +181,73 @@ contract VaultGovernorTest is VaultTestBase {
             vm.prank(admin);
             vm.expectRevert(abi.encodeWithSelector(VaultGovernor.InvalidTarget.selector, bad[i]));
             gov.queue(bad[i], data);
+        }
+    }
+
+    /// @notice The escrow's fee settings and its installation in the vault each wait DELAY. A guardian can cancel a
+    ///         queued fee change, but cannot make one directly; the admin cannot bypass the queue by calling the escrow.
+    function test_escrowSettings_andInstallation_waitDelay() public {
+        BondEscrow escrow = BondEscrow(
+            deployCode(
+                ProductionArtifacts.escrow(),
+                abi.encode(IVaultState(v), uint256(0), uint256(0), uint256(1 hours), uint256(0), address(0))
+            )
+        );
+        bytes memory rate = abi.encodeCall(escrow.setRate, (c1, 1e9));
+        bytes memory duration = abi.encodeCall(escrow.setMinChargeDuration, (2 hours));
+        bytes memory fee = abi.encodeCall(escrow.setProtocolFee, (1000));
+        bytes memory recipient = abi.encodeCall(escrow.setProtocolRecipient, (admin));
+        bytes memory install = abi.encodeCall(vault.setFeeEscrow, (address(escrow)));
+        assertEq(escrow.owner(), address(gov));
+        assertEq(gov.delayFor(address(escrow), rate), 3 days);
+        assertEq(gov.delayFor(v, install), 3 days);
+
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(IBondEscrow.NotOwner.selector, admin));
+        escrow.setRate(c1, 1e9);
+        vm.prank(guardian);
+        vm.expectRevert(abi.encodeWithSelector(IBondEscrow.NotOwner.selector, guardian));
+        escrow.setProtocolFee(1000);
+        vm.prank(guardian);
+        vm.expectRevert(ISharedCommitmentVault.GuardianCannotIncreaseRisk.selector);
+        vault.setFeeEscrow(address(escrow));
+
+        uint256 eta = _queue(address(escrow), rate);
+        _queue(address(escrow), duration);
+        _queue(address(escrow), fee);
+        _queue(address(escrow), recipient);
+        _queue(v, install);
+        vm.warp(eta - 1);
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(VaultGovernor.NotExecutable.selector, _id(address(escrow), rate), eta));
+        gov.execute(address(escrow), rate);
+        vm.prank(guardian);
+        gov.cancel(address(escrow), rate);
+        vm.warp(eta);
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(VaultGovernor.NotQueued.selector, _id(address(escrow), rate)));
+        gov.execute(address(escrow), rate);
+        _execute(address(escrow), duration);
+        _execute(address(escrow), fee);
+        _execute(address(escrow), recipient);
+        _execute(v, install);
+        assertEq(vault.feeEscrow(), address(escrow));
+        assertEq(escrow.rate(c1), 0, "guardian canceled the rate change");
+        assertEq(escrow.minChargeDuration(), 2 hours);
+        assertEq(escrow.protocolFeeBps(), 1000);
+        assertEq(escrow.protocolRecipient(), admin);
+    }
+
+    /// @notice Both escrow identity answers must match. A lookalike naming another vault or another owner cannot be
+    ///         queued, even though the governor may queue a genuine escrow before it is installed.
+    function test_escrowTargets_refuseWrongOwnerOrVault() public {
+        EscrowTargetLookalike wrongOwner = new EscrowTargetLookalike(attacker, v);
+        EscrowTargetLookalike wrongVault = new EscrowTargetLookalike(address(gov), attacker);
+        address[2] memory bad = [address(wrongOwner), address(wrongVault)];
+        for (uint256 i; i < bad.length; ++i) {
+            vm.prank(admin);
+            vm.expectRevert(abi.encodeWithSelector(VaultGovernor.InvalidTarget.selector, bad[i]));
+            gov.queue(bad[i], abi.encodeWithSignature("poke()"));
         }
     }
 

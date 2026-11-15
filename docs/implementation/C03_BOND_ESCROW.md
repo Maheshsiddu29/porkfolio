@@ -156,9 +156,10 @@ Parameters: `rate[2]` (ρ for new bonds), `minChargeDuration`, `protocolFeeBps`,
 | `claimProtocol(to)` | caller is the protocol recipient; `to ≠ 0`; something owed | pays both assets' `protocolOwed` to `to` |
 | setters | caller is `vault.owner()`; bounds | `setProtocolFee` realizes first, so the old share applies to everything earned before the change |
 
-Every state-changing entry point takes a transient-storage reentrancy lock. `post`, `claimRefund`, `claimProtocol`
-use the PoolManager's `unlock` (an `unlockCallback` that only the PoolManager may call, with the same exact-arrival check
-as the vault).
+Posting, synchronization, settlement, realization, claims and protocol-fee changes take a transient-storage
+reentrancy lock. The simple rate, duration and recipient setters only write their parameter after checking the vault
+owner. `post`, `claimRefund`, `claimProtocol` use the PoolManager's `unlock` (an `unlockCallback` that only the
+PoolManager may call, with the same exact-arrival check as the vault).
 
 #### 4.3.4 Accrual (ADR §5.3–§5.4)
 
@@ -351,17 +352,9 @@ C03 is PASS only if all hold, each with its command and observed result in §12:
 7. Differential and campaign invariants hold at the ci profile.
 8. Gas table recorded against `3502d9b`; `exchange` gas unchanged.
 
-Commits (local only, each with the default suite green):
-
-| Step | Content | Commit |
-|---|---|---|
-| 1 | this plan | `docs: plan C03 bond escrow` |
-| 2 | vault fee entry, reader/lens/layout, governor target, their tests | `feat: escrow-only fee realization in the vault` |
-| 3 | `BondEscrow`, `CommitmentAuthorizer`, `CuratorAuthorization` refactor, unit and security tests | `feat: bond escrow and bonded authorization` |
-| 4 | differential, invariant campaign, economics, gas rows, coverage gates | `test: bond conservation, differential and economics` |
-| 5 | results | `docs: record C03 measurements` |
-
-If a step cannot meet its criteria it stops there and is reported; nothing is relaxed silently.
+The implementation is split into local, reviewable commits after validation. The prior step list was a plan; the
+actual SHAs and any validation limitations belong in the milestone finishing report. If a criterion fails, it is
+reported rather than relaxed silently.
 
 ## 11. Open items for the owner
 
@@ -372,3 +365,90 @@ If a step cannot meet its criteria it stops there and is reported; nothing is re
 
 Git: work only on `phase-3-c03-bond-escrow`. No push, merge, rebase, PR, tag, remote change, deployment or broadcast.
 The untracked `AGENTS.md` is not touched. No co-authorship lines. C04 does not start.
+
+## 12. Implementation and observed results
+
+### 12.1 What the implementation actually does
+
+`CommitmentAuthorizer` binds the payer and maximum rate into the signed authorization, or makes the direct curator
+the payer. It reserves and posts the bond in one transaction. A failed token transfer, rate check, or escrow check
+reverts the reservation and nonce use. `BondEscrow` holds PoolManager claims against open bonds, credited refunds and
+protocol fees. It reads actual vault consumption and release state when anyone synchronizes a bond. A bond accrues on
+the last observed remainder until its expiry or observed close; a late `sync` therefore charges the payer for the
+unobserved consumed capacity. `settle` applies the minimum charge, credits the remainder to the payer, and releases
+an expired allocation. The vault calls the escrow only before pricing a deposit. Neither a swap nor an LP withdrawal
+calls it. Existing vault storage slots 0–28 remain in place; the fee escrow address is slot 29.
+
+The default fixture uses the actual v4 `PoolManager`, production artifacts, and ERC-6909 claims. The escrow's
+accounting tests cover exact claim conservation across posting, partial fills, close, expiry, refund, protocol claim,
+and realization. A separate reference model runs randomized schedules against the same live contracts. The invariant
+handler reconstructs outstanding bonds and claims from ghost amounts, and checks the vault's backing and reserved
+capacity after each operation. The reentrancy test makes a token callback attempt another escrow entry and checks that
+the outer operation conserves claims. The governance tests cover escrow ownership and target validation, long-delay
+classification, cancellation, and replacement. Replacement with open bonds can strand LP fees in the old escrow:
+the fixture measured **62.208 token units** stranded. An LP exiting before a deposit checkpoint forfeited **3.888
+token units** of fees to the remaining shares in the fee-realization fixture. These are measured fixture outcomes,
+not bounds for other schedules.
+
+### 12.2 F-8 economic griefing
+
+The attack fixture starts with an honest 50,000-unit vault balance and lets a curator–LP coalition deposit 10 million
+units of transient capital. It posts a bond against 100,500 units of output capacity and then queues its capital exit;
+an honest LP request can queue behind that reservation. A 1,000-unit input swap while the capital is still deposited
+consumed 995.268004015574998369 units. Synchronizing the fill one hour late added 0.003582964814456069 units to
+the fee versus immediate synchronization in that fixture. The residual withheld capacity continued to accrue fees.
+
+| Rate ρ (scaled by 1e18, per second) | Horizon | Bond posted | Charge at half term | Refund | LP fee accruing to coalition shares |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 1 hour, 1 day, 9 days | 0 | 0 | 0 | 0 |
+| 1e9 | 1 hour | 0.2814 | 0.2814 | 0 | 0.12726 |
+| 1e9 | 1 day | 8.6028 | 4.3416 | 4.2612 | 1.96344 |
+| 1e9 | 9 days | 78.0684 | 39.0744 | 38.994 | 17.67096 |
+| 1e12 | 1 hour | 281.4 | 281.4 | 0 | 127.26 |
+| 1e12 | 1 day | 8,602.8 | 4,341.6 | 4,261.2 | 1,963.44 |
+| 1e12 | 9 days | 78,068.4 | 39,074.4 | 38,994 | 17,670.96 |
+
+These rows distinguish collateral from loss: the posted bond is not the final charge, and the coalition can earn
+part of the LP share of that charge through its own shares. Four nine-day bonds rotated eight days apart delayed an
+honest LP's queued exit by 691,200 seconds and blocked execution of a queued 32-day governor change at its first
+execution time. Across those rotations the coalition posted 342.926536879926585484 units of bonds, paid
+222.178946045254717832 units in settled charges, received 27.515216697734091213 units of refunds, and accrued
+107.836313066347553005 units of LP fees on its own shares. The difference between posted bonds and the sum of
+charges and refunds is the fourth, still-open bond at the measurement point. A guardian buffer tightening prevented
+another rotation; after expiry, permissionless queue processing allowed the governor change to execute. This
+fixture does not establish an anti-griefing bound. C-1, a proposed TVL cap, was measured as a possible limit on
+transient deposits and remains unimplemented pending the owner's C04 decision.
+
+### 12.3 Production size and gas
+
+The fresh production size gate measured a vault runtime of **22,103 bytes**: 626 bytes above C02's 21,477 and 425
+bytes below the project maximum of 22,528. EIP-170 headroom is 2,473 bytes. `BondEscrow` is 15,905 bytes and
+`CommitmentAuthorizer` is 9,157 bytes. All eight contracts in the security script's size gate passed their runtime
+and init-code limits.
+
+The bond-specific `gasleft()` benchmark on production artifacts measured: first direct activation 640,497 gas;
+same-bucket activation 443,051; signed EOA activation 657,816; EIP-1271 activation 661,289; refund claim 64,071;
+protocol claim 80,016; deposit without earned fees 187,153; deposit with earned fees 244,061; realize with no earnings
+90,285; realize after an hour 163,743; 32-bucket walk 197,293; redeem while an escrow is installed 211,307;
+sync after fill 120,532; early settlement 158,872; expiry settlement 159,872. These are fixture-specific external-call
+gas values, not throughput or deployment forecasts. In the standard production-artifact benchmark, Hook A and Hook B
+swaps measured 275,560 and 257,692 gas, respectively, versus C02's recorded 275,410 and 257,542. The difference is
+150 gas in each fixture; no external escrow call was added to either swap path. The exact-gas-equality criterion in
+§10(8) is therefore **not met**, even though the architectural requirement that swaps avoid the escrow is met.
+
+### 12.4 Validation and remaining limits
+
+`forge fmt --check`, `git diff --check`, `forge build`, `forge lint src`, and `test/bench/run.sh` passed. Lint reported
+22 timestamp, 2 shift, and 16 cast warnings (the same three warning classes as before C03; timestamp checks include
+the new expiry comparisons). A pre-rebuild `forge test -vvv` run passed 775 tests and failed
+three production-artifact checks because its `PoolManager` artifact had unexpected optimizer settings or could not be
+found. `test/bench/security.sh` force-rebuilt those artifacts, passed its production size gate and artifact security
+tests, and then passed the CI-profile suite: **802 passed, 0 failed, 8 skipped**. A subsequent default
+`forge test -vvv` also passed **802/0/8**. The eight skipped tests need an RPC endpoint. The non-vacuity gate
+(`python3 test/invariant/coverage.py`) passed all five campaigns with 64 seeds at depth 128; the new bond campaign
+observed 567 bond posts, 448 fills, 250 late syncs, 475 settlements, 227 refund claims, 216 realizations and 194
+deposits with earned fees. Local commit SHAs are recorded in the milestone finishing report. Deep-profile invariants,
+mutation, live-fork, and external static-analysis runs are deferred.
+The fee escrow can be replaced while bonds are open, which strands its remaining LP fee share as demonstrated above;
+this is a governance choice for owner review, not a solved recovery path. No claim of audit, formal proof, guaranteed
+LP exit, or constant-time expiry follows from these tests.

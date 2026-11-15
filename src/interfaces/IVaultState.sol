@@ -2,13 +2,15 @@
 pragma solidity 0.8.26;
 
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 
 import {ISharedCommitmentVault} from "./ISharedCommitmentVault.sol";
 import {IMarketRiskAdapter} from "./IMarketRiskAdapter.sol";
 
 /// @title IVaultState
 /// @notice The vault's read interface: the few reads other contracts call on-chain (`coreInputs` for hooks,
-///         `getCurator` and `authModule` for the authorization module, `pendingShares` for the governor, the pair
+///         `getCurator` and `authModule` for the authorization module, `pendingShares` for the governor, `owner` and
+///         `authModule` for the fee escrow, the pair
 ///         and the flow window), and `extsload`, through which every other stored value is read.
 /// @dev `SharedCommitmentVault` inherits this interface, so the compiler checks that each function exists with
 ///      exactly these types. Stored values not served here (B_a, Q_a, W_a, S, floors, risk parameters, limits,
@@ -16,6 +18,13 @@ import {IMarketRiskAdapter} from "./IMarketRiskAdapter.sol";
 ///      external functions under the names the values have in the vault. Notation follows the vault:
 ///      P = `pendingShares`.
 interface IVaultState is ISharedCommitmentVault {
+    /// @notice Current owner of the vault (in production a `VaultGovernor`). The fee escrow accepts parameter changes
+    ///         only from this address.
+    function owner() external view returns (address);
+
+    /// @notice The PoolManager that holds the vault's claims.
+    function poolManager() external view returns (IPoolManager);
+
     /// @notice First asset of the pair (the lower address).
     function asset0() external view returns (Currency);
 

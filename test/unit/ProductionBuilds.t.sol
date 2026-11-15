@@ -3,6 +3,10 @@ pragma solidity 0.8.26;
 
 import {VaultTestBase} from "../utils/VaultTestBase.sol";
 import {ProductionArtifacts} from "../utils/ProductionArtifacts.sol";
+import {BondEscrow} from "../../src/BondEscrow.sol";
+import {CommitmentAuthorizer} from "../../src/CommitmentAuthorizer.sol";
+import {IBondEscrow} from "../../src/interfaces/IBondEscrow.sol";
+import {IVaultState} from "../../src/interfaces/IVaultState.sol";
 
 /// @notice The shared functional fixture runs the production builds of every deployable contract.
 /// @dev Every test that extends `VaultTestBase` (unit, integration, security, fuzz and the invariant campaign) uses
@@ -38,6 +42,30 @@ contract ProductionBuildsTest is VaultTestBase {
         for (uint256 i; i < others.length; ++i) {
             assertLe(others[i].code.length, 24_576, "over EIP-170");
         }
+    }
+
+    /// @notice The two new deployable contracts use the default-profile artifacts in the bond fixture and both fit
+    ///         EIP-170. The masked check handles the immutable vault, PoolManager and asset addresses.
+    function test_bondContractsUseProductionBuilds_andFitEip170() public {
+        BondEscrow escrow = BondEscrow(
+            deployCode(
+                ProductionArtifacts.escrow(), abi.encode(IVaultState(address(vault)), 1e9, 1e9, 1 hours, 1000, owner)
+            )
+        );
+        CommitmentAuthorizer bonded = CommitmentAuthorizer(
+            deployCode(
+                ProductionArtifacts.commitmentAuthorizer(),
+                abi.encode(IVaultState(address(vault)), IBondEscrow(address(escrow)))
+            )
+        );
+        ProductionArtifacts.requireProduction(
+            address(escrow), ProductionArtifacts.escrow(), ProductionArtifacts.DEFAULT_RUNS
+        );
+        ProductionArtifacts.requireProduction(
+            address(bonded), ProductionArtifacts.commitmentAuthorizer(), ProductionArtifacts.DEFAULT_RUNS
+        );
+        assertLe(address(escrow).code.length, 24_576, "escrow over EIP-170");
+        assertLe(address(bonded).code.length, 24_576, "authorizer over EIP-170");
     }
 
     /// @notice The check is not vacuous: the 200-run hook build that a by-name `deployCode` would return inside this

@@ -362,6 +362,11 @@ interface ISharedCommitmentVault {
     /// @notice In adapter mode, a fill or a new allocation found no inventory target for the asset paid out; or a
     ///         target or tolerance is out of range.
     error InventoryBoundsNotConfigured();
+    /// @notice `realizeFee` was called by an address other than the installed fee escrow (or no escrow is installed).
+    error NotFeeEscrow(address caller);
+    /// @notice The address given to `setFeeEscrow` does not answer `vault()` with this vault (wrong vault, no code,
+    ///         no such getter).
+    error InvalidFeeEscrow(address escrow);
 
     // ------------------------------------------------------------------
     // Events
@@ -446,6 +451,10 @@ interface ISharedCommitmentVault {
     event AllocationReleased(
         uint256 indexed allocationId, address indexed by, uint256 unusedCapacity, CloseReason reason
     );
+    /// @notice The fee escrow changed from `previousEscrow` to `newEscrow` (zero: none; deposits then realize nothing).
+    event FeeEscrowSet(address indexed previousEscrow, address indexed newEscrow);
+    /// @notice The fee escrow paid `amount` raw units of earned reservation fees in `currency` into the backing.
+    event FeeRealized(Currency indexed currency, uint256 amount);
 
     // ------------------------------------------------------------------
     // Authorization module entry point
@@ -480,4 +489,16 @@ interface ISharedCommitmentVault {
     /// @param amountOut Raw output claims the vault sends.
     function exchange(PoolKey calldata key, bool zeroForOne, uint256 allocationId, uint256 amountIn, uint256 amountOut)
         external;
+
+    // ------------------------------------------------------------------
+    // Fee escrow entry point
+    // ------------------------------------------------------------------
+
+    /// @notice Add earned reservation fees to the backing of `currency`, pulling exactly `amount` claims from the
+    ///         caller.
+    /// @dev Callable only by the installed fee escrow, which must first give the vault an ERC-6909 allowance of at
+    ///      least `amount` in `currency`. Mints no shares: the fees accrue to every outstanding share pro rata.
+    /// @param currency asset0 or asset1.
+    /// @param amount Raw units of `currency`.
+    function realizeFee(Currency currency, uint256 amount) external;
 }

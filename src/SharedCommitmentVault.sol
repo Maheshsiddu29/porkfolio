@@ -15,6 +15,7 @@ import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 import {ISharedCommitmentVault, AUTH_MODULE_ID} from "./interfaces/ISharedCommitmentVault.sol";
 import {IVaultState} from "./interfaces/IVaultState.sol";
 import {IMarketRiskAdapter} from "./interfaces/IMarketRiskAdapter.sol";
+import {IBondEscrow} from "./interfaces/IBondEscrow.sol";
 import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
 
 /// @title SharedCommitmentVault
@@ -80,6 +81,7 @@ import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
 ///             the authorization module (a signed instruction, or a call to the module).
 ///   Module    The installed authorization module (`authModule`): the only caller of `reserveFor`.
 ///   Consumer  Registered hook that calls `exchange` against allocations made out to it.
+///   Escrow    The installed fee escrow (`_feeEscrow`): the only caller of `realizeFee`; moves earned fees in, never out.
 ///   LP        Anyone, after initialization: deposits, redeems, cancels and claims its own requests.
 ///
 /// Curator lifecycle. Each curator has a `CuratorRecord` with two independent controls and a counter:
@@ -91,9 +93,13 @@ import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
 /// is unrestricted, whether or not it is still registered. Freezing and revoking move no assets and keep every
 /// reservation in place; the reserved capacity is returned only when each allocation is released.
 ///
-/// Reentrancy. The vault calls three kinds of external code: the PoolManager (trusted, canonical v4), the two pair
-/// ERC-20s and nothing else. ERC-6909 claim transfers make no external calls, and `exchange` performs only claim
-/// transfers, so no foreign code runs inside it. Foreign code can run only inside an ERC-20 transfer: the deposit's
+/// Reentrancy. Besides read-only calls (installation checks of the module, adapter and escrow; adapter readings in
+/// fills), the vault calls the PoolManager (trusted, canonical v4), the two pair ERC-20s, and, at the start of
+/// `deposit` only, the installed fee escrow's `realize`, before `deposit` reads or writes anything. The escrow calls
+/// back `realizeFee`, which takes no lock (see there); any other entry point reached from inside the escrow's call
+/// reverts with `ReentrantCall`. ERC-6909 claim transfers make no external calls, and `exchange` performs only claim
+/// transfers, so no foreign code runs inside it. Apart from the escrow, foreign code can run only inside an ERC-20
+/// transfer: the deposit's
 /// `transferFrom` (from `unlockCallback`, through `_settleIn`) and the payout's `transfer` (made by the PoolManager
 /// inside `take`, through `_payOut`). In the deposit window B_a has already been raised but the matching claims
 /// are not minted yet, so B_a briefly exceeds the real claim balance. Every entry point that reads or changes
@@ -152,10 +158,21 @@ import {VaultRiskBoundary} from "./risk/VaultRiskBoundary.sol";
 /// every asset it had at least that much of. Hooks are expected to read the adapter from this vault; a hook that
 /// prices from anything else is still held to this boundary by `exchange`. See `_floorForFill`.
 ///
+/// Reservation fees. Fees for reserved capacity are charged and held outside the vault, by the fee escrow
+/// (`_feeEscrow`, installed by the owner with `setFeeEscrow`). The escrow's bonds are its own claims: they are never in
+/// B_a, never count for admission, exits or fills, and the vault cannot move them. Earned fees enter the vault through
+/// exactly one path, `realizeFee`, which only the installed escrow may call: B_a rises by the amount and the vault pulls
+/// exactly that many claims from the escrow, so N_a / S rises for every outstanding share (queued shares included) and
+/// no share is minted. `deposit` first asks the escrow to realize everything earned so far, so a new depositor pays a
+/// price that already includes those fees; if the escrow reverts, the deposit reverts. No other entry point calls the
+/// escrow: exits, queue processing, claims, swaps, release and cancellation work whatever state the escrow is in. An LP
+/// that exits between realizations does not receive its share of fees earned but not yet realized; those stay with
+/// the shares that remain. Anyone can call the escrow's `realize` first.
+///
 /// Not implemented here: rolling-window flow limits (the flow window is a fixed epoch; see `FLOW_WINDOW`),
 /// path-independent cumulative pricing, any guarantee that reserved capacity can still be sold later (LP exits,
 /// floors, oracle outages, pauses, halts, freezes and flow caps can all refuse a fill), transferable share tokens,
-/// and any protocol, curator, reservation or performance fee.
+/// a TVL or deposit cap, and any protocol, curator or performance fee charged by the vault itself.
 contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCallback {
     /// @notice Largest amount accepted for any single asset amount, per-asset backing, or the share supply:
     ///         2^127 - 1.
@@ -323,6 +340,10 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     /// @dev Expiry ring per asset; see "Expiry" in the contract documentation and `_sweep`. Starts all zero: the first
     ///      sweep finds the current bucket at or past maxBucket = 0 and sets swept to it without walking.
     mapping(Currency currency => ExpiryRing) internal _expiryRings;
+
+    /// @dev The fee escrow (see "Reservation fees"): the only caller `realizeFee` accepts, and the contract `deposit`
+    ///      asks to realize earned fees first. Zero: none installed; deposits realize nothing and no fee can enter.
+    address internal _feeEscrow;
 
     /// @dev Transient-storage (EIP-1153) slot of the reentrancy lock: keccak256 of
     ///      "porkfolio.SharedCommitmentVault.reentrancyLock". Transient storage is cleared at the end of every
@@ -794,6 +815,11 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
     ///
     ///      If one asset's N_a is zero (possible after a hook sold all of it), the deposit pays zero of it and a
     ///      non-zero amount of the other. Reverts while paused.
+    ///
+    ///      Fee checkpoint. With a fee escrow installed, the escrow's `realize()` runs before the price is computed,
+    ///      so reservation fees earned before this deposit are already in N_a and the new shares buy none of them. Any
+    ///      revert there (for example an escrow that has fallen behind) reverts the deposit; it never prices on a
+    ///      stale N_a. The escrow calls back `realizeFee`, which does not take the reentrancy lock this function holds.
     /// @param shares Shares to mint. Non-zero; S + shares must not exceed MAX_AMOUNT.
     /// @param maxAmount0 Most asset0 the caller is willing to pay (slippage bound against trades in between).
     /// @param maxAmount1 Most asset1 the caller is willing to pay.
@@ -812,6 +838,9 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         if (shares == 0) revert ZeroAmount();
         if (shares > MAX_AMOUNT - supply) revert AmountTooLarge();
 
+        // Fees earned so far enter N_a before the price is read (S is not changed by it).
+        address escrow = _feeEscrow;
+        if (escrow != address(0)) IBondEscrow(escrow).realize();
         (amount0, amount1) = _depositAmounts(shares, supply);
         if (amount0 > maxAmount0 || amount1 > maxAmount1) revert SlippageExceeded();
         if (amount0 > MAX_AMOUNT - backing[asset0] || amount1 > MAX_AMOUNT - backing[asset1]) {
@@ -1263,6 +1292,60 @@ contract SharedCommitmentVault is ISharedCommitmentVault, IVaultState, IUnlockCa
         if (_retiredAuthModule[module]) revert AuthModuleRetired(module);
         authModule = module;
         emit AuthModuleSet(previous, module, msg.sender);
+    }
+
+    /// @notice Install, replace or remove (zero) the fee escrow, the only caller `realizeFee` accepts and the contract
+    ///         `deposit` asks to realize earned fees first.
+    /// @dev Owner only; the guardian cannot call it (a change of fee custody is never risk-reducing). Under
+    ///      `VaultGovernor` this waits the ordinary delay. A non-zero `escrow` must answer `vault()` with this vault's
+    ///      address (one `staticcall`, read like the module check in `setAuthModule`: the call must succeed and return at
+    ///      least 32 bytes whose first word is this address), or the call reverts with `InvalidFeeEscrow`. That catches
+    ///      a wrong address, an account without code and an escrow built for another vault; it does not prove the code is
+    ///      the reviewed escrow.
+    ///
+    ///      Replacing an escrow that still holds open bonds strands the LP part of their remaining fees: the old escrow
+    ///      can still settle and refund, but its `realizeFee` calls revert from now on. The intended procedure is to
+    ///      stop new bonded reservations, let the old escrow's bonds expire and settle, realize, and only then replace
+    ///      it. Removing the escrow (zero) lets deposits proceed without realization if the escrow is broken; fees still
+    ///      in it then stop reaching LPs. No claims move in this call.
+    /// @param escrow New fee escrow, or zero for none.
+    function setFeeEscrow(address escrow) external {
+        _authorize(false);
+        if (escrow != address(0)) {
+            bool ok;
+            assembly ("memory-safe") {
+                mstore(0x00, 0xfbfa77cf) // vault()
+                let success := staticcall(gas(), escrow, 28, 4, 0x00, 0x20)
+                ok := and(success, and(gt(returndatasize(), 31), eq(mload(0x00), address())))
+            }
+            if (!ok) revert InvalidFeeEscrow(escrow);
+        }
+        emit FeeEscrowSet(_feeEscrow, escrow);
+        _feeEscrow = escrow;
+    }
+
+    /// @inheritdoc ISharedCommitmentVault
+    /// @dev Only the installed fee escrow (`NotFeeEscrow` otherwise; with none installed nobody qualifies). Effects:
+    ///      B_a += amount, then the vault pulls exactly `amount` claims of `currency` from the escrow with the
+    ///      PoolManager's `transferFrom`, which needs the escrow's ERC-6909 allowance (an exact allowance is consumed;
+    ///      a missing one reverts the whole call). The claim balance and B_a therefore rise together, so
+    ///      PoolManager.balanceOf(vault) - B_a does not change. Shares, W_a, Q_a and the queue are untouched: N_a and
+    ///      F_a rise by `amount`, and every outstanding share, queued ones included, gains amount / S of it.
+    ///
+    ///      Deliberately without the reentrancy lock: the escrow calls it from inside `deposit`, which holds the lock.
+    ///      It needs none: it only adds to B_a and moves the matching claims in the same call, reads B_a fresh, makes no
+    ///      call except the claim transfer, and no other entry point keeps a copy of B_a across a point where foreign
+    ///      code can run (`deposit` calls the escrow before it reads N_a). Works while paused. Reverts with
+    ///      `AmountTooLarge` if B_a would exceed MAX_AMOUNT and with `InvalidCurrency` outside the pair. Before
+    ///      initialization no allocation and therefore no fee can exist, so this is never called then.
+    function realizeFee(Currency currency, uint256 amount) external {
+        if (msg.sender != _feeEscrow) revert NotFeeEscrow(msg.sender);
+        _otherAsset(currency); // validates currency
+        uint256 b = backing[currency];
+        if (amount > MAX_AMOUNT - b) revert AmountTooLarge();
+        backing[currency] = b + amount;
+        poolManager.transferFrom(msg.sender, address(this), currency.toId(), amount);
+        emit FeeRealized(currency, amount);
     }
 
     /// @notice Close an allocation and return its unused capacity to free inventory.

@@ -298,7 +298,7 @@ abstract contract VaultTestBase is Test {
         return uint64(t - t % 1 hours);
     }
 
-    function _allocate(PoolKey memory key, Currency out, uint128 maxOut) internal returns (uint256 id) {
+    function _allocate(PoolKey memory key, Currency out, uint128 maxOut) internal virtual returns (uint256 id) {
         ISharedCommitmentVault.AllocationRequest memory req = _request(key, out, maxOut);
         vm.prank(curator);
         id = auth.activateDirect(req);

@@ -49,6 +49,8 @@ contract VaultStorageLayoutTest is VaultTestBase {
     // swept (uint64, bits 0-63) and maxBucket (uint64, bits 64-127); ring slot i is keccak256(abi.encode(i, h + 1)),
     // packing bucket (uint64, bits 0-63) and amount (uint128, bits 64-191).
     uint256 internal constant S_EXPIRY_RINGS = 28;
+    // _feeEscrow: address, bits 0-159.
+    uint256 internal constant S_FEE_ESCROW = 29;
 
     address internal lp1 = makeAddr("lp1");
     address internal lp2 = makeAddr("lp2");
@@ -403,6 +405,21 @@ contract VaultStorageLayoutTest is VaultTestBase {
         lens.inventoryTolerancePips(vault, 2);
     }
 
+    /// @notice Slot 29 holds the fee escrow (bits 0-159, nothing above), and the reader, the lens and the by-name getter
+    ///         agree on it before and after `setFeeEscrow`; a fuzzed word decodes the same through both.
+    function testFuzz_layout_feeEscrowSlot(bytes32 word) public {
+        assertEq(VaultStateReader.FEE_ESCROW_SLOT, S_FEE_ESCROW);
+        assertEq(_load(S_FEE_ESCROW), 0, "unset");
+        address target = address(new EscrowLookalike(address(vault)));
+        vm.prank(owner);
+        vault.setFeeEscrow(target);
+        assertEq(_load(S_FEE_ESCROW), uint256(uint160(target)), "slot 29 holds the escrow");
+        assertEq(ref.oldFeeEscrow(), target);
+        assertEq(lens.feeEscrow(vault), target);
+        vm.store(address(vault), bytes32(S_FEE_ESCROW), word);
+        assertEq(lens.feeEscrow(vault), ref.oldFeeEscrow(), "fuzzed word");
+    }
+
     // ------------------------------------------------------------------
     // 3. extsload
     // ------------------------------------------------------------------
@@ -412,5 +429,14 @@ contract VaultStorageLayoutTest is VaultTestBase {
         vm.store(address(vault), slot, word);
         vm.prank(caller);
         assertEq(vault.extsload(slot), word);
+    }
+}
+
+/// @dev Answers `vault()` like a fee escrow, which is all `setFeeEscrow` checks.
+contract EscrowLookalike {
+    address public immutable vault;
+
+    constructor(address vault_) {
+        vault = vault_;
     }
 }

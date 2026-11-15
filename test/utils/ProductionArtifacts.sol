@@ -48,6 +48,19 @@ library ProductionArtifacts {
         return VM.exists(both) ? both : "out/CuratorAuthorization.sol/CuratorAuthorization.json";
     }
 
+    /// @dev The fee escrow and the bonded authorization module, compiled with the default settings (same reason as
+    ///      `authModule`: a test file importing them together with the vault also builds them under the vault's
+    ///      profile).
+    function escrow() internal view returns (string memory) {
+        string memory both = "out/BondEscrow.sol/BondEscrow.default.json";
+        return VM.exists(both) ? both : "out/BondEscrow.sol/BondEscrow.json";
+    }
+
+    function commitmentAuthorizer() internal view returns (string memory) {
+        string memory both = "out/CommitmentAuthorizer.sol/CommitmentAuthorizer.default.json";
+        return VM.exists(both) ? both : "out/CommitmentAuthorizer.sol/CommitmentAuthorizer.json";
+    }
+
     /// @notice keccak256 of `code` with every immutable slot of `artifact` zeroed.
     /// @dev Immutables (the PoolManager and vault addresses in a hook, the pair in the vault) are written into the
     ///      runtime code at deployment, so deployed code differs from the artifact's `deployedBytecode` exactly at

@@ -24,8 +24,11 @@ interface IGovernedVault {
 ///              tolerance, revoke a hook...) are exercised directly on the vault, not here. Those vault limits also
 ///              bind every hook in shared-core mode, so tightening never waits for a hook change.
 ///
-/// Targets. A queued call names its target, which must be either `vault` or a hook whose immutable `hookOwner()` is this
-/// governor and whose `vault()` is `vault`. The operation id is keccak256(abi.encode(target, data)), so a queued change
+/// Targets. A queued call names its target, which must be `vault`, a hook whose immutable `hookOwner()` is this governor
+/// and whose `vault()` is `vault`, or a contract whose `owner()` is this governor and whose `vault()` is `vault` (the
+/// vault's fee escrow, whose setters accept only the vault's owner). Those answers are the target's own claims: they
+/// keep the admin from pointing the governor at an unrelated contract by mistake, and give the governor no authority it
+/// does not already have. The operation id is keccak256(abi.encode(target, data)), so a queued change
 /// binds the target, the selector and every argument; `execute` can only send exactly what was queued, to exactly the
 /// contract it was queued for. Nothing else is callable: this contract has no arbitrary-call path, no `delegatecall`,
 /// no upgrade and no way to change `admin`.
@@ -41,7 +44,7 @@ interface IGovernedVault {
 ///               basket), and a new owner need not be a timelock at all, so both get the longest notice. The class
 ///               follows the selector, not the direction of the change: a call that tightens when queued can loosen by
 ///               the time it executes if the guardian tightened further in between.
-///   DELAY       Every other vault call and every hook call, including changes that tighten. Immediate tightening is the
+///   DELAY       Every other vault call and every hook or fee-escrow call, including changes that tighten. Immediate tightening is the
 ///               guardian's job. `transferOwnership(address(0))` is here too: it only withdraws a pending nomination,
 ///               which no LP needs notice of, and holding it to LONG_DELAY and the queue check would leave a nominee
 ///               the admin wants to retract free to accept for as long as LPs are queued.
@@ -85,8 +88,10 @@ contract VaultGovernor {
     bytes4 internal constant _TRANSFER_OWNERSHIP = bytes4(keccak256("transferOwnership(address)"));
     bytes4 internal constant _SET_GUARDIAN = bytes4(keccak256("setGuardian(address)"));
     bytes4 internal constant _ACCEPT_OWNERSHIP = bytes4(keccak256("acceptOwnership()"));
-    /// @dev Getters a governed hook must answer: `hookOwner()` and `vault()`.
+    /// @dev Getters a governed hook must answer: `hookOwner()` and `vault()`; a governed fee escrow answers `owner()`
+    ///      and `vault()`.
     bytes4 internal constant _HOOK_OWNER = bytes4(keccak256("hookOwner()"));
+    bytes4 internal constant _OWNER = bytes4(keccak256("owner()"));
     bytes4 internal constant _VAULT = bytes4(keccak256("vault()"));
 
     /// @notice The vault this governor owns. Every governed hook must name it.
@@ -159,7 +164,8 @@ contract VaultGovernor {
 
     /// @notice Delay that `data` sent to `target` will wait once queued.
     /// @dev Reverts with `InvalidCall` for calldata shorter than a selector and with `InvalidTarget` for a target that is
-    ///      neither the vault nor one of its hooks owned by this governor.
+    ///      not the vault and does not answer `vault()` with the vault and either `hookOwner()` (a hook) or `owner()` (the
+    ///      fee escrow) with this governor.
     /// @param target Governed contract.
     /// @param data Calldata.
     /// @return Seconds: LONG_DELAY for the vault's `setInventoryBounds` and for its `transferOwnership` to a non-zero
@@ -167,9 +173,10 @@ contract VaultGovernor {
     function delayFor(address target, bytes calldata data) public view returns (uint256) {
         if (data.length < 4) revert InvalidCall();
         if (target != vault) {
-            if (_answer(target, _HOOK_OWNER) != address(this) || _answer(target, _VAULT) != vault) {
-                revert InvalidTarget(target);
-            }
+            if (
+                _answer(target, _VAULT) != vault
+                    || (_answer(target, _HOOK_OWNER) != address(this) && _answer(target, _OWNER) != address(this))
+            ) revert InvalidTarget(target);
             return DELAY;
         }
         return _isLong(data) ? LONG_DELAY : DELAY;
@@ -180,7 +187,8 @@ contract VaultGovernor {
     ///      can be canceled. Queuing the same target and calldata twice is refused, so a change can not be re-armed
     ///      with a fresh delay while an older copy is still pending. Calldata that differs only in bytes the target
     ///      ignores (for example trailing bytes) is a different id; monitors must decode `data`, not compare ids.
-    /// @param target `vault`, or a hook of `vault` whose `hookOwner()` is this contract.
+    /// @param target `vault`, a hook of `vault` whose `hookOwner()` is this contract, or the fee escrow of `vault`
+    ///        whose `owner()` is this contract.
     /// @param data Exact calldata to send to `target` later.
     /// @return id `operationId(target, data)`.
     /// @return when Earliest execution time, seconds since the epoch.

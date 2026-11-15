@@ -80,6 +80,8 @@ library VaultStateReader {
     ///      word keccak256(abi.encode(i, h + 1)), holding `bucket` (uint64, bits 0-63) and `amount` (uint128, bits
     ///      64-191). See `expiryRing` and `expiryBucket`.
     uint256 internal constant EXPIRY_RINGS_SLOT = 28;
+    /// @dev `_feeEscrow`: address, slot 29, bits 0-159.
+    uint256 internal constant FEE_ESCROW_SLOT = 29;
 
     // The vault's expiry ring parameters (internal constants there; pinned by test/unit/VaultStorageLayout.t.sol).
 
@@ -216,6 +218,30 @@ library VaultStateReader {
         a.maxOut = uint128(w);
         a.consumed = uint128(w >> 128);
         a.minInPerOutX96 = uint160(uint256(vault.extsload(bytes32(b + 6))));
+    }
+
+    /// @dev The parts of an allocation record that change after creation, plus what identifies its asset and term:
+    ///      words b+1 (`consumer`, `expiry`, `released`), b+4 (`currencyOut`) and b+5 (`maxOut`, `consumed`) of
+    ///      `getAllocation`'s layout. Three reads instead of seven, for callers (the fee escrow) that need only these.
+    function allocationState(IVaultState vault, uint256 allocationId)
+        internal
+        view
+        returns (address consumer, uint64 expiry, bool released, Currency currencyOut, uint128 maxOut, uint128 consumed)
+    {
+        uint256 b = uint256(_mapSlot(bytes32(allocationId), ALLOCATIONS_SLOT));
+        uint256 w = uint256(vault.extsload(bytes32(b + 1)));
+        consumer = address(uint160(w));
+        expiry = uint64(w >> 160);
+        released = (w >> 224) & 0xff != 0;
+        currencyOut = Currency.wrap(address(uint160(uint256(vault.extsload(bytes32(b + 4))))));
+        w = uint256(vault.extsload(bytes32(b + 5)));
+        maxOut = uint128(w);
+        consumed = uint128(w >> 128);
+    }
+
+    /// @dev The installed fee escrow; zero when none.
+    function feeEscrow(IVaultState vault) internal view returns (address) {
+        return address(uint160(uint256(vault.extsload(bytes32(FEE_ESCROW_SLOT)))));
     }
 
     /// @dev Withdrawal request record; all-zero for an unknown id. From the entry's base slot
