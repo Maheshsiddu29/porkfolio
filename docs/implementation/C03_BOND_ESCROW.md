@@ -452,3 +452,118 @@ mutation, live-fork, and external static-analysis runs are deferred.
 The fee escrow can be replaced while bonds are open, which strands its remaining LP fee share as demonstrated above;
 this is a governance choice for owner review, not a solved recovery path. No claim of audit, formal proof, guaranteed
 LP exit, or constant-time expiry follows from these tests.
+
+## 13. Final owner-review addendum
+
+### 13.1 Reproduced swap gas and its cause
+
+A `git archive` of C02 commit `3502d9b` was built in a separate temporary directory with the same pinned
+`forge-std` and v4-periphery submodules. Both trees used Foundry 1.7.1, solc 0.8.26, Cancun, via-IR,
+`bytecode_hash = none`, and 200 optimizer runs for `SharedCommitmentVault`. The benchmark fixture, both hooks and
+`foundry.toml` are unchanged between commits. Both trees ran `forge build --force` followed by
+`forge test --match-path test/bench/ProductionArtifactGas.t.sol --match-test test_bench_swap_hook --isolate -vvvv`.
+The measurement is `gasleft()` immediately around the same router swap with 1,000 tokens of exact input. Isolation
+gives each top-level call a separate transaction context. This standard fixture has no installed fee escrow.
+
+| Isolated call | C02 Hook A | C03 Hook A | C02 Hook B | C03 Hook B | Delta |
+|---|---:|---:|---:|---:|---:|
+| `SharedCommitmentVault.coreInputs()` | 3,203 | 3,250 | 3,203 | 3,250 | +47 |
+| `SharedCommitmentVault.exchange()` | 126,716 | 126,819 | 126,739 | 126,842 | +103 |
+| Full router, PoolManager, hook and vault swap | 275,410 | 275,560 | 257,542 | 257,692 | **+150** |
+
+Neither function body changed in source. A `forge test --debug --dump` opcode comparison explains the delta.
+`coreInputs()` executes one extra dispatcher `DUP1` (3 gas) and two extra selector comparisons (22 each): +47.
+`exchange()` executes that `DUP1` and one new comparison before its selector (+25); solc's changed dispatcher stack
+shape then generates 78 more gas of stack, arithmetic and jump instructions in the unchanged function body: +103.
+The debug steps count 28 `SLOAD`, 10 `SSTORE`, one `TLOAD`, two `TSTORE` and two PoolManager calls in `exchange` in
+both builds; `coreInputs` has one `SLOAD` in both. The PoolManager transfers and their gas are identical. Traces show
+no escrow call, fee sync, extra loop or new storage read. The increase is generated-code layout, not a new swap
+operation. The exact-gas-equality criterion in §10(8) remains an exception for owner decision; no benchmark threshold
+was relaxed.
+
+### 13.2 Escrow replacement: enforced checks and procedure
+
+G05 §7.5 calls for disabling new activations, closing or waiting for every old bond, settling all bonds, realizing
+all earned LP revenue, verifying no unpaid LP fee in either asset, then replacing the escrow and installing a new
+bonded authorizer. The safe test runs this sequence with the real PoolManager and the governor's DELAY. It also
+rechecks the drained state immediately before execution, after the delay.
+
+| Condition | Code enforcement | Safe-test observation |
+|---|---|---|
+| Only owner/governor changes `feeEscrow`; non-zero target answers `vault()` | Yes; governor imposes DELAY | Identity check does not verify bytecode or financial readiness. |
+| Stop new activations | Guardian can disable `authModule`; replacement does **not** require it | Old module is disabled and cannot reserve. |
+| Close/expire and settle all old bonds | `settle` requires observed close or expiry and is then permissionless; replacement does **not** require settlement | An early close and the last-expiry bond both settle. |
+| Realize through the final earned second | `realize` fails closed if behind; replacement does **not** require success | `EscrowBehind` occurs, permissionless calls catch up, and final fees are realized. |
+| Confirm no open collateral or unpaid LP fee in either asset | **Operator check only** | At handoff, `openBonds = accrued = 0`, `realized = settledCharges`, and `unrealized(...).lpPart = 0` in both assets. |
+| Preserve old refund and protocol liabilities | Yes | Those claims remain payable from the retired escrow; they need not be zero at handoff. |
+| Install a new bonded authorizer | Owner/governor action; vault does not verify its code is bonded | A new module activates a bond after the delayed installation. |
+
+The unsafe-replacement fixture strands **62.208 token units** of LP revenue after two days of a ten-day bond had
+already been realized. The new safe fixture transfers all **85.536 units** of LP fees before replacement while
+leaving **77.76 units** of payer refunds and **9.504 units** of protocol fees claimable from the old escrow; asset0
+has no bond or claims. A second test replaces an escrow with zero claims in both assets. These amounts are specific
+to the fixtures. The code still permits unsafe replacement, including after failed realization. Skipping the
+procedure can strand LP revenue without a rescue path. A monitored handoff checklist, reviewed target bytecode and
+the per-asset drain checks are therefore deployment prerequisites, even though the C03 implementation itself
+matches G05's procedural choice.
+
+### 13.3 DC-1 through DC-10: recommendations for owner decision
+
+The choices below come from §5. A recommendation is not approval.
+
+| Decision | Choice and alternative | Security implication and G05 compatibility | Recommendation |
+|---|---|---|---|
+| DC-1 | New `CommitmentAuthorizer` inheriting `CuratorAuthorization`; alternative: edit the old module | Reuses signature checks and fits G05. **Trust assumption:** the vault can still install the unbonded module; V2-5 depends on the reviewed bonded build. | Approve with a deployment bytecode and module-address gate. |
+| DC-2 | Fix `T_min` in each bond at posting; alternative: retroactive changes | Preserves accepted charges and G05's fixed bond terms. | Approve. |
+| DC-3 | `post`, `sync`, `settle` catch up at most 720 buckets; deposit `realize()` caps at 32; alternative: cap every walk | Keeps refunds permissionless but has bounded worst-case gas. Matches G05's fail-closed deposit; no constant-time claim. | Approve subject to worst-case gas review before deployment. |
+| DC-4 | Governor accepts `owner() = governor`, `vault() = vault`; alternative: installed-only target or allowlist | Allows pre-install and retired escrows as G05 needs, but also a matching lookalike. **Code-provenance trust remains external.** | Approve with bytecode review for queued targets. |
+| DC-5 | `setFeeEscrow` checks `vault()` only; alternative: code-hash allowlist or no check | Rejects wrong-vault contracts, but accepts a broken same-vault lookalike. **G05 A-7, reviewed installed bytecode, is not enforced.** | Approve only with installation bytecode verification. |
+| DC-6 | `post` requires latest, unused, unreleased, live, unbonded allocation; alternative: weaker freshness or stronger vault binding | Reduces stale bonding, but “latest” alone cannot prove same-transaction posting. **V2-5 atomicity relies on the installed bonded module.** | Approve with this limitation and DC-1's gate stated. |
+| DC-7 | `settle` releases an expired, unreleased vault allocation; alternative: separate keeper call | Clears lazy per-scope totals; a failed release reverts settlement. Explicit G05 §5.3 behavior. | Approve. |
+| DC-8 | Refund and protocol claims pay both assets to caller-chosen non-zero `to`; alternative: fixed recipient or per-asset calls | Payer can avoid a rejecting receiver; only protocol recipient can redirect its own claim. Fits G05/R-17; no new claimant. | Approve. |
+| DC-9 | `post` refuses unless its escrow is installed; alternative: retired escrow may post | Prevents new bonds whose LP fees cannot reach the vault; supports G05 V2-7. | Approve. |
+| DC-10 | Measure C-1 TVL cap only; alternative: implement now or deploy without it | **F-8 remains unresolved.** A cap can limit transient deposits but does not prove an economic-value loss bound. G05 assigns implementation to C04 only if approved. | Owner must decide the F-8 deployment policy; no automatic approval. |
+
+DC-1, DC-4, DC-5 and DC-6 expose installed-code and governance-target trust assumptions. DC-10 leaves a financial
+risk open. No row is silently approved because tests pass.
+
+### 13.4 Financial risk register carried forward
+
+1. **F-8 remains unresolved.** Bonds impose measured costs on fresh-capital queue blocking but provide no proven
+   deterrence bound; a zero rate charges nothing. An inventory-unit floor does not guarantee the same bound on
+   economic-value loss when token prices change.
+2. **Physical backing does not guarantee later execution.** LP exits, oracle outages, pauses, halts, curator
+   restrictions, flow caps and governance changes can refuse a live fill (G-R4/CE-2).
+3. **Lazy synchronization can overcharge the payer.** Consumption or close stops accruing only when observed;
+   delay costs `consumed · rate · delay` before raw-unit rounding. Anyone, including the payer, can sync.
+4. **Realization timing changes LP attribution.** An LP exiting first forfeits its part of unrealized fees to the
+   remaining shares. The observed 3.888 units are a fixture result, not a universal cap.
+5. **Unsafe replacement strands LP revenue.** Refund and protocol claims remain in the retired escrow, while its
+   unpaid LP fee cannot enter the vault after replacement.
+
+### 13.5 Reproducibility and status
+
+The closeout added `test/security/EscrowReplacement.t.sol`; it changed no production contract. The two new tests
+passed their focused run against the production vault and real PoolManager. The earlier 802-pass baseline becomes
+**804 passed, 0 failed, 8 skipped** because of those two tests; the eight skipped tests require an RPC endpoint.
+
+| Command | Observed result |
+|---|---|
+| `forge fmt --check` and `git diff --check` | Passed. |
+| `forge lint src` | Exit 0; 22 timestamp, 2 shift and 16 cast warnings, in the existing warning classes. |
+| `forge build` | Passed. Both `test/bench/run.sh` and `test/bench/security.sh` also ran a clean `forge build --force`. |
+| `test/bench/run.sh` | Passed artifact settings, EIP-170 checks and isolated production gas benchmarks. Vault 22,103 bytes, `BondEscrow` 15,905 and `CommitmentAuthorizer` 9,157; vault headroom 2,473 bytes and project-policy margin 425 bytes. Hook A/B swaps 275,560/257,692 gas. |
+| `test/bench/security.sh` | Passed production size gate, artifact build and security tests, then CI-profile full suite: 804/0/8. |
+| `forge test -vvv` | Default-profile full suite: 804/0/8. |
+| `python3 test/invariant/coverage.py` | All five non-vacuity campaigns passed, 64 seeds at depth 128 each. The bond campaign observed 567 posts, 448 fills, 250 late syncs, 475 settlements, 227 refund claims, 216 realizations and 194 deposits with earned fees. |
+
+The old C02 checkout and current tree both passed the same isolated swap benchmark under their identical pinned
+compiler and fixture settings (§13.1). The only difference from the prior test-count baseline is the two new safe
+handoff tests. Deep-profile invariants, mutation, RPC-dependent fork tests and external static analysis remain
+deferred. These passing checks do not establish an economic F-8 bound, later execution of every physically backed
+reservation, fair fee attribution to an exiting LP, or safety of a premature escrow replacement.
+
+**C03 PARTIAL for owner review.** The exact swap-gas-equality criterion needs the owner's documented 150-gas
+exception. DC-1 through DC-10, including the installed-code trust assumptions and unresolved F-8 deployment
+policy, need owner decisions. Unsafe escrow replacement remains possible in code; deployment requires an approved,
+monitored handoff procedure that verifies both assets immediately before execution. No C04 or P01 work begins.
