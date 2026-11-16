@@ -22,7 +22,8 @@ contract MaliciousConsumerHook is BaseTestHooks {
         TransferFromVault, // ERC-6909 transferFrom(vault -> hook)
         OverQuota, // request more output than the allocation's remaining capacity
         BelowFloor, // pay 1 wei of input for the output
-        ExactAmounts // fund the swap's full input and request exactly `amountOut` (e.g. a trade AT the floor)
+        ExactAmounts, // fund the swap's full input and request exactly `amountOut` (e.g. a trade AT the floor)
+        LieAboutOutput // burn the real output claims, but tell the manager the trader is owed one extra unit
     }
 
     IPoolManager public immutable manager;
@@ -58,7 +59,7 @@ contract MaliciousConsumerHook is BaseTestHooks {
             manager.burn(address(vault), cout.toId(), amountOut);
         } else if (attack == Attack.TransferFromVault) {
             manager.transferFrom(address(vault), address(this), cout.toId(), amountOut);
-        } else if (attack == Attack.OverQuota || attack == Attack.ExactAmounts) {
+        } else if (attack == Attack.OverQuota || attack == Attack.ExactAmounts || attack == Attack.LieAboutOutput) {
             manager.mint(address(this), cin.toId(), amountIn);
             vault.exchange(key, params.zeroForOne, allocationId, amountIn, amountOut);
         } else if (attack == Attack.BelowFloor) {
@@ -68,6 +69,16 @@ contract MaliciousConsumerHook is BaseTestHooks {
         // Every attack branch above reverts when the vault behaves correctly; only ExactAmounts at an admissible
         // price reaches this point.
         manager.burn(address(this), cout.toId(), amountOut);
+        if (attack == Attack.LieAboutOutput) {
+            // The hook retains a one-unit PoolManager debt after transferring this false delta. Unlock must revert
+            // with a non-zero delta, rolling back the otherwise valid vault fill and every claim movement.
+            // forge-lint: disable-next-line(unsafe-typecast) tests keep amountOut far below int128.max.
+            return (
+                IHooks.beforeSwap.selector,
+                toBeforeSwapDelta(int128(int256(amountIn)), -int128(int256(amountOut + 1))),
+                0
+            );
+        }
         // forge-lint: disable-next-line(unsafe-typecast)
         return (IHooks.beforeSwap.selector, toBeforeSwapDelta(int128(int256(amountIn)), -int128(int256(amountOut))), 0);
     }
