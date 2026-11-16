@@ -2,15 +2,16 @@
 
 UHI11: heterogeneous Uniswap v4 hooks drawing on a shared commitment vault (conditional commitment engine).
 
-This is a **Claude Code kickoff pack**, not a deployed protocol or completed Solidity implementation. It contains the user-supplied research blueprint, agent guardrails, a risk register, a scoped proof-of-feasibility task, and a schedule aligned with UHI11. The architecture is a *hypothesis* until tested against a pinned version of real Uniswap v4 contracts.
+The repository now contains a tested local implementation: a two-asset shared commitment vault, bounded hook and curator allocations, bonded reservations, fee settlement, two supported hook strategies, and an independently authored test hook. All hooks execute against the pinned real Uniswap v4 `PoolManager` in integration tests. Governance registration and authorized allocations are required; this is not a permissionless, audited, deployed, or production-ready protocol. The original research blueprint remains a proposal, and its claims must be checked against the pinned contracts.
+
+The current development evidence is in [the C03 bond escrow record](docs/implementation/C03_BOND_ESCROW.md) and [the C04 independent hook and capital-cap record](docs/implementation/C04_INDEPENDENT_HOOK.md). [The third-party integration guide](docs/THIRD_PARTY_HOOK_INTEGRATION.md) documents the public hook boundary. C03's unresolved F-8 economic griefing risk remains unresolved: bonds impose charges but establish no proven deterrence bound. C04's cap prototypes are isolated research patches and are not installed in the production vault.
 
 ## Getting started
 
-1. Extract the pack into a **new local repository directory** or carefully merge the documentation files into the existing project. Do not overwrite an existing `CLAUDE.md` without reviewing it.
-2. Open a terminal at the repository root; run `git status` and ensure it is the intended local repo.
-3. Launch Claude Code in the directory, and paste `prompts/01_FIRST_CLAUDE_TASK.md` into the conversation.
-4. Review its findings, patches, local commits, and test output before approving any second phase.
-5. **Manual publishing only**. Claude Code must not push/merge/open PRs, deploy, or use funded keys.
+1. Run `git status` and confirm the intended local branch and worktree.
+2. Run `forge build`, `forge test -vvv`, and `test/bench/run.sh` with the pinned submodules present.
+3. Read the current implementation records and integration guide before changing authorization, accounting, or hook settlement.
+4. Review local commits and validation evidence before any release action. Publishing and deployment require separate owner decisions.
 
 ## Design identity
 

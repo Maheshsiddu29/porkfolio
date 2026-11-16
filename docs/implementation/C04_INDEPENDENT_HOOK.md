@@ -144,7 +144,9 @@ specified allocation directly; it contains no allocation-count loop. This is evi
 transition, not a formal complexity proof or a universal gas bound. In a separate one-allocation bonded fixture,
 the same 1,000-unit input measured A **275,300**, B **257,634**, and C **244,197** gas; the price policies, output
 amounts and pool identities differ. The C03 production benchmark's hookless reference was **150,303** gas in its
-own fixture. These totals cannot be subtracted to attribute a precise isolated hook premium.
+own fixture. The arithmetic C-minus-A/B/hookless differences are **−31,103 / −13,437 / +93,894** gas. These totals
+cannot be subtracted to attribute a precise isolated hook premium because the quote policies and pool identities
+differ, and the hookless reference uses a separate fixture.
 
 Final production artifact and ABI/layout equality measurements are recorded in the validation section below.
 
@@ -159,6 +161,8 @@ LONG_DELAY governance operation blocked at day 32, despite every deposit remaini
 The fixture records 6.858530737598531710 units of bond principal posted, 4.443578920905094357 units of settled
 charges, 0.550304333954681824 units of refunds and an estimated 3.375895707623271008 units of coalition LP-fee
 recapture. The fourth bond is still open, so these amounts are **not** a closed-run total-loss calculation.
+For the settled portions alone, charged fees less that estimated LP rebate are
+1.067683213281823349 units; this excludes temporary capital and the open bond's eventual charge or refund.
 
 The one-day, half-term scenario matrix below changes honest backing, coalition capital and curator ceiling. Units
 are raw token units with 18 decimals. The rebate is the coalition's proportional claim on earned LP fees, assuming
@@ -184,6 +188,22 @@ tests show a per-call limit is bypassed by two permitted 100,000-unit deposits f
 LPs with proportional share minting. A coalition may borrow temporary capital; the test suite does not price that
 funding or derive an irreversible-loss bound. Raw inventory floors and reservations are not market-value guarantees.
 
+The inherited rate/term rows all use 10 million temporary capital units and reserve 100,500 output units. The
+coalition closes halfway through the term; values below are token units with 18 decimals. `net` deducts only the
+estimated coalition LP-fee rebate from the actual charge, and excludes borrowing cost and refundable bond principal.
+
+| Rate (raw per unit-second) | Term | Posted | Charged | Refund | Coalition rebate | Net charge | Deposit + activation gas |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 1 hour | 0 | 0 | 0 | 0 | 0 | 926,358 |
+| 0 | 1 day | 0 | 0 | 0 | 0 | 0 | 926,359 |
+| 0 | 9 days | 0 | 0 | 0 | 0 | 0 | 926,359 |
+| 1e9 | 1 hour | 0.2814 | 0.2814 | 0 | 0.12726 | 0.15414 | 1,050,535 |
+| 1e9 | 1 day | 8.6028 | 4.3416 | 4.2612 | 1.96344 | 2.37816 | 1,050,535 |
+| 1e9 | 9 days | 78.0684 | 39.0744 | 38.994 | 17.67096 | 21.40344 | 1,050,536 |
+| 1e12 | 1 hour | 281.4 | 281.4 | 0 | 127.26 | 154.14 | 1,050,537 |
+| 1e12 | 1 day | 8,602.8 | 4,341.6 | 4,261.2 | 1,963.44 | 2,378.16 | 1,050,537 |
+| 1e12 | 9 days | 78,068.4 | 39,074.4 | 38,994 | 17,670.96 | 21,403.44 | 1,050,538 |
+
 ## 9. C-1 isolated capital-admission prototypes
 
 The three unified patches in `docs/proposals/` are reviewable *research artifacts*. Each applied cleanly to the
@@ -208,6 +228,13 @@ These small nonzero deltas on paths that do not consult a cap are compiler layou
 evidence of an added external call on swaps. The exact scratch commands and results are retained in the local
 prototype logs and can be reproduced by applying each patch to a fresh isolated copy of `5ac4876` with pinned
 submodules. The patches themselves contain the boundary tests and benchmark fixture changes.
+
+A and B each add two persistent cap slots, public getters, an owner setter and a revert error to the vault ABI.
+C adds oracle-address and cap slots, corresponding getters, an owner setter and two errors, plus the external
+price-reference interface and an additional deposit-time trust boundary. All three would change vault storage
+layout, ABI, runtime and init code; none is compatible with C04-A's strict bytecode/interface equality condition.
+D uses existing controls and has no new ABI or layout cost. Prototype setters are scratch-only, without a proposed
+governance rollout or migration. The owner has approved research, not installation of any cap.
 
 A admits exact-cap deposits and refuses a deposit one raw unit above the cap. Earned fee realization can later make
 `N_a` exceed that deposit-only cap, as intended by its rule; swaps, redemptions, cancellation, settlement and refund
@@ -238,3 +265,72 @@ external-call, upgrade, oracle and fail-closed liveness trust. No such module or
 | Escrow replacement | C04 does not change escrow custody or replacement rules. | C03's safe replacement procedure remains an operator/governance requirement; unsafe replacement can strand earned LP revenue. |
 | External hooks | C's independent integration passes the local real-manager tests. | Registration, curator bonds, risk limits, governance and security review remain prerequisites. A malicious registered hook may consume authorized capacity at a permitted but economically poor price. |
 | Fork and external analysis | No Unichain RPC/block was configured; local tests use pinned v4 contracts. | Eight read-only fork tests skipped. Historical deep campaigns, broad mutation and external static analysis remain deferred to C05; no audit or production-readiness claim follows. |
+
+For a release decision, the owner still needs an explicit F-8 exposure and governance-liveness decision, a safe
+escrow replacement operating procedure, and a review of the accepted lazy-sync and fee-attribution tradeoffs.
+Unichain fork evidence, historical deep-profile runs, comprehensive mutation and external static analysis remain
+unperformed here. The C04 tests do not discharge those release questions.
+
+## 11. Validation record
+
+`forge fmt --check` and `git diff --check` pass. `forge build` exits zero. `forge lint src` exits zero with
+pre-existing diagnostic warnings on production Solidity; C04 changes no file in `src/`. The first post-integration
+`forge test -vvv` run passed **835 tests, 0 failed, 8 skipped**. It compiled before the additional specific
+native-liquidity callback assertion was added. The final-source `forge test -vvv` then passed **836 tests, 0 failed,
+8 RPC-dependent fork tests skipped** across 87 suites. The targeted
+`FOUNDRY_PROFILE=ci forge test --match-path test/integration/IndependentHookC.t.sol -vv` passes 4/4. The C security
+suite passes 14/14 under the same profile, and the F-8 research suite passes 7/7. The separately rerun precise
+native-liquidity callback test passes 1/1. The full `python3 test/invariant/coverage.py` gate passes all five
+campaigns, 64 seeded runs at depth 128 for each, with every required counter active enough and the required
+unexpected-failure counters at zero. `git apply --check` passes for each of the three isolated prototype patches.
+
+The isolated prototype tests were run from separate copies of `5ac4876` with the pinned submodule links and the
+same solc/via-IR/optimizer settings. A's cap boundary and successful normal-path test pass 2/2, B's split-deposit
+test passes 1/1, and C's price/failure/normal-path test passes 1/1. Scratch runs applying each rule to the F-8
+scenario pass the under-cap counterexample for A 1/1, split-deposit counterexamples for B 2/2, and the aggregate
+value-cap counterexample for C 1/1. These are deliberately isolated prototypes, not a production implementation.
+
+`test/bench/run.sh` exits zero after a forced production rebuild. It reproduces the starting compiler settings and
+sizes in section 3, including the vault's 22,103-byte runtime, 22,754-byte init code, 2,473-byte EIP-170 headroom
+and 425-byte project-policy margin. It reproduces A/B/hookless full-swap gas of 275,560/257,692/150,303.
+Artifact-by-artifact comparison against the starting manifest finds identical runtime and init bytes, canonical ABI
+hashes, compiler settings and sizes for `SharedCommitmentVault`, `CommitmentAuthorizer`, `BondEscrow`, both supported
+hooks and `VaultGovernor`. The vault's normalized `forge inspect` layout hash is still
+`9ac395e9eaa10be84841d87ca4db24e1a7ceb62f9b4749d60966be330f998358` across 32 top-level entries;
+its runtime keccak remains `0x577c987b8fb266277e2c1cdcdaf8774263927e4f2c10d34f1457b9b6847f91f2`.
+`git diff 9ac5006 -- src` is empty. Hook C registration and use therefore introduced no production vault bytecode,
+ABI, storage or source change.
+
+The final `forge test --match-path test/bench/IndependentHookCGas.t.sol --match-test test_bench_ --isolate -vv`
+passes 3/3 and reproduces the section 7 figures exactly: C at 250,752 gas with one or 200 live allocations, and
+one-allocation A/B/C full swaps at 275,300/257,634/244,197. A normal non-isolated `forge test -vvv` reports
+different gas totals because the warm/cold transaction context differs; it is a correctness run, not the gas
+comparison. The earlier `-vvvv` trace gave 128,819 gas inside `vault.exchange` in both allocation-count variants.
+
+`test/bench/security.sh` exits zero under `FOUNDRY_PROFILE=ci`. Its forced-rebuild size gate passes all eight
+production contracts, including the vault's required 2,048-byte headroom. The production-build fixture passes 4/4,
+the production-artifact security suite passes 25/25, and its full CI-profile suite passes **836 tests, 0 failed,
+8 RPC-dependent fork tests skipped** across 87 suites. A second post-script artifact comparison again finds the
+same six production runtime/init hashes, ABI hashes, compiler settings and sizes as the starting manifest.
+
+## 12. Changed-file inventory and review decision
+
+`test/utils/IndependentHookC.sol` is the independent implementation fixture. The real-manager integration and
+bonded lifecycle are in `test/integration/IndependentHookC.t.sol`; its adversarial companion is
+`test/security/IndependentHookC.t.sol`. The latter extends `test/utils/MaliciousConsumerHook.sol` only with an
+incorrect-output attack mode. `test/bench/IndependentHookCGas.t.sol` measures three-hook swaps and 1/200 live
+allocations. `test/security/CapitalCapResearch.t.sol` adds F-8 counterexamples. The three
+`docs/proposals/C04_CAP_{A,B,C}_RESEARCH.patch` files are isolated prototype source and test deltas, not installed
+production changes. `docs/THIRD_PARTY_HOOK_INTEGRATION.md` is the external-hook guide, `README.md` updates the
+project status, and this record contains the findings. No `src/` file, remote, or unrelated `AGENTS.md` changes.
+
+Local review commits: `5ac4876` establishes the C04 baseline; `19ae4b3` adds the independent Hook C, real-manager
+integration, adversarial tests, benchmark and guide; `a1cacf7` adds the F-8 counterexamples and isolated cap
+patches. The final README, precise callback assertion and closeout addendum are a separate local commit.
+
+**C04-A: PASS.** The final-source full and CI security gates passed. The independent
+hook consumes the public bonded allocation through the pinned manager, three pools reconcile one reserve, negative
+paths roll back, and production artifacts are identical. This is integration evidence, not an external-hook audit.
+**C04-B recommendation: RESEARCH COMPLETE.** A/B/C cap mechanisms were compiled, benchmarked and challenged in
+isolation; none establishes a defensible F-8 deterrence bound, and C violates the size policy. The owner has not
+approved any production cap. F-8 and the C03 financial/governance release questions remain open for owner review.

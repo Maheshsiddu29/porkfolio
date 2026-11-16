@@ -27,7 +27,11 @@ contract IndependentHookCSecurityTest is IndependentHookCIntegrationTest {
     ///         swap cannot bypass the vault by executing against a separately funded native curve.
     function test_nativeLiquidityAdd_rejected() public {
         PoolModifyLiquidityTest lpRouter = new PoolModifyLiquidityTest(manager);
-        vm.expectRevert();
+        _expectHookRevert(
+            address(hookC),
+            IHooks.beforeAddLiquidity.selector,
+            abi.encodeWithSelector(IndependentHookC.NativeLiquidityDisabled.selector)
+        );
         lpRouter.modifyLiquidity(keyC, ModifyLiquidityParams(-200, 200, 1 ether, 0), "");
         assertEq(_claims(address(hookC), c0), 0);
         assertEq(_claims(address(hookC), c1), 0);
