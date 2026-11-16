@@ -1,0 +1,93 @@
+--- a/src/SharedCommitmentVault.sol
++++ b/src/SharedCommitmentVault.sol
+@@ -344,6 +344,9 @@
+     /// @dev The fee escrow (see "Reservation fees"): the only caller `realizeFee` accepts, and the contract `deposit`
+     ///      asks to realize earned fees first. Zero: none installed; deposits realize nothing and no fee can enter.
+     address internal _feeEscrow;
++    uint256 public maxSingleDeposit0;
++    uint256 public maxSingleDeposit1;
++    error SingleDepositExceeded(uint256 amount, uint256 cap);
+ 
+     /// @dev Transient-storage (EIP-1153) slot of the reentrancy lock: keccak256 of
+     ///      "porkfolio.SharedCommitmentVault.reentrancyLock". Transient storage is cleared at the end of every
+@@ -803,6 +806,12 @@
+         emit Deposited(msg.sender, receiver, shares, amount0, amount1);
+     }
+ 
++    function setSingleDepositCaps(uint256 cap0, uint256 cap1) external {
++        if (msg.sender != owner) revert NotOwner();
++        maxSingleDeposit0 = cap0;
++        maxSingleDeposit1 = cap1;
++    }
++
+     /// @notice Buy exactly `shares` new shares by paying the current per-share amount of both assets.
+     /// @dev Permissionless once the vault is initialized. The caller pays amount_a = ceil(shares * N_a / S) of each
+     ///      asset, pulled with `transferFrom` from msg.sender. Example: with S = 1,000, N0 = 2,000 and N1 = 501,
+@@ -845,6 +854,12 @@
+         if (amount0 > maxAmount0 || amount1 > maxAmount1) revert SlippageExceeded();
+         if (amount0 > MAX_AMOUNT - backing[asset0] || amount1 > MAX_AMOUNT - backing[asset1]) {
+             revert AmountTooLarge();
++        }
++        if (maxSingleDeposit0 != 0 && amount0 > maxSingleDeposit0) {
++            revert SingleDepositExceeded(amount0, maxSingleDeposit0);
++        }
++        if (maxSingleDeposit1 != 0 && amount1 > maxSingleDeposit1) {
++            revert SingleDepositExceeded(amount1, maxSingleDeposit1);
+         }
+ 
+         totalShares = supply + shares;
+--- a/test/bench/ProductionArtifactGas.t.sol
++++ b/test/bench/ProductionArtifactGas.t.sol
+@@ -121,6 +121,9 @@
+         _approveAndFund(owner, address(vault), VAULT_FUNDING);
+         vm.prank(owner);
+         vault.initialDeposit(VAULT_FUNDING, VAULT_FUNDING, lp0);
++        vm.prank(owner);
++        (bool capSet,) = address(vault).call(abi.encodeWithSignature("setSingleDepositCaps(uint256,uint256)", 20_000_000 ether, 20_000_000 ether));
++        require(capSet, "cap setup failed");
+ 
+         _approveAndFund(trader, address(swapRouter), 10_000_000 ether);
+         _approveAndFund(lpA, address(vault), 10_000_000 ether);
+--- a/test/research/CapPrototype.t.sol
++++ b/test/research/CapPrototype.t.sol
+@@ -0,0 +1,20 @@
++// SPDX-License-Identifier: MIT
++pragma solidity 0.8.26;
++
++import {BondTestBase} from "../utils/BondTestBase.sol";
++
++contract CapPrototypeTest is BondTestBase {
++    function test_twoPermittedDepositsBypassSingleDepositLimit() public {
++        vm.prank(owner);
++        vault.setSingleDepositCaps(101_000 ether, 101_000 ether);
++        address lp = makeAddr("splitLp");
++        (uint256 a0, uint256 a1) = _depositShares(lp, 100_000 ether);
++        assertLe(a0, 101_000 ether);
++        assertLe(a1, 101_000 ether);
++        (a0, a1) = _depositShares(lp, 100_000 ether);
++        assertLe(a0, 101_000 ether);
++        assertLe(a1, 101_000 ether);
++        assertGt(lens.netAssets(vault, c0), 1_101_000 ether);
++        _redeem(lp, 1 ether, false);
++    }
++}
+--- a/test/security/CapitalCapResearch.t.sol
++++ b/test/security/CapitalCapResearch.t.sol
+@@ -65,6 +65,8 @@
+     ///         exceeds the honest backing and queues its withdrawal.
+     function test_f8_singleDepositLimit_splitDepositsStillBlock() public {
+         _redeem(lp0, 49_000 ether, false);
++        vm.prank(owner);
++        vault.setSingleDepositCaps(101_000 ether, 101_000 ether);
+         griefer.depositCapital(100_000 ether);
+         griefer.depositCapital(100_000 ether);
+         assertLe(lens.netAssets(vault, c0), RAW_CAP);
+@@ -82,6 +84,8 @@
+     ///         and the honest LP also queues behind that same reservation.
+     function test_f8_singleDepositLimit_twoLpIdentitiesStillBlock() public {
+         _redeem(lp0, 49_000 ether, false);
++        vm.prank(owner);
++        vault.setSingleDepositCaps(101_000 ether, 101_000 ether);
+         address lpA = makeAddr("coalitionA");
+         address lpB = makeAddr("coalitionB");
+         (uint256 a0, uint256 a1) = _depositShares(lpA, 100_000 ether);

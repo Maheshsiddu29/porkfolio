@@ -1,0 +1,119 @@
+--- a/src/SharedCommitmentVault.sol
++++ b/src/SharedCommitmentVault.sol
+@@ -344,6 +344,9 @@
+     /// @dev The fee escrow (see "Reservation fees"): the only caller `realizeFee` accepts, and the contract `deposit`
+     ///      asks to realize earned fees first. Zero: none installed; deposits realize nothing and no fee can enter.
+     address internal _feeEscrow;
++    uint256 public depositCap0;
++    uint256 public depositCap1;
++    error DepositCapExceeded(uint256 assets, uint256 cap);
+ 
+     /// @dev Transient-storage (EIP-1153) slot of the reentrancy lock: keccak256 of
+     ///      "porkfolio.SharedCommitmentVault.reentrancyLock". Transient storage is cleared at the end of every
+@@ -803,6 +806,12 @@
+         emit Deposited(msg.sender, receiver, shares, amount0, amount1);
+     }
+ 
++    function setDepositCaps(uint256 cap0, uint256 cap1) external {
++        if (msg.sender != owner) revert NotOwner();
++        depositCap0 = cap0;
++        depositCap1 = cap1;
++    }
++
+     /// @notice Buy exactly `shares` new shares by paying the current per-share amount of both assets.
+     /// @dev Permissionless once the vault is initialized. The caller pays amount_a = ceil(shares * N_a / S) of each
+     ///      asset, pulled with `transferFrom` from msg.sender. Example: with S = 1,000, N0 = 2,000 and N1 = 501,
+@@ -846,6 +855,10 @@
+         if (amount0 > MAX_AMOUNT - backing[asset0] || amount1 > MAX_AMOUNT - backing[asset1]) {
+             revert AmountTooLarge();
+         }
++        uint256 n0 = _netAssets(asset0) + amount0;
++        uint256 n1 = _netAssets(asset1) + amount1;
++        if (depositCap0 != 0 && n0 > depositCap0) revert DepositCapExceeded(n0, depositCap0);
++        if (depositCap1 != 0 && n1 > depositCap1) revert DepositCapExceeded(n1, depositCap1);
+ 
+         totalShares = supply + shares;
+         sharesOf[receiver] += shares;
+--- a/test/bench/ProductionArtifactGas.t.sol
++++ b/test/bench/ProductionArtifactGas.t.sol
+@@ -121,6 +121,9 @@
+         _approveAndFund(owner, address(vault), VAULT_FUNDING);
+         vm.prank(owner);
+         vault.initialDeposit(VAULT_FUNDING, VAULT_FUNDING, lp0);
++        vm.prank(owner);
++        (bool capSet,) = address(vault).call(abi.encodeWithSignature("setDepositCaps(uint256,uint256)", 20_000_000 ether, 20_000_000 ether));
++        require(capSet, "cap setup failed");
+ 
+         _approveAndFund(trader, address(swapRouter), 10_000_000 ether);
+         _approveAndFund(lpA, address(vault), 10_000_000 ether);
+--- a/test/research/CapPrototype.t.sol
++++ b/test/research/CapPrototype.t.sol
+@@ -0,0 +1,57 @@
++// SPDX-License-Identifier: MIT
++pragma solidity 0.8.26;
++
++import {BondTestBase} from "../utils/BondTestBase.sol";
++
++contract CapPrototypeTest is BondTestBase {
++    function test_exactPostDepositBoundaryAndOtherPaths() public {
++        address lp = makeAddr("capLp");
++        uint256 shares = 100_000 ether;
++        (uint256 amount0, uint256 amount1) = lens.previewDeposit(vault, shares);
++        uint256 cap0 = lens.netAssets(vault, c0) + amount0;
++        uint256 cap1 = lens.netAssets(vault, c1) + amount1;
++        vm.prank(owner);
++        vault.setDepositCaps(cap0, cap1);
++        _depositShares(lp, shares);
++        assertEq(lens.netAssets(vault, c0), cap0);
++        assertEq(lens.netAssets(vault, c1), cap1);
++        address blocked = makeAddr("blockedLp");
++        _fundLp(blocked, 1 ether, 1 ether);
++        vm.prank(blocked);
++        vm.expectRevert();
++        vault.deposit(1, type(uint256).max, type(uint256).max, blocked);
++
++        uint256 id = _allocate(keyA, c1, 1000 ether);
++        _swap(keyA, true, 100 ether, id);
++        assertGt(lens.netAssets(vault, c0), cap0, "trading can raise backing past a deposit-only cap");
++        vm.prank(curator);
++        vault.cancelAllocation(id);
++        escrow.sync(id);
++        escrow.settle(id);
++        escrow.realize(type(uint256).max);
++        vm.prank(curator);
++        escrow.claimRefund(curator);
++        _redeem(lp, 1 ether, false);
++        _assertEscrowIdentity();
++        _assertEquations();
++    }
++
++    function test_earnedFeesMayExceedDepositCapWithoutBeingBlocked() public {
++        uint256 n0 = lens.netAssets(vault, c0);
++        uint256 n1 = lens.netAssets(vault, c1);
++        vm.prank(owner);
++        vault.setDepositCaps(n0, n1);
++        uint256 id = _allocate(keyA, c1, 1000 ether);
++        vm.warp(vm.getBlockTimestamp() + 1 hours);
++        vm.prank(curator);
++        vault.cancelAllocation(id);
++        escrow.sync(id);
++        escrow.settle(id);
++        escrow.realize(type(uint256).max);
++        assertGt(lens.netAssets(vault, c1), n1, "fee realization can exceed deposit-only cap");
++        vm.prank(curator);
++        escrow.claimRefund(curator);
++        _redeem(lp0, 1 ether, false);
++        _assertEscrowIdentity();
++    }
++}
+--- a/test/security/CapitalCapResearch.t.sol
++++ b/test/security/CapitalCapResearch.t.sol
+@@ -18,6 +18,8 @@
+         _redeem(lp0, 49_000 ether, false);
+         uint256 honest = lens.netAssets(vault, c0);
+         assertEq(honest, 1000 ether);
++        vm.prank(owner);
++        vault.setDepositCaps(RAW_CAP, RAW_CAP);
+         VaultGovernor gov = new VaultGovernor(address(vault), admin, 3 days, 32 days, 7 days);
+         vm.prank(owner);
+         vault.transferOwnership(address(gov));

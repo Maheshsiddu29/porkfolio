@@ -1,0 +1,158 @@
+--- a/src/SharedCommitmentVault.sol
++++ b/src/SharedCommitmentVault.sol
+@@ -344,6 +344,10 @@
+     /// @dev The fee escrow (see "Reservation fees"): the only caller `realizeFee` accepts, and the contract `deposit`
+     ///      asks to realize earned fees first. Zero: none installed; deposits realize nothing and no fee can enter.
+     address internal _feeEscrow;
++    address public valueCapOracle;
++    uint256 public valueCap;
++    error ValueCapExceeded(uint256 value, uint256 cap);
++    error InvalidCapPrice();
+ 
+     /// @dev Transient-storage (EIP-1153) slot of the reentrancy lock: keccak256 of
+     ///      "porkfolio.SharedCommitmentVault.reentrancyLock". Transient storage is cleared at the end of every
+@@ -803,6 +807,13 @@
+         emit Deposited(msg.sender, receiver, shares, amount0, amount1);
+     }
+ 
++    function setValueCap(address oracle, uint256 cap) external {
++        if (msg.sender != owner) revert NotOwner();
++        if (cap != 0 && oracle == address(0)) revert InvalidCapPrice();
++        valueCapOracle = oracle;
++        valueCap = cap;
++    }
++
+     /// @notice Buy exactly `shares` new shares by paying the current per-share amount of both assets.
+     /// @dev Permissionless once the vault is initialized. The caller pays amount_a = ceil(shares * N_a / S) of each
+     ///      asset, pulled with `transferFrom` from msg.sender. Example: with S = 1,000, N0 = 2,000 and N1 = 501,
+@@ -845,6 +856,14 @@
+         if (amount0 > maxAmount0 || amount1 > maxAmount1) revert SlippageExceeded();
+         if (amount0 > MAX_AMOUNT - backing[asset0] || amount1 > MAX_AMOUNT - backing[asset1]) {
+             revert AmountTooLarge();
++        }
++        uint256 cap = valueCap;
++        if (cap != 0) {
++            (uint256 p0, uint256 p1) = ICapPrice(valueCapOracle).prices();
++            if (p0 == 0 || p1 == 0 || p0 > 1e27 || p1 > 1e27) revert InvalidCapPrice();
++            uint256 v0 = FullMath.mulDiv(_netAssets(asset0) + amount0, p0, 1e18);
++            uint256 v1 = FullMath.mulDiv(_netAssets(asset1) + amount1, p1, 1e18);
++            if (v0 > cap || v1 > cap - v0) revert ValueCapExceeded(v0 + v1, cap);
+         }
+ 
+         totalShares = supply + shares;
+@@ -1989,3 +2008,7 @@
+         return a > b ? a - b : 0;
+     }
+ }
++
++interface ICapPrice {
++    function prices() external view returns (uint256 price0, uint256 price1);
++}
+--- a/test/bench/ProductionArtifactGas.t.sol
++++ b/test/bench/ProductionArtifactGas.t.sol
+@@ -121,6 +121,10 @@
+         _approveAndFund(owner, address(vault), VAULT_FUNDING);
+         vm.prank(owner);
+         vault.initialDeposit(VAULT_FUNDING, VAULT_FUNDING, lp0);
++        CapPriceMock capOracle = new CapPriceMock();
++        vm.prank(owner);
++        (bool capSet,) = address(vault).call(abi.encodeWithSignature("setValueCap(address,uint256)", address(capOracle), 40_000_000 ether));
++        require(capSet, "cap setup failed");
+ 
+         _approveAndFund(trader, address(swapRouter), 10_000_000 ether);
+         _approveAndFund(lpA, address(vault), 10_000_000 ether);
+@@ -820,3 +824,9 @@
+         vault.setRiskLimit(scope, account, c1, type(uint104).max, 10_000);
+     }
+ }
++
++contract CapPriceMock {
++    function prices() external pure returns (uint256 p0, uint256 p1) {
++        return (1e18, 1e18);
++    }
++}
+--- a/test/research/CapPrototype.t.sol
++++ b/test/research/CapPrototype.t.sol
+@@ -0,0 +1,60 @@
++// SPDX-License-Identifier: MIT
++pragma solidity 0.8.26;
++
++import {BondTestBase} from "../utils/BondTestBase.sol";
++
++contract MutableCapPrice {
++    uint256 public p0 = 1e18;
++    uint256 public p1 = 1e18;
++    bool public broken;
++
++    function set(uint256 x, uint256 y, bool fail) external {
++        p0 = x;
++        p1 = y;
++        broken = fail;
++    }
++
++    function prices() external view returns (uint256, uint256) {
++        require(!broken, "price unavailable");
++        return (p0, p1);
++    }
++}
++
++contract CapPrototypeTest is BondTestBase {
++    function test_valueBoundaryPriceMovementAndFailure() public {
++        MutableCapPrice oracle = new MutableCapPrice();
++        uint256 shares = 100_000 ether;
++        (uint256 a0, uint256 a1) = lens.previewDeposit(vault, shares);
++        uint256 cap = lens.netAssets(vault, c0) + lens.netAssets(vault, c1) + a0 + a1;
++        vm.prank(owner);
++        vault.setValueCap(address(oracle), cap);
++        address lp = makeAddr("valueLp");
++        _depositShares(lp, shares);
++        address blocked = makeAddr("valueBlocked");
++        _fundLp(blocked, 1 ether, 1 ether);
++        vm.prank(blocked);
++        vm.expectRevert();
++        vault.deposit(1, type(uint256).max, type(uint256).max, blocked);
++
++        oracle.set(1e18, 2e18, false);
++        vm.prank(blocked);
++        vm.expectRevert();
++        vault.deposit(1, type(uint256).max, type(uint256).max, blocked);
++        oracle.set(1e18, 2e18, true);
++        vm.prank(blocked);
++        vm.expectRevert();
++        vault.deposit(1, type(uint256).max, type(uint256).max, blocked);
++
++        uint256 id = _allocate(keyA, c1, 1000 ether);
++        _swap(keyA, true, 100 ether, id);
++        vm.prank(curator);
++        vault.cancelAllocation(id);
++        escrow.sync(id);
++        escrow.settle(id);
++        escrow.realize(type(uint256).max);
++        vm.prank(curator);
++        escrow.claimRefund(curator);
++        _redeem(lp, 1 ether, false);
++        _assertEscrowIdentity();
++    }
++}
+--- a/test/security/CapitalCapResearch.t.sol
++++ b/test/security/CapitalCapResearch.t.sol
+@@ -18,6 +18,9 @@
+         _redeem(lp0, 49_000 ether, false);
+         uint256 honest = lens.netAssets(vault, c0);
+         assertEq(honest, 1000 ether);
++        StaticCapPrice price = new StaticCapPrice();
++        vm.prank(owner);
++        vault.setValueCap(address(price), 500_000 ether);
+         VaultGovernor gov = new VaultGovernor(address(vault), admin, 3 days, 32 days, 7 days);
+         vm.prank(owner);
+         vault.transferOwnership(address(gov));
+@@ -137,3 +140,9 @@
+         }
+     }
+ }
++
++contract StaticCapPrice {
++    function prices() external pure returns (uint256, uint256) {
++        return (1e18, 1e18);
++    }
++}
